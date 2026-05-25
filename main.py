@@ -50,7 +50,7 @@ def nav_html(active: str) -> str:
 BASE_CSS = """
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
   body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-    background: #0f172a; color: #e2e8f0; min-height: 100vh; padding: 24px; }
+    background: #0f172a; color: #e2e8f0; min-height: 100vh; padding: 24px; position: relative; }
   h1 { font-size: 1.6rem; font-weight: 700; color: #f8fafc; margin-bottom: 4px; }
   .subtitle { color: #64748b; font-size: .875rem; margin-bottom: 20px; }
   .nav { display: flex; gap: 8px; margin-bottom: 28px; }
@@ -71,6 +71,7 @@ BASE_CSS = """
   thead th { background: #0f172a; color: #64748b; font-weight: 600; padding: 12px 16px;
     text-align: left; font-size: .75rem; text-transform: uppercase;
     letter-spacing: .05em; border-bottom: 1px solid #334155; }
+  thead th.th-jour { text-align: center; width: 80px; }
   tbody tr { border-bottom: 1px solid #1e293b; transition: background .15s; }
   tbody tr:hover { background: #0f172a55; }
   td { padding: 14px 16px; vertical-align: middle; }
@@ -80,16 +81,26 @@ BASE_CSS = """
   td.last { color: #64748b; font-size: .8rem; white-space: nowrap; }
   td.url-cell { font-family: monospace; color: #94a3b8; font-size: .75rem;
     max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* Progression */
+  td.td-prog { min-width: 160px; }
   .progress-wrap { background: #0f172a; border-radius: 99px; height: 8px;
-    overflow: hidden; width: 100%; min-width: 120px; }
-  .progress-bar { height: 100%; border-radius: 99px; transition: width .4s; }
-  .day-label { font-size: .75rem; color: #64748b; margin-top: 4px; display: block; }
+    overflow: hidden; width: 100%; }
+  .progress-bar { height: 100%; border-radius: 99px; transition: width .6s ease; }
+  .day-label { font-size: .72rem; color: #475569; margin-top: 5px; display: block; text-align:center; }
+  /* Badge JOUR */
+  td.td-jour { text-align: center; width: 80px; }
   .day-badge { display: inline-flex; align-items: center; justify-content: center;
-    min-width: 58px; padding: 4px 10px; border-radius: 8px; font-weight: 700;
-    font-size: .8rem; background: #1e3a5f; color: #93c5fd; border: 1px solid #1e40af;
-    white-space: nowrap; }
-  .day-badge.done { background: #14532d; color: #86efac; border-color: #166534; }
-  .prog-cell { display: flex; align-items: center; gap: 10px; }
+    width: 62px; height: 62px; border-radius: 12px; font-weight: 800;
+    font-size: 1rem; background: #0f1f3d; color: #93c5fd;
+    border: 1.5px solid #1e40af;
+    box-shadow: 0 0 8px rgba(59,130,246,.25);
+    flex-direction: column; gap: 0; line-height: 1.1; }
+  .day-badge .badge-num { font-size: 1.3rem; font-weight: 900; color: #bfdbfe; }
+  .day-badge .badge-max { font-size: .65rem; color: #3b82f6; font-weight: 600; }
+  .day-badge.done { background: #052e16; border-color: #166534;
+    box-shadow: 0 0 8px rgba(34,197,94,.3); }
+  .day-badge.done .badge-num { color: #86efac; }
+  .day-badge.done .badge-max { color: #22c55e; }
   .badge { display: inline-block; padding: 3px 10px; border-radius: 99px;
     font-size: .72rem; font-weight: 600; }
   .badge.done    { background: #14532d; color: #86efac; }
@@ -114,6 +125,32 @@ BASE_CSS = """
     background: #22c55e; color: #fff; padding: 12px 20px;
     border-radius: 8px; font-weight: 600; z-index: 999; }
   .refresh { margin-top: 20px; text-align: center; color: #475569; font-size: .8rem; }
+  /* Indicateur erreur */
+  .err-dot { display:inline-flex; align-items:center; justify-content:center;
+    width:22px; height:22px; border-radius:50%; font-size:.75rem; font-weight:700;
+    margin-left:7px; vertical-align:middle; flex-shrink:0; cursor:default; }
+  .err-ok  { background:#14532d; color:#86efac; }
+  .err-warn { background:#450a0a; color:#fca5a5; border:1.5px solid #ef4444;
+    animation: pulse-err 2s ease-in-out infinite; }
+  @keyframes pulse-err {
+    0%,100% { box-shadow: 0 0 0 0 rgba(239,68,68,.5); }
+    50%      { box-shadow: 0 0 0 5px rgba(239,68,68,.0); } }
+  td.last-cell { color:#64748b; font-size:.8rem; white-space:nowrap; }
+  /* ── Logo neon ── */
+  .neon-logo { position: fixed; top: 20px; right: 24px; text-align: center; z-index: 200;
+    pointer-events: none; }
+  .neon-agency { display: block; font-size: .6rem; letter-spacing: .28em; font-weight: 700;
+    color: #f472b6; text-shadow: 0 0 6px #f472b6, 0 0 14px #ec4899;
+    margin-bottom: 4px; text-transform: uppercase; }
+  .neon-box { border: 1.5px solid rgba(168,85,247,.7); border-radius: 6px;
+    padding: 5px 14px 6px;
+    background: linear-gradient(160deg,rgba(88,28,135,.18) 0%,rgba(15,23,42,.0) 100%);
+    box-shadow: 0 0 14px rgba(168,85,247,.35), inset 0 0 14px rgba(168,85,247,.08); }
+  .neon-text { font-size: 1.45rem; font-weight: 900; letter-spacing: .06em;
+    background: linear-gradient(135deg, #e879f9 0%, #a855f7 45%, #7c3aed 100%);
+    -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+    background-clip: text;
+    filter: drop-shadow(0 0 6px rgba(168,85,247,.9)) drop-shadow(0 0 12px rgba(232,121,249,.5)); }
 """
 
 
@@ -166,7 +203,8 @@ def get_all_ids() -> list:
 def _default_profile(pid: str) -> dict:
     return {"id": pid, "day": 1, "start_date": None, "last_run": None,
             "done_today": False, "dms_sent": 0, "posts_done": 0,
-            "groups_joined": 0, "dm_responses": 0, "history": [], "status": "En attente"}
+            "groups_joined": 0, "dm_responses": 0, "history": [], "status": "En attente",
+            "last_error": ""}
 
 
 def load_data() -> dict:
@@ -193,7 +231,8 @@ def load_data() -> dict:
                          "last_run": row["last_run"], "done_today": row["done_today"],
                          "dms_sent": row["dms_sent"], "posts_done": row["posts_done"],
                          "groups_joined": row["groups_joined"], "dm_responses": row["dm_responses"],
-                         "history": row["history"] or [], "status": row["status"]}
+                         "history": row["history"] or [], "status": row["status"],
+                         "last_error": row.get("last_error") or ""}
 
         # Reset en base (une seule fois par jour au premier chargement)
         for pid in to_reset:
@@ -218,7 +257,8 @@ def save_profile(profile: dict):
             "last_run": profile["last_run"], "done_today": profile["done_today"],
             "dms_sent": profile["dms_sent"], "posts_done": profile["posts_done"],
             "groups_joined": profile["groups_joined"], "dm_responses": profile["dm_responses"],
-            "history": profile["history"], "status": profile["status"]}).execute()
+            "history": profile["history"], "status": profile["status"],
+            "last_error": profile.get("last_error", "")}).execute()
     except Exception as e:
         print(f"[!] save_profile error: {e}")
 
@@ -377,6 +417,7 @@ async def update_profile(request: Request):
     profile["posts_done"]    = body.get("posts_total", profile["posts_done"])
     profile["groups_joined"] = body.get("groups_joined", profile["groups_joined"])
     profile["dm_responses"]  = body.get("dm_responses", profile["dm_responses"])
+    profile["last_error"]    = body.get("last_error", "")
     if profile["day"] > 15:   profile["status"] = "Termine"
     elif profile["done_today"]: profile["status"] = "Fait aujourd'hui"
     else:                       profile["status"] = "En cours"
@@ -413,6 +454,14 @@ def get_status():
     return JSONResponse(load_data())
 
 
+def _err_dot(last_error: str) -> str:
+    """Retourne un rond vert (OK) ou rouge clignotant (erreur) avec tooltip."""
+    if last_error:
+        safe = last_error.replace('"', '&quot;').replace('<', '&lt;')[:200]
+        return f'<span class="err-dot err-warn" title="{safe}">⚠</span>'
+    return '<span class="err-dot err-ok" title="Aucune erreur">✓</span>'
+
+
 # ═══════════════════════════════════════════════════════════
 #  PAGE WARM-UP
 # ═══════════════════════════════════════════════════════════
@@ -443,19 +492,27 @@ def dashboard():
         pid = p["id"]
         day_display = min(day, 15)
         badge_cls = "day-badge done" if day > 15 else "day-badge"
-        badge_lbl = f"J{day_display} / 15"
         rows += f"""<tr>
-          <td class="num">{i}</td><td class="pid">{pid}</td>
-          <td><div class="prog-cell">
-            <div style="flex:1">
-              <div class="progress-wrap"><div class="progress-bar" style="width:{pct}%;background:#22c55e"></div></div>
-              <span class="day-label">{pct}%</span>
+          <td class="num">{i}</td>
+          <td class="pid">{pid}</td>
+          <td class="td-prog">
+            <div class="progress-wrap">
+              <div class="progress-bar" style="width:{pct}%;background:#22c55e"></div>
             </div>
-            <span class="{badge_cls}">{badge_lbl}</span>
-          </div></td>
-          <td class="center">{p['dms_sent']}</td><td class="center">{p['posts_done']}</td>
-          <td class="center">{p['groups_joined']}/16</td><td class="center">{p['dm_responses']}</td>
-          <td>{sb}</td><td class="last">{p['last_run'] or '—'}</td>
+            <span class="day-label">{pct}%</span>
+          </td>
+          <td class="td-jour">
+            <div class="{badge_cls}">
+              <span class="badge-num">{day_display}</span>
+              <span class="badge-max">/ 15</span>
+            </div>
+          </td>
+          <td class="center">{p['dms_sent']}</td>
+          <td class="center">{p['posts_done']}</td>
+          <td class="center">{p['groups_joined']}/16</td>
+          <td class="center">{p['dm_responses']}</td>
+          <td>{sb}</td>
+          <td class="last-cell">{p['last_run'] or '—'}{_err_dot(p.get('last_error',''))}</td>
           <td class="center"><button class="btn-del" onclick="delItem('{pid}','/api/profile/delete')" title="Supprimer">✕</button></td>
         </tr>"""
 
@@ -463,6 +520,10 @@ def dashboard():
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Warm-Up Tracker</title><style>{BASE_CSS}</style>
 <meta http-equiv="refresh" content="60"></head><body>
+  <div class="neon-logo">
+    <span class="neon-agency">Agency</span>
+    <div class="neon-box"><span class="neon-text">OF4MYM</span></div>
+  </div>
   <h1>Warm-Up Tracker</h1>
   <p class="subtitle">Suivi de {n} profils AdsPower</p>
   {nav_html("warmup")}
@@ -479,8 +540,9 @@ def dashboard():
     <div class="stat"><div class="stat-value">{finished}</div><div class="stat-label">Chauffes terminees</div></div>
   </div>
   <div class="card"><table><thead><tr>
-    <th>#</th><th>ID Profil</th><th style="min-width:200px">Progression</th>
-    <th>DMs</th><th>Posts</th><th>Groupes</th><th>Rep.</th><th>Statut</th><th>Derniere session</th><th></th>
+    <th>#</th><th>ID Profil</th><th style="min-width:180px">Progression</th>
+    <th class="th-jour">Jour</th>
+    <th>DMs</th><th>Posts</th><th>Groupes</th><th>Rep.</th><th>Statut</th><th>Derniere session / Etat</th><th></th>
   </tr></thead><tbody>{rows}</tbody></table></div>
   <p class="refresh">Mis a jour par warmup_v2.py apres chaque profil</p>
   {add_js('/api/profile/add', 'inp', 'Profil ajoute !')}
