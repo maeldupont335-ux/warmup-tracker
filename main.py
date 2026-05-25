@@ -68,14 +68,17 @@ BASE_CSS = """
   .card { background: #1e293b; border: 1px solid #334155; border-radius: 16px;
     overflow: hidden; margin-bottom: 24px; }
   table { width: 100%; border-collapse: collapse; font-size: .875rem; }
-  thead th { background: #0f172a; color: #64748b; font-weight: 600; padding: 12px 16px;
-    text-align: left; font-size: .75rem; text-transform: uppercase;
-    letter-spacing: .05em; border-bottom: 1px solid #334155; }
+  thead tr { background: #060c18; }
+  thead th { color: #3b5278; font-weight: 800; padding: 13px 16px;
+    text-align: center; font-size: .65rem; text-transform: uppercase;
+    letter-spacing: .14em; border-bottom: 2px solid #1e3a5f;
+    white-space: nowrap; }
+  thead th.th-l { text-align: left; }
   thead th.th-jour { text-align: center; width: 80px; }
   tbody tr { border-bottom: 1px solid #1e293b; transition: background .15s; }
   tbody tr:hover { background: #0f172a55; }
   td { padding: 14px 16px; vertical-align: middle; }
-  td.num { color: #64748b; font-weight: 600; width: 36px; }
+  td.num { color: #64748b; font-weight: 600; width: 36px; text-align: center; }
   td.pid { font-family: monospace; color: #94a3b8; font-size: .8rem; }
   td.center { text-align: center; }
   td.last { color: #64748b; font-size: .8rem; white-space: nowrap; }
@@ -142,7 +145,8 @@ BASE_CSS = """
   .err-tooltip-box  { display:none; width:280px; background:#1e293b; border:1px solid #ef4444;
     border-radius:12px; padding:14px 16px; z-index:9999;
     box-shadow:0 8px 32px rgba(239,68,68,.25), 0 2px 8px rgba(0,0,0,.5);
-    pointer-events:none; }
+    pointer-events:none;
+    white-space:normal; word-wrap:break-word; overflow-wrap:break-word; }
   .err-tooltip-box::after { content:''; position:absolute; bottom:-7px; right:8px;
     width:13px; height:13px; background:#1e293b; border-right:1px solid #ef4444;
     border-bottom:1px solid #ef4444; transform:rotate(45deg); }
@@ -154,6 +158,19 @@ BASE_CSS = """
   .err-tooltip-hint { font-size:.72rem; color:#64748b; margin-top:8px;
     padding-top:8px; border-top:1px solid #334155; line-height:1.4; }
   .err-ok-wrap { display:inline-flex; align-items:center; }
+  /* ── Graphique ── */
+  .chart-card { padding: 24px 24px 20px; }
+  .chart-header { display:flex; align-items:flex-start; justify-content:space-between;
+    margin-bottom:22px; }
+  .chart-title { color:#f8fafc; font-size:1rem; font-weight:700; margin-bottom:3px; }
+  .chart-sub { color:#475569; font-size:.75rem; }
+  .chart-legend { display:flex; align-items:center; gap:7px; font-size:.72rem;
+    color:#22c55e; font-weight:700; text-transform:uppercase; letter-spacing:.06em;
+    background:#0d2318; border:1px solid #166534; border-radius:99px; padding:4px 12px; }
+  .chart-legend::before { content:''; width:8px; height:8px; border-radius:50%;
+    background:#22c55e; flex-shrink:0;
+    box-shadow:0 0 6px rgba(34,197,94,.8); }
+  .chart-empty { padding:40px; text-align:center; color:#475569; font-size:.875rem; }
   /* ── Logo neon ── */
   .neon-logo { position: fixed; top: 20px; right: 24px; text-align: center; z-index: 200;
     pointer-events: none; }
@@ -598,9 +615,17 @@ def dashboard():
     <div class="stat"><div class="stat-value">{finished}</div><div class="stat-label">Chauffes terminees</div></div>
   </div>
   <div class="card"><table><thead><tr>
-    <th>#</th><th>ID Profil</th><th style="min-width:180px">Progression</th>
-    <th class="th-jour">Jour</th>
-    <th>DMs</th><th>Posts</th><th>Groupes</th><th>Rep.</th><th>Statut</th><th>Derniere session / Etat</th><th></th>
+    <th class="th-l" style="width:36px">#</th>
+    <th class="th-l">ID Profil</th>
+    <th class="th-l" style="min-width:180px">Progression</th>
+    <th>Jour</th>
+    <th>DMs</th>
+    <th>Posts</th>
+    <th>Groupes</th>
+    <th>Rép.</th>
+    <th>Statut</th>
+    <th>Dernière session</th>
+    <th style="width:40px"></th>
   </tr></thead><tbody>{rows}</tbody></table></div>
   <p class="refresh">Mis a jour par warmup_v2.py apres chaque profil</p>
   {add_js('/api/profile/add', 'inp', 'Profil ajoute !')}
@@ -649,6 +674,99 @@ def dashboard_massdm():
     taux_rep      = round(total_replied / total_sent * 100, 1) if total_sent > 0 else 0
     actifs        = sum(1 for p in profiles if p["status"] == "Actif")
 
+    # ── Graphique : DMs envoyés par jour (cumul tous profils) ──
+    from collections import defaultdict
+    _daily = defaultdict(int)
+    for p in profiles:
+        for entry in p.get("history", []):
+            d = (entry.get("date") or "")[:10]   # "dd/mm/yyyy"
+            if len(d) == 10:
+                _daily[d] += entry.get("sent", 0)
+
+    def _dk(d):
+        try:    return datetime.strptime(d, "%d/%m/%Y")
+        except: return datetime.min
+
+    _days      = sorted(_daily.keys(), key=_dk)[-14:]
+    _c_labels  = "[" + ",".join(f'"{x}"' for x in _days) + "]"
+    _c_data    = "[" + ",".join(str(_daily[x]) for x in _days) + "]"
+    _max_val   = max((_daily[x] for x in _days), default=0)
+
+    if _days:
+        chart_section = f"""
+<div class="card chart-card">
+  <div class="chart-header">
+    <div>
+      <p class="chart-title">DMs envoyés par jour</p>
+      <p class="chart-sub">Cumul de tous les profils &middot; 14 derniers jours</p>
+    </div>
+    <span class="chart-legend">Tous profils</span>
+  </div>
+  <canvas id="dmChart" height="90"></canvas>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<script>
+new Chart(document.getElementById('dmChart'), {{
+  type: 'line',
+  data: {{
+    labels: {_c_labels},
+    datasets: [{{
+      label: 'DMs envoyes',
+      data: {_c_data},
+      borderColor: '#22c55e',
+      backgroundColor: (ctx) => {{
+        const g = ctx.chart.ctx.createLinearGradient(0, 0, 0, ctx.chart.height);
+        g.addColorStop(0,   'rgba(34,197,94,.18)');
+        g.addColorStop(1,   'rgba(34,197,94,.01)');
+        return g;
+      }},
+      borderWidth: 2.5,
+      tension: 0.4,
+      fill: true,
+      pointBackgroundColor: '#22c55e',
+      pointBorderColor: '#0f172a',
+      pointBorderWidth: 2,
+      pointRadius: 5,
+      pointHoverRadius: 9,
+      pointHoverBackgroundColor: '#4ade80',
+    }}]
+  }},
+  options: {{
+    responsive: true,
+    interaction: {{ mode: 'index', intersect: false }},
+    plugins: {{
+      legend: {{ display: false }},
+      tooltip: {{
+        backgroundColor: '#1e293b',
+        borderColor: '#22c55e',
+        borderWidth: 1,
+        titleColor: '#94a3b8',
+        titleFont: {{ size: 11 }},
+        bodyColor: '#f8fafc',
+        bodyFont: {{ size: 13, weight: '700' }},
+        padding: 12,
+        cornerRadius: 10,
+        callbacks: {{ label: ctx => '  ' + ctx.raw + ' DMs envoyés' }}
+      }}
+    }},
+    scales: {{
+      x: {{
+        grid: {{ color: '#1a2639', drawBorder: false }},
+        ticks: {{ color: '#475569', font: {{ size: 11 }} }}
+      }},
+      y: {{
+        grid: {{ color: '#1a2639', drawBorder: false }},
+        ticks: {{ color: '#475569', font: {{ size: 11 }}, stepSize: Math.max(1, Math.ceil({_max_val}/6)) }},
+        beginAtZero: true,
+        suggestedMax: {_max_val} + 2
+      }}
+    }}
+  }}
+}});
+</script>"""
+    else:
+        chart_section = '<div class="card chart-empty">Aucune donnée — lance dm_sender.py pour voir les statistiques ici.</div>'
+
     rows = ""
     for i, p in enumerate(profiles, 1):
         sent    = p["dms_sent"]
@@ -686,9 +804,16 @@ def dashboard_massdm():
     <div class="stat"><div class="stat-value">{total_conv}</div><div class="stat-label">Conversions</div></div>
   </div>
   <div class="card"><table><thead><tr>
-    <th>#</th><th>ID Profil</th><th>DMs envoyes</th><th>Reponses</th>
-    <th style="min-width:160px">Taux reponse</th><th>Conversions</th><th>Statut</th><th>Derniere session</th>
+    <th class="th-l" style="width:36px">#</th>
+    <th class="th-l">ID Profil</th>
+    <th>DMs envoyés</th>
+    <th>Réponses</th>
+    <th style="min-width:160px">Taux réponse</th>
+    <th>Conversions</th>
+    <th>Statut</th>
+    <th>Dernière session</th>
   </tr></thead><tbody>{rows}</tbody></table></div>
+  {chart_section}
   <p class="refresh">Mis a jour par dm_sender.py apres chaque session</p>
 </body></html>"""
     return html
@@ -753,7 +878,12 @@ def dashboard_scraper():
   </div>
 
   <div class="card"><table><thead><tr>
-    <th>#</th><th>Lien du canal</th><th>Membres</th><th>Statut</th><th>Dernier scraping</th><th></th>
+    <th class="th-l" style="width:36px">#</th>
+    <th class="th-l">Lien du canal</th>
+    <th>Membres</th>
+    <th>Statut</th>
+    <th>Dernier scraping</th>
+    <th style="width:40px"></th>
   </tr></thead><tbody>{rows if rows else '<tr><td colspan="6" style="text-align:center;color:#64748b;padding:30px">Aucun canal — ajoutes-en un ci-dessus</td></tr>'}</tbody></table></div>
 
   <div class="card" style="padding:20px;background:#0f172a;border-color:#1e3a5f">
