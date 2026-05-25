@@ -12,6 +12,7 @@ POST /api/profile/add / /api/channel/add
 
 import os
 from datetime import datetime
+from zoneinfo import ZoneInfo
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -20,9 +21,15 @@ from supabase import create_client, Client
 app = FastAPI()
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
+PARIS_TZ = ZoneInfo("Europe/Paris")
+
+def now_paris(fmt: str = "%d/%m/%Y %H:%M") -> str:
+    """Retourne l'heure actuelle en fuseau horaire Europe/Paris."""
+    return datetime.now(PARIS_TZ).strftime(fmt)
+
 SECRET_TOKEN = os.environ.get("DASHBOARD_TOKEN", "Compte.1")
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "https://pirlgavzihmnwmqlyeir.supabase.co")
-SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "sb_publishable_MEhlBNL3fXiY72GgvQ7qZQ_8HLkKCHV")
+SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InBpcmxnYXZ6aWhtbndtcWx5ZWlyIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzk3MzQxMTAsImV4cCI6MjA5NTMxMDExMH0.0QdskD9IBsx1rUZ_7Sljb8DshovkQMJIhmnAM-Zc6Ps")
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
@@ -77,6 +84,12 @@ BASE_CSS = """
     overflow: hidden; width: 100%; min-width: 120px; }
   .progress-bar { height: 100%; border-radius: 99px; transition: width .4s; }
   .day-label { font-size: .75rem; color: #64748b; margin-top: 4px; display: block; }
+  .day-badge { display: inline-flex; align-items: center; justify-content: center;
+    min-width: 58px; padding: 4px 10px; border-radius: 8px; font-weight: 700;
+    font-size: .8rem; background: #1e3a5f; color: #93c5fd; border: 1px solid #1e40af;
+    white-space: nowrap; }
+  .day-badge.done { background: #14532d; color: #86efac; border-color: #166534; }
+  .prog-cell { display: flex; align-items: center; gap: 10px; }
   .badge { display: inline-block; padding: 3px 10px; border-radius: 99px;
     font-size: .72rem; font-weight: 600; }
   .badge.done    { background: #14532d; color: #86efac; }
@@ -160,13 +173,38 @@ def load_data() -> dict:
     try:
         result = supabase.table("profiles").select("*").execute()
         data = {}
+        today_str = now_paris("%d/%m/%Y")
+        to_reset = []
+
         for row in result.data:
             pid = row["id"]
+            last_run  = row.get("last_run") or ""
+            done_today = row.get("done_today", False)
+
+            # Auto-reset "Fait aujourd'hui" si last_run n'est pas aujourd'hui
+            if done_today and last_run:
+                last_run_date = last_run[:10]   # "dd/mm/yyyy"
+                if last_run_date != today_str:
+                    row["done_today"] = False
+                    row["status"]     = "En attente"
+                    to_reset.append(pid)
+
             data[pid] = {"id": row["id"], "day": row["day"], "start_date": row["start_date"],
                          "last_run": row["last_run"], "done_today": row["done_today"],
                          "dms_sent": row["dms_sent"], "posts_done": row["posts_done"],
                          "groups_joined": row["groups_joined"], "dm_responses": row["dm_responses"],
                          "history": row["history"] or [], "status": row["status"]}
+
+        # Reset en base (une seule fois par jour au premier chargement)
+        for pid in to_reset:
+            try:
+                supabase.table("profiles").update(
+                    {"done_today": False, "status": "En attente"}
+                ).eq("id", pid).execute()
+                print(f"[->] Reset done_today pour {pid} (nouveau jour)")
+            except Exception:
+                pass
+
         return data
     except Exception as e:
         print(f"[!] load_data error: {e}")
@@ -316,7 +354,7 @@ async def api_update_channel(request: Request):
         supabase.table("channels").update({
             "status":        body.get("status", "En attente"),
             "members_count": body.get("members_count", 0),
-            "last_scraped":  datetime.now().strftime("%d/%m/%Y %H:%M"),
+            "last_scraped":  now_paris(),
         }).eq("id", cid).execute()
         return {"ok": True}
     except Exception as e:
@@ -333,7 +371,7 @@ async def update_profile(request: Request):
     profile = data.get(pid, _default_profile(pid))
     profile["day"]           = body.get("day", profile["day"])
     profile["start_date"]    = body.get("start_date", profile["start_date"])
-    profile["last_run"]      = datetime.now().strftime("%d/%m/%Y %H:%M")
+    profile["last_run"]      = now_paris()
     profile["done_today"]    = body.get("done_today", False)
     profile["dms_sent"]      = body.get("dms_total", profile["dms_sent"])
     profile["posts_done"]    = body.get("posts_total", profile["posts_done"])
@@ -361,7 +399,7 @@ async def update_massdm_api(request: Request):
     profile["dms_sent"]    = body.get("dms_sent", profile["dms_sent"])
     profile["dms_replied"] = body.get("dms_replied", profile["dms_replied"])
     profile["conversions"] = body.get("conversions", profile["conversions"])
-    profile["last_run"]    = datetime.now().strftime("%d/%m/%Y %H:%M")
+    profile["last_run"]    = now_paris()
     profile["status"]      = body.get("status", "Actif")
     profile["history"].append({"date": profile["last_run"],
         "sent": body.get("dms_sent_session", 0), "replied": body.get("dms_replied", 0)})
@@ -394,16 +432,27 @@ def dashboard():
     rows = ""
     for i, p in enumerate(profiles, 1):
         day = p["day"]
-        pct = min(int(day / 15 * 100), 100)
-        if day > 15:       sb = '<span class="badge done">Termine ✓</span>'
+        # Jours completes = day si session faite aujourd'hui, sinon day-1
+        completed = day if p["done_today"] else max(day - 1, 0)
+        if day > 15: completed = 15
+        pct = min(int(completed / 15 * 100), 100)
+        if day > 15:          sb = '<span class="badge done">Termine ✓</span>'
         elif p["done_today"]: sb = '<span class="badge today">Fait auj. ✓</span>'
         elif p["last_run"]:   sb = '<span class="badge pending">A faire</span>'
         else:                 sb = '<span class="badge waiting">En attente</span>'
         pid = p["id"]
+        day_display = min(day, 15)
+        badge_cls = "day-badge done" if day > 15 else "day-badge"
+        badge_lbl = f"J{day_display} / 15"
         rows += f"""<tr>
           <td class="num">{i}</td><td class="pid">{pid}</td>
-          <td><div class="progress-wrap"><div class="progress-bar" style="width:{pct}%;background:#22c55e"></div></div>
-          <span class="day-label">J{min(day,15)}/15 — {pct}%</span></td>
+          <td><div class="prog-cell">
+            <div style="flex:1">
+              <div class="progress-wrap"><div class="progress-bar" style="width:{pct}%;background:#22c55e"></div></div>
+              <span class="day-label">{pct}%</span>
+            </div>
+            <span class="{badge_cls}">{badge_lbl}</span>
+          </div></td>
           <td class="center">{p['dms_sent']}</td><td class="center">{p['posts_done']}</td>
           <td class="center">{p['groups_joined']}/16</td><td class="center">{p['dm_responses']}</td>
           <td>{sb}</td><td class="last">{p['last_run'] or '—'}</td>
