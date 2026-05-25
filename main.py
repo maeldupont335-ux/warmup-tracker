@@ -1,4 +1,3 @@
-
 """
 Dashboard warm-up tracker — FastAPI
 POST /api/update  → reçoit les données du script warmup_v2.py
@@ -118,7 +117,7 @@ def dashboard():
     rows = ""
     for i, p in enumerate(profiles, 1):
         day    = p["day"]
-        pct    = min(int((day - 1) / 15 * 100), 100)
+        pct    = min(int(day / 15 * 100), 100)
         bar_w  = pct
 
         if day > 15:
@@ -221,11 +220,11 @@ def dashboard():
 </head>
 <body>
   <h1>Warm-Up Tracker</h1>
-  <p class="subtitle">Suivi des 10 profils AdsPower — rafraîchissement auto toutes les 60s</p>
+  <p class="subtitle">Suivi des 7 profils AdsPower — rafraîchissement auto toutes les 60s</p>
 
   <div class="stats">
     <div class="stat">
-      <div class="stat-value">{done_today}<span style="color:#334155;font-size:1.2rem">/10</span></div>
+      <div class="stat-value">{done_today}<span style="color:#334155;font-size:1.2rem">/7</span></div>
       <div class="stat-label">Faits aujourd'hui</div>
     </div>
     <div class="stat">
