@@ -1,22 +1,25 @@
 """
-Dashboard warm-up tracker — FastAPI
+Dashboard warm-up tracker — FastAPI + Supabase
 POST /api/update  → reçoit les données du script warmup_v2.py
 GET  /            → dashboard HTML
 GET  /api/status  → JSON brut
 """
 
-import json
 import os
 from datetime import datetime
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
+from supabase import create_client, Client
 
 app = FastAPI()
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 SECRET_TOKEN = os.environ.get("DASHBOARD_TOKEN", "Compte.1")
-DATA_FILE    = "data.json"
+SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
+SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "")
+
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 PROFILE_IDS = [
     "k1csfeja", "k1cup0ch", "k1cup0ci", "k1cup0cj",
@@ -24,32 +27,67 @@ PROFILE_IDS = [
 ]
 
 
-def load_data() -> dict:
-    if os.path.exists(DATA_FILE):
-        with open(DATA_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    return {pid: _default_profile(pid) for pid in PROFILE_IDS}
-
-
-def save_data(data: dict):
-    with open(DATA_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
-
-
 def _default_profile(pid: str) -> dict:
     return {
-        "id":           pid,
-        "day":          1,
-        "start_date":   None,
-        "last_run":     None,
-        "done_today":   False,
-        "dms_sent":     0,
-        "posts_done":   0,
+        "id":            pid,
+        "day":           1,
+        "start_date":    None,
+        "last_run":      None,
+        "done_today":    False,
+        "dms_sent":      0,
+        "posts_done":    0,
         "groups_joined": 0,
-        "dm_responses": 0,
-        "history":      [],
-        "status":       "En attente",
+        "dm_responses":  0,
+        "history":       [],
+        "status":        "En attente",
     }
+
+
+def load_data() -> dict:
+    try:
+        result = supabase.table("profiles").select("*").execute()
+        data = {}
+        for row in result.data:
+            pid = row["id"]
+            data[pid] = {
+                "id":            row["id"],
+                "day":           row["day"],
+                "start_date":    row["start_date"],
+                "last_run":      row["last_run"],
+                "done_today":    row["done_today"],
+                "dms_sent":      row["dms_sent"],
+                "posts_done":    row["posts_done"],
+                "groups_joined": row["groups_joined"],
+                "dm_responses":  row["dm_responses"],
+                "history":       row["history"] or [],
+                "status":        row["status"],
+            }
+        for pid in PROFILE_IDS:
+            if pid not in data:
+                data[pid] = _default_profile(pid)
+        return data
+    except Exception as e:
+        print(f"[!] Supabase load error: {e}")
+        return {pid: _default_profile(pid) for pid in PROFILE_IDS}
+
+
+def save_profile(profile: dict):
+    try:
+        supabase.table("profiles").upsert({
+            "id":            profile["id"],
+            "day":           profile["day"],
+            "start_date":    profile["start_date"],
+            "last_run":      profile["last_run"],
+            "done_today":    profile["done_today"],
+            "dms_sent":      profile["dms_sent"],
+            "posts_done":    profile["posts_done"],
+            "groups_joined": profile["groups_joined"],
+            "dm_responses":  profile["dm_responses"],
+            "history":       profile["history"],
+            "status":        profile["status"],
+        }).execute()
+    except Exception as e:
+        print(f"[!] Supabase save error: {e}")
 
 
 @app.post("/api/update")
@@ -59,12 +97,11 @@ async def update_profile(request: Request):
     if body.get("token") != SECRET_TOKEN:
         raise HTTPException(status_code=401, detail="Token invalide")
 
-    data = load_data()
-    pid  = body.get("profile_id")
-
+    pid = body.get("profile_id")
     if pid not in PROFILE_IDS:
         raise HTTPException(status_code=400, detail=f"Profil inconnu : {pid}")
 
+    data    = load_data()
     profile = data.get(pid, _default_profile(pid))
 
     profile["day"]           = body.get("day", profile["day"])
@@ -83,18 +120,16 @@ async def update_profile(request: Request):
     else:
         profile["status"] = "En cours"
 
-    # Ajoute une entrée dans l'historique
     profile["history"].append({
-        "date":      profile["last_run"],
-        "day":       profile["day"],
-        "dms":       body.get("dms_session", 0),
-        "posts":     body.get("posts_session", 0),
-        "dm_rep":    body.get("dm_responses", 0),
+        "date":   profile["last_run"],
+        "day":    profile["day"],
+        "dms":    body.get("dms_session", 0),
+        "posts":  body.get("posts_session", 0),
+        "dm_rep": body.get("dm_responses", 0),
     })
-    profile["history"] = profile["history"][-30:]  # Garde les 30 dernières entrées
+    profile["history"] = profile["history"][-30:]
 
-    data[pid] = profile
-    save_data(data)
+    save_profile(profile)
     return {"ok": True}
 
 
@@ -116,9 +151,9 @@ def dashboard():
 
     rows = ""
     for i, p in enumerate(profiles, 1):
-        day    = p["day"]
-        pct    = min(int(day / 15 * 100), 100)
-        bar_w  = pct
+        day   = p["day"]
+        pct   = min(int(day / 15 * 100), 100)
+        bar_w = pct
 
         if day > 15:
             status_badge = '<span class="badge done">Terminé ✓</span>'
@@ -167,7 +202,6 @@ def dashboard():
   }}
   h1 {{ font-size: 1.6rem; font-weight: 700; color: #f8fafc; margin-bottom: 4px; }}
   .subtitle {{ color: #64748b; font-size: .875rem; margin-bottom: 28px; }}
-
   .stats {{
     display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
     gap: 16px; margin-bottom: 32px;
@@ -178,7 +212,6 @@ def dashboard():
   }}
   .stat-value {{ font-size: 2rem; font-weight: 800; color: #f8fafc; }}
   .stat-label {{ font-size: .75rem; color: #64748b; margin-top: 4px; text-transform: uppercase; letter-spacing: .05em; }}
-
   .card {{
     background: #1e293b; border: 1px solid #334155; border-radius: 16px;
     overflow: hidden;
@@ -196,14 +229,12 @@ def dashboard():
   td.pid {{ font-family: monospace; color: #94a3b8; font-size: .8rem; }}
   td.center {{ text-align: center; }}
   td.last {{ color: #64748b; font-size: .8rem; white-space: nowrap; }}
-
   .progress-wrap {{
     background: #0f172a; border-radius: 99px; height: 8px;
     overflow: hidden; width: 100%; min-width: 120px;
   }}
   .progress-bar {{ height: 100%; border-radius: 99px; transition: width .4s; }}
   .day-label {{ font-size: .75rem; color: #64748b; margin-top: 4px; display: block; }}
-
   .badge {{
     display: inline-block; padding: 3px 10px; border-radius: 99px;
     font-size: .72rem; font-weight: 600;
@@ -212,7 +243,6 @@ def dashboard():
   .badge.today   {{ background: #1e3a5f; color: #93c5fd; }}
   .badge.pending {{ background: #451a03; color: #fcd34d; }}
   .badge.waiting {{ background: #1e293b; color: #64748b; border: 1px solid #334155; }}
-
   .refresh {{ margin-top: 20px; text-align: center; color: #475569; font-size: .8rem; }}
   a {{ color: #3b82f6; text-decoration: none; }}
 </style>
@@ -220,8 +250,7 @@ def dashboard():
 </head>
 <body>
   <h1>Warm-Up Tracker</h1>
-  <p class="subtitle">Suivi des 7 profils AdsPower — rafraîchissement auto toutes les 60s</p>
-
+  <p class="subtitle">Suivi des 7 profils AdsPower — rafraichissement auto toutes les 60s</p>
   <div class="stats">
     <div class="stat">
       <div class="stat-value">{done_today}<span style="color:#334155;font-size:1.2rem">/7</span></div>
@@ -229,7 +258,7 @@ def dashboard():
     </div>
     <div class="stat">
       <div class="stat-value">{total_dms}</div>
-      <div class="stat-label">DMs envoyés</div>
+      <div class="stat-label">DMs envoyes</div>
     </div>
     <div class="stat">
       <div class="stat-value">{total_posts}</div>
@@ -241,29 +270,23 @@ def dashboard():
     </div>
     <div class="stat">
       <div class="stat-value">{finished}</div>
-      <div class="stat-label">Chauffes terminées</div>
+      <div class="stat-label">Chauffes terminees</div>
     </div>
   </div>
-
   <div class="card">
     <table>
       <thead>
         <tr>
-          <th>#</th>
-          <th>ID Profil</th>
+          <th>#</th><th>ID Profil</th>
           <th style="min-width:200px">Progression</th>
-          <th>DMs</th>
-          <th>Posts</th>
-          <th>Groupes</th>
-          <th>Rép. DMs</th>
-          <th>Statut</th>
-          <th>Dernière session</th>
+          <th>DMs</th><th>Posts</th><th>Groupes</th>
+          <th>Rep. DMs</th><th>Statut</th><th>Derniere session</th>
         </tr>
       </thead>
       <tbody>{rows}</tbody>
     </table>
   </div>
-  <p class="refresh">Mis à jour par warmup_v2.py après chaque profil</p>
+  <p class="refresh">Mis a jour par warmup_v2.py apres chaque profil</p>
 </body>
 </html>"""
     return html
