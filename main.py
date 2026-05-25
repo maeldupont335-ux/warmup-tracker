@@ -128,14 +128,34 @@ BASE_CSS = """
   /* Indicateur erreur */
   .err-dot { display:inline-flex; align-items:center; justify-content:center;
     width:22px; height:22px; border-radius:50%; font-size:.75rem; font-weight:700;
-    margin-left:7px; vertical-align:middle; flex-shrink:0; cursor:default; }
+    margin-left:7px; vertical-align:middle; flex-shrink:0; cursor:pointer;
+    position:relative; }
   .err-ok  { background:#14532d; color:#86efac; }
   .err-warn { background:#450a0a; color:#fca5a5; border:1.5px solid #ef4444;
     animation: pulse-err 2s ease-in-out infinite; }
   @keyframes pulse-err {
     0%,100% { box-shadow: 0 0 0 0 rgba(239,68,68,.5); }
-    50%      { box-shadow: 0 0 0 5px rgba(239,68,68,.0); } }
+    50%      { box-shadow: 0 0 0 6px rgba(239,68,68,.0); } }
   td.last-cell { color:#64748b; font-size:.8rem; white-space:nowrap; }
+  /* Tooltip personnalise */
+  .err-tooltip-wrap { position:relative; display:inline-flex; align-items:center; }
+  .err-tooltip-box  { display:none; position:absolute; bottom:calc(100% + 10px); right:0;
+    width:280px; background:#1e293b; border:1px solid #ef4444;
+    border-radius:12px; padding:14px 16px; z-index:9999;
+    box-shadow:0 8px 32px rgba(239,68,68,.25), 0 2px 8px rgba(0,0,0,.5);
+    pointer-events:none; }
+  .err-tooltip-wrap:hover .err-tooltip-box { display:block; }
+  .err-tooltip-box::after { content:''; position:absolute; bottom:-7px; right:8px;
+    width:13px; height:13px; background:#1e293b; border-right:1px solid #ef4444;
+    border-bottom:1px solid #ef4444; transform:rotate(45deg); }
+  .err-tooltip-title { font-size:.75rem; font-weight:700; color:#fca5a5;
+    text-transform:uppercase; letter-spacing:.06em; margin-bottom:8px;
+    display:flex; align-items:center; gap:6px; }
+  .err-tooltip-title::before { content:'⚠'; font-size:.9rem; }
+  .err-tooltip-msg  { font-size:.8rem; color:#e2e8f0; line-height:1.5; }
+  .err-tooltip-hint { font-size:.72rem; color:#64748b; margin-top:8px;
+    padding-top:8px; border-top:1px solid #334155; line-height:1.4; }
+  .err-ok-wrap { display:inline-flex; align-items:center; }
   /* ── Logo neon ── */
   .neon-logo { position: fixed; top: 20px; right: 24px; text-align: center; z-index: 200;
     pointer-events: none; }
@@ -454,12 +474,52 @@ def get_status():
     return JSONResponse(load_data())
 
 
+def _traduire_erreur(err: str) -> tuple[str, str]:
+    """Traduit une erreur technique en message français clair. Retourne (message, conseil)."""
+    e = err.lower()
+    if "telegram non connecte" in e or "non connecte" in e:
+        return ("Aucun compte Telegram connecté sur ce profil AdsPower.",
+                "💡 Ouvre AdsPower, lance ce profil manuellement, connecte-toi à Telegram Web, puis relance le script.")
+    if "demarrage adspower" in e or "impossible de demarrer" in e:
+        return ("AdsPower n'a pas pu ouvrir ce profil navigateur.",
+                "💡 Vérifie qu'AdsPower est bien lancé et que le profil existe encore.")
+    if "fermeture adspower" in e or "stop" in e:
+        return ("Le profil AdsPower ne s'est pas fermé correctement après la session.",
+                "💡 Ferme manuellement le profil dans AdsPower si il est encore ouvert.")
+    if "navigation telegram" in e:
+        return ("Impossible d'accéder à Telegram Web sur ce profil.",
+                "💡 Vérifie la connexion internet du profil et que Telegram Web fonctionne.")
+    if "deconnexion playwright" in e:
+        return ("Le script a perdu le contrôle du navigateur en cours de session.",
+                "💡 Relance simplement le script, cela se règle souvent tout seul.")
+    if "erreur session critique" in e:
+        # Extrait le détail après "—"
+        detail = err.split("—")[-1].strip()[:120] if "—" in err else err[:120]
+        return (f"Erreur inattendue pendant la session : {detail}",
+                "💡 Regarde le terminal pour plus de détails et relance le script.")
+    # Erreur générique
+    msg = err[:150].replace("<", "&lt;")
+    return (f"Erreur technique : {msg}",
+            "💡 Consulte le terminal pour le détail complet de l'erreur.")
+
+
 def _err_dot(last_error: str) -> str:
-    """Retourne un rond vert (OK) ou rouge clignotant (erreur) avec tooltip."""
-    if last_error:
-        safe = last_error.replace('"', '&quot;').replace('<', '&lt;')[:200]
-        return f'<span class="err-dot err-warn" title="{safe}">⚠</span>'
-    return '<span class="err-dot err-ok" title="Aucune erreur">✓</span>'
+    """Retourne un indicateur vert (OK) ou rouge avec tooltip français stylé."""
+    if not last_error:
+        return '<span class="err-dot err-ok" title="Aucune erreur">✓</span>'
+
+    msg, conseil = _traduire_erreur(last_error)
+    msg_safe     = msg.replace("<", "&lt;").replace('"', "&quot;")
+    conseil_safe = conseil.replace("<", "&lt;").replace('"', "&quot;")
+
+    return f"""<span class="err-tooltip-wrap">
+      <span class="err-dot err-warn">⚠</span>
+      <div class="err-tooltip-box">
+        <div class="err-tooltip-title">Erreur détectée</div>
+        <div class="err-tooltip-msg">{msg_safe}</div>
+        <div class="err-tooltip-hint">{conseil_safe}</div>
+      </div>
+    </span>"""
 
 
 # ═══════════════════════════════════════════════════════════
