@@ -1,3 +1,4 @@
+
 """
 Dashboard warm-up tracker — FastAPI
 POST /api/update  → reçoit les données du script warmup_v2.py
@@ -15,12 +16,12 @@ from fastapi.middleware.cors import CORSMiddleware
 app = FastAPI()
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
-SECRET_TOKEN = os.environ.get("DASHBOARD_TOKEN", "changeme123")
+SECRET_TOKEN = os.environ.get("DASHBOARD_TOKEN", "Compte.1")
 DATA_FILE    = "data.json"
 
 PROFILE_IDS = [
-    "k1csfeja", "k1cuoyvc", "k1cup0ch", "k1cup0ci", "k1cup0cj",
-    "k1cup0ck", "k1cup0cl", "k1cup0cm", "k1cup0cn", "k1cup0co",
+    "k1csfeja", "k1cup0ch", "k1cup0ci", "k1cup0cj",
+    "k1cup0ck", "k1cup0cl", "k1cvbnrr",
 ]
 
 
