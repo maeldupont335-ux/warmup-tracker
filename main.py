@@ -139,12 +139,10 @@ BASE_CSS = """
   td.last-cell { color:#64748b; font-size:.8rem; white-space:nowrap; }
   /* Tooltip personnalise */
   .err-tooltip-wrap { position:relative; display:inline-flex; align-items:center; }
-  .err-tooltip-box  { display:none; position:absolute; bottom:calc(100% + 10px); right:0;
-    width:280px; background:#1e293b; border:1px solid #ef4444;
+  .err-tooltip-box  { display:none; width:280px; background:#1e293b; border:1px solid #ef4444;
     border-radius:12px; padding:14px 16px; z-index:9999;
     box-shadow:0 8px 32px rgba(239,68,68,.25), 0 2px 8px rgba(0,0,0,.5);
     pointer-events:none; }
-  .err-tooltip-wrap:hover .err-tooltip-box { display:block; }
   .err-tooltip-box::after { content:''; position:absolute; bottom:-7px; right:8px;
     width:13px; height:13px; background:#1e293b; border-right:1px solid #ef4444;
     border-bottom:1px solid #ef4444; transform:rotate(45deg); }
@@ -606,6 +604,31 @@ def dashboard():
   </tr></thead><tbody>{rows}</tbody></table></div>
   <p class="refresh">Mis a jour par warmup_v2.py apres chaque profil</p>
   {add_js('/api/profile/add', 'inp', 'Profil ajoute !')}
+<script>
+(function(){{
+  document.querySelectorAll('.err-tooltip-wrap').forEach(function(wrap){{
+    var box = wrap.querySelector('.err-tooltip-box');
+    if (!box) return;
+    wrap.addEventListener('mouseenter', function(){{
+      var dot = wrap.querySelector('.err-dot');
+      var r   = dot.getBoundingClientRect();
+      var W   = 280;
+      /* alignement horizontal : bord droit du tooltip = bord droit du point, sans deborder a gauche */
+      var left = Math.max(10, r.right - W);
+      /* afficher hors-ecran pour mesurer la hauteur reelle */
+      box.style.cssText = 'display:block;position:fixed;width:'+W+'px;left:'+left+'px;top:-9999px;right:auto;bottom:auto;z-index:9999;';
+      var H   = box.offsetHeight;
+      /* prefere au-dessus, bascule en-dessous si pas assez de place */
+      var top = r.top - H - 12;
+      if (top < 10) top = r.bottom + 8;
+      box.style.top = top + 'px';
+    }});
+    wrap.addEventListener('mouseleave', function(){{
+      box.style.display = 'none';
+    }});
+  }});
+}})();
+</script>
 </body></html>"""
     return html
 
@@ -648,6 +671,10 @@ def dashboard_massdm():
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Mass DM Tracker</title><style>{BASE_CSS}</style>
 <meta http-equiv="refresh" content="60"></head><body>
+  <div class="neon-logo">
+    <span class="neon-agency">Agency</span>
+    <div class="neon-box"><span class="neon-text">OF4MYM</span></div>
+  </div>
   <h1>Mass DM Tracker</h1>
   <p class="subtitle">Suivi des campagnes DM sur {n} profils</p>
   {nav_html("massdm")}
@@ -704,6 +731,10 @@ def dashboard_scraper():
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Scraper — Canaux</title><style>{BASE_CSS}</style>
 <meta http-equiv="refresh" content="30"></head><body>
+  <div class="neon-logo">
+    <span class="neon-agency">Agency</span>
+    <div class="neon-box"><span class="neon-text">OF4MYM</span></div>
+  </div>
   <h1>Scraper de canaux</h1>
   <p class="subtitle">Ajoute les canaux Telegram a scrapper pour le Mass DM</p>
   {nav_html("scraper")}
