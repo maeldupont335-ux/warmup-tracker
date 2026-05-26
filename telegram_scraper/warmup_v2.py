@@ -981,9 +981,11 @@ async def _ouvrir_via_recherche(page, username: str) -> bool:
     return True
 
 
-async def envoyer_dm_template(page, username: str, prenom: str, message: str, message2: str = "") -> bool:
-    """Envoie un DM via la barre de recherche Telegram Web K (approche stable)."""
-    print(f"    [->] DM template à @{username}...")
+async def envoyer_dm_template(page, username: str, prenom: str, messages: list) -> bool:
+    """Envoie 1 à 5 messages DM via la barre de recherche Telegram Web K.
+    messages = liste de strings déjà formatés (prenom remplacé).
+    """
+    print(f"    [->] DM template à @{username} ({len(messages)} msg)...")
     try:
         await page.bring_to_front()
         await page.wait_for_timeout(random.randint(800, 1500))
@@ -1033,18 +1035,19 @@ async def envoyer_dm_template(page, username: str, prenom: str, message: str, me
             return False
 
         # ── Envoyer le 1er message ────────────────────────────────
-        await type_message(page, real_input, message)
+        await type_message(page, real_input, messages[0])
 
-        # ── 2ème message si configuré ─────────────────────────────
-        if message2.strip():
-            delay2 = random.uniform(5, 18)
-            print(f"    [->] 2ème message dans {delay2:.0f}s...")
-            await page.wait_for_timeout(int(delay2 * 1000))
-            inp2 = await get_real_input(page)
-            if inp2:
-                await type_message(page, inp2, message2)
+        # ── Messages 2 à 5 avec délai aléatoire ──────────────────
+        for idx_m, msg in enumerate(messages[1:], 2):
+            if msg.strip():
+                delay_m = random.uniform(5, 18)
+                print(f"    [->] Message {idx_m}/{len(messages)} dans {delay_m:.0f}s...")
+                await page.wait_for_timeout(int(delay_m * 1000))
+                inp_next = await get_real_input(page)
+                if inp_next:
+                    await type_message(page, inp_next, msg)
 
-        print(f"    [OK] DM template envoyé à {prenom} (@{username})")
+        print(f"    [OK] DM template envoyé à {prenom} (@{username}) — {len(messages)} msg")
         return True
 
     except Exception as e:
@@ -1223,10 +1226,13 @@ async def run_direct_dm_for_profile(profile_id: str, profile_num: int, total: in
                     if not tmpl:
                         continue
 
-                    texte  = tmpl["content"].replace("{prenom}", prenom)
-                    texte2 = (tmpl.get("content2") or "").strip().replace("{prenom}", prenom)
+                    msgs = [tmpl["content"].replace("{prenom}", prenom)]
+                    for _key in ["content2", "content3", "content4", "content5"]:
+                        _v = (tmpl.get(_key) or "").strip().replace("{prenom}", prenom)
+                        if _v:
+                            msgs.append(_v)
 
-                    ok = await envoyer_dm_template(page, username, prenom, texte, texte2)
+                    ok = await envoyer_dm_template(page, username, prenom, msgs)
                     if ok:
                         progress["dms_sent"].append(username)
                         log_dm(profile_id, username, prenom)
@@ -1617,16 +1623,19 @@ async def run_warmup_for_profile(profile_id: str, profile_num: int, total: int,
 
 # ── Entrée principale ─────────────────────────────────────────
 
-async def main(force: bool = False, warmup_only: bool = False, massdm_only: bool = False):
+async def main(force: bool = False, warmup_only: bool = False, massdm_only: bool = False, target_profile: str = None):
     """
-    warmup_only=True : force le warm-up pour TOUS les profils, ignore le dm_mode,
-                       réinitialise done_today. (bouton 'Lancer Warm-Up')
-    massdm_only=True : lance uniquement les profils en mode direct_dm.
-                       (bouton 'Lancer Mass DM')
-    force=True       : relance même si déjà fait aujourd'hui (mode normal).
+    warmup_only=True    : force le warm-up pour TOUS les profils, ignore le dm_mode,
+                          réinitialise done_today. (bouton 'Lancer Warm-Up')
+    massdm_only=True    : lance uniquement les profils en mode direct_dm.
+                          (bouton 'Lancer Mass DM')
+    target_profile=pid  : restreint massdm_only à UN seul profil.
+                          (bouton ▶ Lancer par profil dans Mass DM)
+    force=True          : relance même si déjà fait aujourd'hui (mode normal).
     """
     args = [a for a in sys.argv[1:]
-            if a not in ("--daemon", "--auto", "--warmup-only", "--massdm-only")]
+            if a not in ("--daemon", "--auto", "--warmup-only", "--massdm-only",
+                         "--massdm-profile") and not a.startswith("--massdm-profile")]
 
     # ── --status ──────────────────────────────────────────────
     if "--status" in args:
@@ -1675,7 +1684,14 @@ async def main(force: bool = False, warmup_only: bool = False, massdm_only: bool
             (i, pid) for i, pid in profiles_to_run
             if (dash_modes.get(pid) or {}).get("dm_mode", "warmup") == "direct_dm"
         ]
-        if not dm_profiles:
+        # Si un profil cible est spécifié, on l'accepte même s'il n'est pas en direct_dm
+        # (le daemon le force directement via le bouton)
+        if target_profile:
+            dm_profiles = [(i, pid) for i, pid in profiles_to_run if pid == target_profile]
+            if not dm_profiles:
+                print(f"\n[!] Profil '{target_profile}' introuvable dans la liste des profils.")
+                return
+        elif not dm_profiles:
             print("\n[!] Aucun profil en mode Mass DM trouvé.")
             print("    → Passe d'abord des profils en mode Mass DM dans l'onglet Warm-Up du dashboard")
             return
@@ -1902,6 +1918,39 @@ def check_profile_change_triggers() -> list:
     return pids
 
 
+def check_profile_massdm_triggers() -> list:
+    """
+    Cherche les triggers __massdm_pid_<pid>__ dans channels.
+    Retourne la liste des profile_id à traiter et remet leur status à 'done'.
+    Permet de lancer le Mass DM pour un profil individuel depuis le dashboard.
+    """
+    pids = []
+    try:
+        r = requests.get(
+            f"{SUPABASE_URL}/rest/v1/channels",
+            headers=SUPABASE_HEADERS,
+            params={"url": "like.__massdm_pid__%", "select": "id,url,status"},
+            timeout=8,
+        )
+        rows = r.json() if r.status_code == 200 else []
+        for row in rows:
+            if row.get("status") == "triggered":
+                url = row.get("url", "")
+                pid = url.replace("__massdm_pid_", "").replace("__", "").strip()
+                if pid:
+                    pids.append(pid)
+                requests.patch(
+                    f"{SUPABASE_URL}/rest/v1/channels",
+                    headers=SUPABASE_HEADERS,
+                    params={"url": f"eq.{url}"},
+                    json={"status": "done"},
+                    timeout=8,
+                )
+    except Exception as e:
+        log(f"[!] check_profile_massdm_triggers erreur : {e}")
+    return pids
+
+
 async def daemon():
     """
     Mode daemon — tourne en continu.
@@ -1972,7 +2021,25 @@ async def daemon():
             except Exception as e:
                 log(f"[!] Erreur lancement profile_changer.py : {e}")
 
-        if not triggered and not massdm_triggered and not profile_pids:
+        # ── Trigger Mass DM par profil individuel ─────────────
+        try:
+            pid_dm_list = check_profile_massdm_triggers()
+        except Exception as e:
+            log(f"[!] Erreur poll massdm profil : {e}")
+            pid_dm_list = []
+
+        for pid in pid_dm_list:
+            log(f"[⚡] Mass DM individuel déclenché pour {pid} — lancement...")
+            try:
+                subprocess.Popen(
+                    [sys.executable, os.path.abspath(__file__), "--massdm-profile", pid],
+                    creationflags=subprocess.CREATE_NEW_CONSOLE,
+                )
+                log(f"[OK] Mass DM lancé pour {pid}")
+            except Exception as e:
+                log(f"[!] Erreur lancement Mass DM profil {pid} : {e}")
+
+        if not triggered and not massdm_triggered and not profile_pids and not pid_dm_list:
             log(f"[·] En attente du bouton dashboard...")
 
         await asyncio.sleep(30)
@@ -1985,7 +2052,12 @@ if __name__ == "__main__":
         # Lancé par le daemon via bouton "Lancer Warm-Up"
         asyncio.run(main(force=True, warmup_only=True))
     elif "--massdm-only" in sys.argv:
-        # Lancé par le daemon via bouton "Lancer Mass DM"
+        # Lancé par le daemon via bouton "Lancer Mass DM" (tous les profils direct_dm)
         asyncio.run(main(massdm_only=True))
+    elif "--massdm-profile" in sys.argv:
+        # Lancé par le daemon via bouton ▶ Lancer d'un profil individuel
+        _idx = sys.argv.index("--massdm-profile")
+        _pid = sys.argv[_idx + 1] if _idx + 1 < len(sys.argv) else None
+        asyncio.run(main(massdm_only=True, target_profile=_pid))
     else:
         asyncio.run(main())

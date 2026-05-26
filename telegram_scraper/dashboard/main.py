@@ -272,6 +272,11 @@ BASE_CSS = """
     border-radius:7px; padding:4px 10px; font-size:.68rem; font-weight:700;
     cursor:pointer; white-space:nowrap; transition:all .15s; }
   .btn-bio:hover { background:#1d4ed8; color:#fff; }
+  .btn-launch-profile { background:linear-gradient(135deg,#1e3a5f,#1e40af); border:none;
+    color:#93c5fd; border-radius:7px; padding:5px 12px; font-size:.7rem; font-weight:700;
+    cursor:pointer; transition:all .15s; white-space:nowrap; }
+  .btn-launch-profile:hover { background:linear-gradient(135deg,#1d4ed8,#2563eb); color:#fff; }
+  .btn-launch-profile:disabled { opacity:.45; cursor:not-allowed; }
   .btn-ddm { font-size:.65rem; font-weight:700; padding:4px 9px; border-radius:7px;
     border:none; cursor:pointer; transition:all .15s; white-space:nowrap; }
   .btn-ddm-warmup { background:#0f172a; color:#475569; border:1px solid #334155; }
@@ -500,11 +505,15 @@ async def api_add_dm_template(request: Request):
     name     = body.get("name", "").strip()
     content  = body.get("content", "").strip()
     content2 = body.get("content2", "").strip()
+    content3 = body.get("content3", "").strip()
+    content4 = body.get("content4", "").strip()
+    content5 = body.get("content5", "").strip()
     if not name or not content:
         raise HTTPException(status_code=400, detail="Nom et contenu requis")
     try:
         supabase.table("dm_templates").insert({
             "name": name, "content": content, "content2": content2,
+            "content3": content3, "content4": content4, "content5": content5,
             "active": True, "sends": 0, "replies": 0
         }).execute()
         return {"ok": True}
@@ -1186,11 +1195,18 @@ def dashboard_massdm():
         sends    = t.get("sends",    0)
         replies  = t.get("replies",  0)
         active   = t.get("active",   True)
-        content2 = (t.get("content2") or "").strip()
+        # Collecte tous les messages non-vides
+        all_contents = [t["content"]]
+        for _ck in ["content2", "content3", "content4", "content5"]:
+            _cv = (t.get(_ck) or "").strip()
+            if _cv:
+                all_contents.append(_cv)
+        msg_count = len(all_contents)
+
         rate     = round(replies / sends * 100, 1) if sends > 0 else 0
 
-        preview = t["content"][:110].replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
-        if len(t["content"]) > 110:
+        preview = all_contents[0][:110].replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
+        if len(all_contents[0]) > 110:
             preview += "…"
 
         color    = COLORS[idx % len(COLORS)]
@@ -1199,24 +1215,24 @@ def dashboard_massdm():
         tog_cls  = "btn-tpl btn-tpl-on" if active else "btn-tpl btn-tpl-off"
         name_esc = t["name"].replace("&","&amp;").replace("<","&lt;")
         best_badge = '<span class="winner-badge">🏆 Meilleur</span>' if tid == best_id else ""
-        msg2_badge = '<span class="msg2-badge">✉×2</span>' if content2 else ""
+        msg_count_badge = f'<span class="msg2-badge">✉×{msg_count}</span>' if msg_count > 1 else ""
 
-        # Aperçu du 2ème message
-        preview2_html = ""
-        if content2:
-            prev2 = content2[:90].replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
-            if len(content2) > 90:
-                prev2 += "…"
-            preview2_html = f'<pre class="tpl-preview tpl-preview2">{prev2}</pre>'
+        # Aperçus des messages 2→5
+        extra_previews_html = ""
+        for _ei, _ec in enumerate(all_contents[1:], 2):
+            _ep = _ec[:90].replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
+            if len(_ec) > 90:
+                _ep += "…"
+            extra_previews_html += f'<pre class="tpl-preview tpl-preview2"><span style="color:#475569;font-size:.65rem;font-weight:700;">MSG {_ei}</span> {_ep}</pre>'
 
         tpl_cards_html += f"""
 <div class="{card_cls}">
   <div class="tpl-name">
     <span class="tpl-num" style="background:{color}22;color:{color};border:1px solid {color}55;">T{idx+1}</span>
-    {name_esc}{best_badge}{msg2_badge}
+    {name_esc}{best_badge}{msg_count_badge}
   </div>
-  <pre class="tpl-preview">{preview}</pre>
-  {preview2_html}
+  <pre class="tpl-preview"><span style="color:#475569;font-size:.65rem;font-weight:700;">MSG 1</span> {preview}</pre>
+  {extra_previews_html}
   <div class="tpl-stats">
     <div class="tstat"><div class="tstat-val blue">{sends}</div><div class="tstat-lab">Envoyés</div></div>
     <div class="tstat"><div class="tstat-val green">{replies}</div><div class="tstat-lab">Réponses</div></div>
@@ -1450,6 +1466,11 @@ def dashboard_massdm():
             mode_badge = f'<button class="btn-ddm btn-ddm-warmup" onclick="toggleModeMassDm(\'{pid}\',\'direct_dm\')" title="Passer en Mass DM">WU→DM</button>'
             row_style  = 'style="opacity:.45"'  # profil en warm-up : grisé
 
+        if dm_mode == "direct_dm":
+            launch_btn = f'<button class="btn-launch-profile" onclick="launchProfileDm(\'{pid}\')" title="Lancer Mass DM pour ce profil">▶ Lancer</button>'
+        else:
+            launch_btn = '<span style="color:#334155;font-size:.7rem">—</span>'
+
         rows += f"""<tr {row_style}>
           <td class="num">{i}</td><td class="pid">{pid}</td>
           <td class="center">{sent}</td><td class="center">{replied}</td>
@@ -1457,6 +1478,7 @@ def dashboard_massdm():
           <span class="day-label">{taux}% de réponse</span></td>
           <td class="center">{p['conversions']}</td><td>{sb}</td>
           <td class="center">{mode_badge}</td>
+          <td class="center">{launch_btn}</td>
           <td class="last" style="white-space:nowrap;">
             {p['last_run'] or '—'}&nbsp;
             <button class="btn-bio" style="border-color:{bio_color};color:{bio_color};"
@@ -1498,9 +1520,9 @@ def dashboard_massdm():
     <div class="add-box" style="border:none;padding:0;margin:0;flex-wrap:wrap;align-items:flex-start;">
       <div style="display:flex;flex-direction:column;flex:1;gap:8px;min-width:260px;">
         <input id="tname" type="text" placeholder="Nom du template  ex: Template A — Recrutement court">
-        <textarea id="tcontent" class="add-textarea" placeholder="1er message...&#10;Utilise {{prenom}} pour personnaliser.&#10;Ctrl+Entrée pour ajouter."></textarea>
-        <button class="btn-add-msg2" onclick="toggleMsg2()" id="btnMsg2">➕ Ajouter un 2ème message (optionnel — envoyé 5-18s après)</button>
-        <textarea id="tcontent2" class="add-textarea" placeholder="2ème message (optionnel)...&#10;Sera envoyé 5 à 18 secondes après le premier.&#10;Utilise aussi {{prenom}}." style="display:none;border-color:#1e3a5f;"></textarea>
+        <textarea id="tcontent" class="add-textarea" placeholder="Message 1 (obligatoire)&#10;Utilise {{prenom}} pour personnaliser."></textarea>
+        <div id="extra-msgs-container"></div>
+        <button class="btn-add-msg2" onclick="addExtraMsg()" id="btnAddMsg">➕ Ajouter un message supplémentaire (max 5 — envoyé 5-18s après le précédent)</button>
       </div>
       <button onclick="addTpl()" style="align-self:flex-end;height:40px;white-space:nowrap;margin-top:0;">+ Ajouter</button>
     </div>
@@ -1524,6 +1546,7 @@ def dashboard_massdm():
     <th>Conversions</th>
     <th>Statut</th>
     <th>Mode</th>
+    <th>Action</th>
     <th>Dernière session</th>
   </tr></thead><tbody>{rows}</tbody></table></div>
 
@@ -1560,25 +1583,52 @@ async function _post(url, body) {{
     body: JSON.stringify(Object.assign({{token:'Compte.1'}}, body))}});
   return r.json();
 }}
-function toggleMsg2() {{
-  const ta  = document.getElementById('tcontent2');
-  const btn = document.getElementById('btnMsg2');
-  if (ta.style.display === 'none') {{
-    ta.style.display = 'block';
-    btn.textContent = '✕ Supprimer le 2ème message';
-    btn.style.borderColor = '#ef4444'; btn.style.color = '#fca5a5';
-  }} else {{
-    ta.style.display = 'none'; ta.value = '';
-    btn.textContent = '➕ Ajouter un 2ème message (optionnel — envoyé 5-18s après)';
-    btn.style.borderColor = ''; btn.style.color = '';
+// ── Gestion dynamique des messages supplémentaires (max 5) ──
+let _extraMsgCount = 0;
+function addExtraMsg() {{
+  if (_extraMsgCount >= 4) return; // déjà 5 messages (1 de base + 4 extra)
+  _extraMsgCount++;
+  const n = _extraMsgCount + 1; // numéro affiché (2, 3, 4, 5)
+  const container = document.getElementById('extra-msgs-container');
+  const wrapper = document.createElement('div');
+  wrapper.id = `extra-msg-wrapper-${{n}}`;
+  wrapper.style = 'position:relative;';
+  wrapper.innerHTML = `
+    <textarea id="tcontent${{n}}" class="add-textarea"
+      placeholder="Message ${{n}} (optionnel — envoyé 5-18s après le précédent)&#10;Utilise aussi {{prenom}}."
+      style="border-color:#1e3a5f;padding-right:36px;"></textarea>
+    <button onclick="removeExtraMsg(${{n}})" title="Supprimer ce message"
+      style="position:absolute;top:6px;right:6px;background:#450a0a;border:none;color:#fca5a5;
+             border-radius:5px;width:24px;height:24px;cursor:pointer;font-size:.8rem;line-height:1;">✕</button>
+  `;
+  container.appendChild(wrapper);
+  if (_extraMsgCount >= 4) {{
+    document.getElementById('btnAddMsg').style.display = 'none';
   }}
 }}
+function removeExtraMsg(n) {{
+  const w = document.getElementById(`extra-msg-wrapper-${{n}}`);
+  if (w) w.remove();
+  _extraMsgCount--;
+  document.getElementById('btnAddMsg').style.display = 'block';
+}}
+function _resetTplForm() {{
+  document.getElementById('tname').value = '';
+  document.getElementById('tcontent').value = '';
+  document.getElementById('extra-msgs-container').innerHTML = '';
+  _extraMsgCount = 0;
+  document.getElementById('btnAddMsg').style.display = 'block';
+}}
 async function addTpl() {{
-  const name     = document.getElementById('tname').value.trim();
-  const content  = document.getElementById('tcontent').value.trim();
-  const content2 = document.getElementById('tcontent2').value.trim();
+  const name    = document.getElementById('tname').value.trim();
+  const content = document.getElementById('tcontent').value.trim();
   if (!name || !content) {{ alert('Nom et contenu requis.'); return; }}
-  const d = await _post('/api/dm_template/add', {{name, content, content2}});
+  const body = {{name, content}};
+  for (let i = 2; i <= 5; i++) {{
+    const el = document.getElementById('tcontent' + i);
+    if (el) body['content' + i] = el.value.trim();
+  }}
+  const d = await _post('/api/dm_template/add', body);
   if (d.ok) {{ showToast('Template ajouté !'); setTimeout(() => location.reload(), 1200); }}
   else alert('Erreur : ' + (d.detail || JSON.stringify(d)));
 }}
@@ -1596,10 +1646,8 @@ async function replyTpl(id) {{
   if (d.ok) {{ showToast('+1 réponse enregistrée !'); setTimeout(() => location.reload(), 800); }}
 }}
 document.addEventListener('DOMContentLoaded', () => {{
-  ['tcontent','tcontent2'].forEach(id => {{
-    const ta = document.getElementById(id);
-    if (ta) ta.addEventListener('keydown', e => {{ if (e.key==='Enter' && e.ctrlKey) addTpl(); }});
-  }});
+  const ta = document.getElementById('tcontent');
+  if (ta) ta.addEventListener('keydown', e => {{ if (e.key==='Enter' && e.ctrlKey) addTpl(); }});
 }});
 let _bioPid = '';
 function openBioModal(pid, currentBio) {{
@@ -1651,6 +1699,36 @@ async function launchMassDm() {{
   }} catch(e) {{
     btn.disabled = false;
     btn.textContent = '⚡ Lancer le Mass DM maintenant';
+    alert('Erreur Supabase : ' + e.message);
+  }}
+}}
+async function launchProfileDm(pid) {{
+  const btn = event.currentTarget;
+  btn.disabled = true;
+  btn.textContent = '⏳...';
+  const SUPA_URL = 'https://pirlgavzihmnwmqlyeir.supabase.co';
+  const SUPA_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InBpcmxnYXZ6aWhtbndtcWx5ZWlyIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzk3MzQxMTAsImV4cCI6MjA5NTMxMDExMH0.0QdskD9IBsx1rUZ_7Sljb8DshovkQMJIhmnAM-Zc6Ps';
+  try {{
+    const r = await fetch(`${{SUPA_URL}}/rest/v1/channels`, {{
+      method: 'POST',
+      headers: {{
+        'apikey': SUPA_KEY,
+        'Authorization': `Bearer ${{SUPA_KEY}}`,
+        'Content-Type': 'application/json',
+        'Prefer': 'resolution=merge-duplicates,return=minimal'
+      }},
+      body: JSON.stringify({{url:`__massdm_pid_${{pid}}__`, status:'triggered', members_count:0}})
+    }});
+    if (r.ok || r.status === 201 || r.status === 200) {{
+      btn.textContent = '✓ Lancé';
+      btn.style.background = '#14532d';
+      showToast(`⚡ Mass DM lancé pour ${{pid}} — démarrage dans ~30s`);
+    }} else {{
+      throw new Error(await r.text());
+    }}
+  }} catch(e) {{
+    btn.disabled = false;
+    btn.textContent = '▶ Lancer';
     alert('Erreur Supabase : ' + e.message);
   }}
 }}
