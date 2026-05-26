@@ -830,12 +830,20 @@ async def envoyer_dm_template(page, username: str, prenom: str, message: str, me
                             wait_until="domcontentloaded", timeout=15000)
         except Exception:
             pass
-        # Attendre que la chatlist soit prête (SPA initialisé)
+        # Attendre que la chatlist soit prête
         try:
             await page.wait_for_selector("li.chatlist-chat, .chatlist", timeout=8000)
         except Exception:
             pass
         await page.wait_for_timeout(1500)
+        # Ferme tout modal / barre de recherche AVANT de naviguer vers le contact
+        # (sinon la recherche ouverte bloque la conversation derrière)
+        for _ in range(2):
+            try:
+                await page.keyboard.press("Escape")
+                await page.wait_for_timeout(300)
+            except Exception:
+                pass
 
         # ── Étape 2 : navigation vers le profil ───────────────────
         try:
