@@ -39,7 +39,12 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 # ═══════════════════════════════════════════════════════════
 
 def nav_html(active: str) -> str:
-    pages = [("warmup", "/", "Warm-Up"), ("massdm", "/massdm", "Mass DM"), ("scraper", "/scraper", "Scraper")]
+    pages = [
+        ("warmup",  "/",       "Warm-Up"),
+        ("massdm",  "/massdm", "Mass DM"),
+        ("scraper", "/scraper","Scraper"),
+        ("setup",   "/setup",  "⚙ Setup"),
+    ]
     links = ""
     for key, href, label in pages:
         cls = "active" if key == active else ""
@@ -228,6 +233,77 @@ BASE_CSS = """
   .rate-pct { font-size:.82rem; font-weight:800; min-width:44px; text-align:right; }
   .winner-badge { background:#052e16; color:#22c55e; border:1px solid #166534;
     font-size:.62rem; font-weight:700; padding:2px 8px; border-radius:99px; margin-left:5px; }
+  /* Badge double message */
+  .msg2-badge { background:#1e3a5f; color:#93c5fd; border:1px solid #1e40af;
+    font-size:.58rem; font-weight:700; padding:2px 7px; border-radius:99px; margin-left:4px; }
+  .tpl-preview2 { border-color:#1e3a5f !important; margin-top:4px !important; }
+  .tpl-preview2::before { content:'2ème msg  '; color:#3b82f6; font-size:.68rem; font-weight:700; }
+  /* Bouton toggle 2ème message */
+  .btn-add-msg2 { background:none; border:1px dashed #334155; border-radius:8px;
+    color:#475569; font-size:.75rem; cursor:pointer; padding:7px 14px; width:100%;
+    text-align:center; transition:all .15s; margin-top:4px; }
+  .btn-add-msg2:hover { border-color:#3b82f6; color:#93c5fd; background:#0f1f3d; }
+  /* ── Direct DM badge ── */
+  .badge-ddm { background:#2d1b69; color:#c4b5fd; border:1px solid #6d28d9;
+    font-size:.62rem; font-weight:700; padding:2px 8px; border-radius:99px; }
+  /* ── Modal Bio ── */
+  .modal-overlay { display:none; position:fixed; inset:0; background:rgba(0,0,0,.65);
+    z-index:1000; align-items:center; justify-content:center; }
+  .modal-overlay.open { display:flex; }
+  .modal-box { background:#1e293b; border:1px solid #334155; border-radius:18px;
+    padding:28px; width:min(480px,90vw); box-shadow:0 20px 60px rgba(0,0,0,.6); }
+  .modal-title { font-size:1rem; font-weight:700; color:#f8fafc; margin-bottom:16px; }
+  .modal-textarea { width:100%; background:#0f172a; border:1px solid #334155;
+    border-radius:8px; padding:10px 14px; color:#e2e8f0; font-size:.82rem;
+    font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
+    resize:vertical; min-height:90px; line-height:1.55; }
+  .modal-textarea:focus { outline:none; border-color:#22c55e; }
+  .modal-actions { display:flex; gap:8px; margin-top:14px; justify-content:flex-end; }
+  .btn-modal-save { background:#22c55e; border:none; border-radius:8px;
+    padding:9px 22px; color:#fff; font-weight:700; font-size:.85rem; cursor:pointer; }
+  .btn-modal-save:hover { background:#16a34a; }
+  .btn-modal-cancel { background:#1e293b; border:1px solid #334155; border-radius:8px;
+    padding:9px 18px; color:#94a3b8; font-weight:600; font-size:.85rem; cursor:pointer; }
+  .btn-modal-cancel:hover { background:#334155; color:#e2e8f0; }
+  .btn-bio { background:#1e3a5f; border:1px solid #1e40af; color:#93c5fd;
+    border-radius:7px; padding:4px 10px; font-size:.68rem; font-weight:700;
+    cursor:pointer; white-space:nowrap; transition:all .15s; }
+  .btn-bio:hover { background:#1d4ed8; color:#fff; }
+  .btn-ddm { font-size:.65rem; font-weight:700; padding:4px 9px; border-radius:7px;
+    border:none; cursor:pointer; transition:all .15s; white-space:nowrap; }
+  .btn-ddm-warmup { background:#0f172a; color:#475569; border:1px solid #334155; }
+  .btn-ddm-warmup:hover { background:#1e3a5f; color:#93c5fd; }
+  .btn-ddm-active { background:#2d1b69; color:#c4b5fd; border:1px solid #6d28d9; }
+  .btn-ddm-active:hover { background:#4c1d95; }
+  /* ── Setup page ── */
+  .setup-grid { display:grid; grid-template-columns:1fr 1fr; gap:24px; margin-bottom:24px; }
+  @media(max-width:768px){ .setup-grid { grid-template-columns:1fr; } }
+  .setup-form { background:#1e293b; border:1px solid #334155; border-radius:16px; padding:22px; }
+  .setup-form h2 { font-size:.85rem; font-weight:700; color:#f8fafc; margin-bottom:16px; }
+  .setup-field { display:flex; flex-direction:column; gap:5px; margin-bottom:12px; }
+  .setup-field label { font-size:.68rem; font-weight:700; color:#3b5278;
+    text-transform:uppercase; letter-spacing:.1em; }
+  .setup-field input, .setup-field textarea { background:#0f172a; border:1px solid #334155;
+    border-radius:8px; padding:9px 12px; color:#e2e8f0; font-size:.82rem; }
+  .setup-field input:focus, .setup-field textarea:focus { outline:none; border-color:#22c55e; }
+  .setup-field textarea { resize:vertical; min-height:70px; line-height:1.5; }
+  .photo-preview { width:64px; height:64px; border-radius:50%; object-fit:cover;
+    border:2px solid #334155; display:block; margin:6px 0; }
+  .photo-placeholder { width:64px; height:64px; border-radius:50%;
+    background:#0f172a; border:2px dashed #334155; display:flex;
+    align-items:center; justify-content:center; color:#475569; font-size:1.4rem; }
+  .setup-profiles-table { width:100%; border-collapse:collapse; font-size:.82rem; }
+  .setup-profiles-table th { background:#060c18; color:#3b5278; font-weight:800;
+    padding:10px 14px; text-align:left; font-size:.62rem; text-transform:uppercase;
+    letter-spacing:.12em; border-bottom:2px solid #1e3a5f; }
+  .setup-profiles-table td { padding:12px 14px; border-bottom:1px solid #1e293b;
+    vertical-align:middle; }
+  .setup-profiles-table tr:hover td { background:#0f172a33; }
+  .profile-photo-thumb { width:40px; height:40px; border-radius:50%; object-fit:cover;
+    border:1.5px solid #334155; }
+  .btn-edit-setup { background:#1e3a5f; border:none; color:#93c5fd; border-radius:6px;
+    padding:4px 10px; font-size:.7rem; font-weight:700; cursor:pointer; }
+  .btn-edit-setup:hover { background:#1d4ed8; }
   /* ── Logo neon ── */
   .neon-logo { position: fixed; top: 20px; right: 24px; text-align: center; z-index: 200;
     pointer-events: none; }
@@ -296,7 +372,7 @@ def _default_profile(pid: str) -> dict:
     return {"id": pid, "day": 1, "start_date": None, "last_run": None,
             "done_today": False, "dms_sent": 0, "posts_done": 0,
             "groups_joined": 0, "dm_responses": 0, "history": [], "status": "En attente",
-            "last_error": ""}
+            "last_error": "", "dm_mode": "warmup", "dm_day": 0}
 
 
 def load_data() -> dict:
@@ -324,7 +400,9 @@ def load_data() -> dict:
                          "dms_sent": row["dms_sent"], "posts_done": row["posts_done"],
                          "groups_joined": row["groups_joined"], "dm_responses": row["dm_responses"],
                          "history": row["history"] or [], "status": row["status"],
-                         "last_error": row.get("last_error") or ""}
+                         "last_error": row.get("last_error") or "",
+                         "dm_mode": row.get("dm_mode") or "warmup",
+                         "dm_day":  row.get("dm_day")  or 0}
 
         # Reset en base (une seule fois par jour au premier chargement)
         for pid in to_reset:
@@ -350,7 +428,9 @@ def save_profile(profile: dict):
             "dms_sent": profile["dms_sent"], "posts_done": profile["posts_done"],
             "groups_joined": profile["groups_joined"], "dm_responses": profile["dm_responses"],
             "history": profile["history"], "status": profile["status"],
-            "last_error": profile.get("last_error", "")}).execute()
+            "last_error": profile.get("last_error", ""),
+            "dm_mode": profile.get("dm_mode", "warmup"),
+            "dm_day":  profile.get("dm_day", 0)}).execute()
     except Exception as e:
         print(f"[!] save_profile error: {e}")
 
@@ -414,13 +494,15 @@ async def api_add_dm_template(request: Request):
     body = await request.json()
     if body.get("token") != SECRET_TOKEN:
         raise HTTPException(status_code=401, detail="Token invalide")
-    name    = body.get("name", "").strip()
-    content = body.get("content", "").strip()
+    name     = body.get("name", "").strip()
+    content  = body.get("content", "").strip()
+    content2 = body.get("content2", "").strip()
     if not name or not content:
         raise HTTPException(status_code=400, detail="Nom et contenu requis")
     try:
         supabase.table("dm_templates").insert({
-            "name": name, "content": content, "active": True, "sends": 0, "replies": 0
+            "name": name, "content": content, "content2": content2,
+            "active": True, "sends": 0, "replies": 0
         }).execute()
         return {"ok": True}
     except Exception as e:
@@ -489,6 +571,103 @@ async def api_stats_dm_template(request: Request):
                 "sends":   row["sends"]   + n_sends,
                 "replies": row["replies"] + n_rep,
             }).eq("id", tid).execute()
+        return {"ok": True}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ═══════════════════════════════════════════════════════════
+#  Supabase helpers — Setup Profils
+# ═══════════════════════════════════════════════════════════
+
+def load_profile_setup() -> list:
+    try:
+        result = supabase.table("profile_setup").select("*").order("profile_id").execute()
+        return result.data or []
+    except Exception as e:
+        print(f"[!] load_profile_setup error: {e}")
+        return []
+
+def get_profile_setup(pid: str) -> dict:
+    try:
+        result = supabase.table("profile_setup").select("*").eq("profile_id", pid).execute()
+        if result.data:
+            return result.data[0]
+    except Exception as e:
+        print(f"[!] get_profile_setup error: {e}")
+    return {}
+
+
+@app.get("/api/setup")
+def api_get_setup():
+    return JSONResponse(load_profile_setup())
+
+
+@app.post("/api/setup/upsert")
+async def api_upsert_setup(request: Request):
+    body = await request.json()
+    if body.get("token") != SECRET_TOKEN:
+        raise HTTPException(status_code=401, detail="Token invalide")
+    pid = body.get("profile_id", "").strip()
+    if not pid:
+        raise HTTPException(status_code=400, detail="profile_id requis")
+    try:
+        supabase.table("profile_setup").upsert({
+            "profile_id": pid,
+            "phone":      body.get("phone", "").strip(),
+            "first_name": body.get("first_name", "").strip(),
+            "username":   body.get("username", "").strip().lstrip("@"),
+            "bio":        body.get("bio", "").strip(),
+            "photo_b64":  body.get("photo_b64", ""),
+            "photo_name": body.get("photo_name", ""),
+            "updated_at": now_paris(),
+        }, on_conflict="profile_id").execute()
+        return {"ok": True}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/setup/delete")
+async def api_delete_setup(request: Request):
+    body = await request.json()
+    if body.get("token") != SECRET_TOKEN:
+        raise HTTPException(status_code=401, detail="Token invalide")
+    pid = body.get("profile_id", "").strip()
+    try:
+        supabase.table("profile_setup").delete().eq("profile_id", pid).execute()
+        return {"ok": True}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/setup/bio")
+async def api_update_bio(request: Request):
+    """Met à jour uniquement la bio d'un profil (appelé depuis Mass DM)."""
+    body = await request.json()
+    if body.get("token") != SECRET_TOKEN:
+        raise HTTPException(status_code=401, detail="Token invalide")
+    pid = body.get("profile_id", "").strip()
+    bio = body.get("bio", "").strip()
+    try:
+        supabase.table("profile_setup").upsert(
+            {"profile_id": pid, "bio": bio, "updated_at": now_paris()},
+            on_conflict="profile_id"
+        ).execute()
+        return {"ok": True}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/profile/mode")
+async def api_set_profile_mode(request: Request):
+    """Bascule un profil entre mode warm-up et mode Direct DM."""
+    body = await request.json()
+    if body.get("token") != SECRET_TOKEN:
+        raise HTTPException(status_code=401, detail="Token invalide")
+    pid  = body.get("profile_id", "").strip()
+    mode = body.get("mode", "warmup")
+    try:
+        supabase.table("profiles").update({"dm_mode": mode}).eq("id", pid).execute()
         return {"ok": True}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -668,9 +847,11 @@ def _traduire_erreur(err: str) -> tuple[str, str]:
         return ("Le script a perdu le contrôle du navigateur en cours de session.",
                 "💡 Relance simplement le script, cela se règle souvent tout seul.")
     if "erreur session critique" in e:
+        # Extrait le détail après "—"
         detail = err.split("—")[-1].strip()[:120] if "—" in err else err[:120]
         return (f"Erreur inattendue pendant la session : {detail}",
                 "💡 Regarde le terminal pour plus de détails et relance le script.")
+    # Erreur générique
     msg = err[:150].replace("<", "&lt;")
     return (f"Erreur technique : {msg}",
             "💡 Consulte le terminal pour le détail complet de l'erreur.")
@@ -714,6 +895,7 @@ def dashboard():
     rows = ""
     for i, p in enumerate(profiles, 1):
         day = p["day"]
+        # Jours completes = day si session faite aujourd'hui, sinon day-1
         completed = day if p["done_today"] else max(day - 1, 0)
         if day > 15: completed = 15
         pct = min(int(completed / 15 * 100), 100)
@@ -723,7 +905,13 @@ def dashboard():
         else:                 sb = '<span class="badge waiting">En attente</span>'
         pid = p["id"]
         day_display = min(day, 15)
-        badge_cls = "day-badge done" if day > 15 else "day-badge"
+        badge_cls   = "day-badge done" if day > 15 else "day-badge"
+        dm_mode     = p.get("dm_mode", "warmup")
+        dm_day      = p.get("dm_day", 0)
+        if dm_mode == "direct_dm":
+            ddm_btn = f'<button class="btn-ddm btn-ddm-active" onclick="toggleMode(\'{pid}\',\'warmup\')" title="Basculer en mode Warm-Up">⚡ Direct DM<br><small style="font-size:.58rem">J{dm_day}</small></button>'
+        else:
+            ddm_btn = f'<button class="btn-ddm btn-ddm-warmup" onclick="toggleMode(\'{pid}\',\'direct_dm\')" title="Passer en mode Direct DM (sans chauffe)">WU→DM</button>'
         rows += f"""<tr>
           <td class="num">{i}</td>
           <td class="pid">{pid}</td>
@@ -744,6 +932,7 @@ def dashboard():
           <td class="center">{p['groups_joined']}/16</td>
           <td class="center">{p['dm_responses']}</td>
           <td>{sb}</td>
+          <td class="center">{ddm_btn}</td>
           <td class="last-cell">{p['last_run'] or '—'}{_err_dot(p.get('last_error',''))}</td>
           <td class="center"><button class="btn-del" onclick="delItem('{pid}','/api/profile/delete')" title="Supprimer">✕</button></td>
         </tr>"""
@@ -781,11 +970,27 @@ def dashboard():
     <th>Groupes</th>
     <th>Rép.</th>
     <th>Statut</th>
+    <th>Mode</th>
     <th>Dernière session</th>
     <th style="width:40px"></th>
   </tr></thead><tbody>{rows}</tbody></table></div>
   <p class="refresh">Mis a jour par warmup_v2.py apres chaque profil</p>
   {add_js('/api/profile/add', 'inp', 'Profil ajoute !')}
+<script>
+async function toggleMode(pid, mode) {{
+  const label = mode === 'direct_dm'
+    ? '⚡ Passer ce profil en mode Direct DM ?\\n(Il sautera le warm-up et enverra directement des Mass DMs)'
+    : 'Repasser ce profil en mode Warm-Up ?';
+  if (!confirm(label)) return;
+  const r = await fetch('/api/profile/mode', {{
+    method: 'POST', headers: {{'Content-Type':'application/json'}},
+    body: JSON.stringify({{token:'Compte.1', profile_id: pid, mode}})
+  }});
+  const d = await r.json();
+  if (d.ok) location.reload();
+  else alert('Erreur : ' + JSON.stringify(d));
+}}
+</script>
 <script>
 (function(){{
   document.querySelectorAll('.err-tooltip-wrap').forEach(function(wrap){{
@@ -795,9 +1000,12 @@ def dashboard():
       var dot = wrap.querySelector('.err-dot');
       var r   = dot.getBoundingClientRect();
       var W   = 280;
+      /* alignement horizontal : bord droit du tooltip = bord droit du point, sans deborder a gauche */
       var left = Math.max(10, r.right - W);
+      /* afficher hors-ecran pour mesurer la hauteur reelle */
       box.style.cssText = 'display:block;position:fixed;width:'+W+'px;left:'+left+'px;top:-9999px;right:auto;bottom:auto;z-index:9999;';
       var H   = box.offsetHeight;
+      /* prefere au-dessus, bascule en-dessous si pas assez de place */
       var top = r.top - H - 12;
       if (top < 10) top = r.bottom + 8;
       box.style.top = top + 'px';
@@ -838,6 +1046,7 @@ def dashboard_massdm():
     tpl_active_count = sum(1 for t in templates if t.get("active", True))
     tpl_total_sends  = sum(t.get("sends", 0) for t in templates)
 
+    # Calcule le meilleur template (taux de réponse max)
     def _rate(t):
         s = t.get("sends", 0)
         return t.get("replies", 0) / s if s > 0 else 0
@@ -851,27 +1060,41 @@ def dashboard_massdm():
     # Cards
     tpl_cards_html = ""
     for idx, t in enumerate(templates):
-        tid     = t["id"]
-        sends   = t.get("sends",   0)
-        replies = t.get("replies", 0)
-        active  = t.get("active",  True)
-        rate    = round(replies / sends * 100, 1) if sends > 0 else 0
-        preview = t["content"][:115].replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
-        if len(t["content"]) > 115:
+        tid      = t["id"]
+        sends    = t.get("sends",    0)
+        replies  = t.get("replies",  0)
+        active   = t.get("active",   True)
+        content2 = (t.get("content2") or "").strip()
+        rate     = round(replies / sends * 100, 1) if sends > 0 else 0
+
+        preview = t["content"][:110].replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
+        if len(t["content"]) > 110:
             preview += "…"
+
         color    = COLORS[idx % len(COLORS)]
         card_cls = "tpl-card" + ("" if active else " inactive")
         tog_lbl  = "● Actif"  if active else "○ Inactif"
         tog_cls  = "btn-tpl btn-tpl-on" if active else "btn-tpl btn-tpl-off"
         name_esc = t["name"].replace("&","&amp;").replace("<","&lt;")
         best_badge = '<span class="winner-badge">🏆 Meilleur</span>' if tid == best_id else ""
+        msg2_badge = '<span class="msg2-badge">✉×2</span>' if content2 else ""
+
+        # Aperçu du 2ème message
+        preview2_html = ""
+        if content2:
+            prev2 = content2[:90].replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
+            if len(content2) > 90:
+                prev2 += "…"
+            preview2_html = f'<pre class="tpl-preview tpl-preview2">{prev2}</pre>'
+
         tpl_cards_html += f"""
 <div class="{card_cls}">
   <div class="tpl-name">
     <span class="tpl-num" style="background:{color}22;color:{color};border:1px solid {color}55;">T{idx+1}</span>
-    {name_esc}{best_badge}
+    {name_esc}{best_badge}{msg2_badge}
   </div>
   <pre class="tpl-preview">{preview}</pre>
+  {preview2_html}
   <div class="tpl-stats">
     <div class="tstat"><div class="tstat-val blue">{sends}</div><div class="tstat-lab">Envoyés</div></div>
     <div class="tstat"><div class="tstat-val green">{replies}</div><div class="tstat-lab">Réponses</div></div>
@@ -890,6 +1113,7 @@ def dashboard_massdm():
     # ── Analyse comparative A/B ───────────────────────────────
     chart_tpls = [(idx, t) for idx, t in enumerate(templates) if t.get("sends", 0) > 0]
     if chart_tpls:
+        # Sorted by reply rate (best first) for the ranking table
         srt = sorted(chart_tpls, key=lambda x: _rate(x[1]), reverse=True)
         medals = ["🥇","🥈","🥉"] + [f"#{i}" for i in range(4, 50)]
 
@@ -1066,6 +1290,9 @@ def dashboard_massdm():
     else:
         daily_chart = '<div class="card chart-empty">Aucune donnée — lance dm_sender.py pour voir les statistiques ici.</div>'
 
+    # ── Charge les bios sauvegardées ──────────────────────────
+    setup_map = {s["profile_id"]: s for s in load_profile_setup()}
+
     # ── Table profils ─────────────────────────────────────────
     rows = ""
     for i, p in enumerate(profiles, 1):
@@ -1076,13 +1303,21 @@ def dashboard_massdm():
         if p["status"] == "Actif":     sb = '<span class="badge active">Actif</span>'
         elif p["status"] == "Termine": sb = '<span class="badge done">Terminé ✓</span>'
         else:                          sb = '<span class="badge waiting">En attente</span>'
+        pid         = p["id"]
+        bio_saved   = (setup_map.get(pid, {}).get("bio") or "").replace('"', "&quot;").replace("'", "&#39;")
+        bio_label   = "✏ Bio" if not bio_saved else "✏ Bio ✓"
+        bio_color   = "#22c55e" if bio_saved else "#1e40af"
         rows += f"""<tr>
-          <td class="num">{i}</td><td class="pid">{p['id']}</td>
+          <td class="num">{i}</td><td class="pid">{pid}</td>
           <td class="center">{sent}</td><td class="center">{replied}</td>
           <td><div class="progress-wrap"><div class="progress-bar" style="width:{pct_bar}%;background:#22c55e"></div></div>
           <span class="day-label">{taux}% de réponse</span></td>
           <td class="center">{p['conversions']}</td><td>{sb}</td>
-          <td class="last">{p['last_run'] or '—'}</td>
+          <td class="last" style="white-space:nowrap;">
+            {p['last_run'] or '—'}&nbsp;
+            <button class="btn-bio" style="border-color:{bio_color};color:{bio_color};"
+              onclick="openBioModal('{pid}','{bio_saved}')">{bio_label}</button>
+          </td>
         </tr>"""
 
     html = f"""<!DOCTYPE html><html lang="fr"><head>
@@ -1109,12 +1344,14 @@ def dashboard_massdm():
   <!-- ══ TEMPLATES ══ -->
   <p class="section-title">Gestion des templates A/B</p>
   <div class="card" style="padding:20px 24px 22px;margin-bottom:16px;">
-    <div class="add-box" style="border:none;padding:0;margin:0;flex-wrap:wrap;">
+    <div class="add-box" style="border:none;padding:0;margin:0;flex-wrap:wrap;align-items:flex-start;">
       <div style="display:flex;flex-direction:column;flex:1;gap:8px;min-width:260px;">
         <input id="tname" type="text" placeholder="Nom du template  ex: Template A — Recrutement court">
-        <textarea id="tcontent" class="add-textarea" placeholder="Contenu du message...&#10;Utilise {{prenom}} pour personnaliser.&#10;Ctrl+Entrée pour ajouter rapidement."></textarea>
+        <textarea id="tcontent" class="add-textarea" placeholder="1er message...&#10;Utilise {{prenom}} pour personnaliser.&#10;Ctrl+Entrée pour ajouter."></textarea>
+        <button class="btn-add-msg2" onclick="toggleMsg2()" id="btnMsg2">➕ Ajouter un 2ème message (optionnel — envoyé 5-18s après)</button>
+        <textarea id="tcontent2" class="add-textarea" placeholder="2ème message (optionnel)...&#10;Sera envoyé 5 à 18 secondes après le premier.&#10;Utilise aussi {{prenom}}." style="display:none;border-color:#1e3a5f;"></textarea>
       </div>
-      <button onclick="addTpl()" style="align-self:flex-end;height:40px;white-space:nowrap;">+ Ajouter</button>
+      <button onclick="addTpl()" style="align-self:flex-end;height:40px;white-space:nowrap;margin-top:0;">+ Ajouter</button>
     </div>
   </div>
   <div class="templates-grid">
@@ -1144,6 +1381,21 @@ def dashboard_massdm():
 
   <p class="refresh">Mis à jour automatiquement · rechargement dans 60s</p>
 
+<!-- ── Modal Bio ── -->
+<div class="modal-overlay" id="bioModal">
+  <div class="modal-box">
+    <p class="modal-title">✏ Bio Telegram — <span id="bioModalPid" style="color:#93c5fd;font-size:.85rem;"></span></p>
+    <p style="font-size:.72rem;color:#475569;margin-bottom:10px;">
+      Sera appliquée lors du prochain lancement de <code style="background:#0f172a;padding:1px 5px;border-radius:4px;">profile_changer.py</code>
+    </p>
+    <textarea class="modal-textarea" id="bioText" placeholder="Ta bio Telegram...&#10;Ex: Gestion de comptes Instagram · OF Agency · DM pour infos"></textarea>
+    <div class="modal-actions">
+      <button class="btn-modal-cancel" onclick="closeBioModal()">Annuler</button>
+      <button class="btn-modal-save" onclick="saveBio()">💾 Enregistrer la bio</button>
+    </div>
+  </div>
+</div>
+
 <div id="toast" class="toast">Enregistré !</div>
 <script>
 function showToast(msg) {{
@@ -1156,11 +1408,25 @@ async function _post(url, body) {{
     body: JSON.stringify(Object.assign({{token:'Compte.1'}}, body))}});
   return r.json();
 }}
+function toggleMsg2() {{
+  const ta  = document.getElementById('tcontent2');
+  const btn = document.getElementById('btnMsg2');
+  if (ta.style.display === 'none') {{
+    ta.style.display = 'block';
+    btn.textContent = '✕ Supprimer le 2ème message';
+    btn.style.borderColor = '#ef4444'; btn.style.color = '#fca5a5';
+  }} else {{
+    ta.style.display = 'none'; ta.value = '';
+    btn.textContent = '➕ Ajouter un 2ème message (optionnel — envoyé 5-18s après)';
+    btn.style.borderColor = ''; btn.style.color = '';
+  }}
+}}
 async function addTpl() {{
-  const name    = document.getElementById('tname').value.trim();
-  const content = document.getElementById('tcontent').value.trim();
+  const name     = document.getElementById('tname').value.trim();
+  const content  = document.getElementById('tcontent').value.trim();
+  const content2 = document.getElementById('tcontent2').value.trim();
   if (!name || !content) {{ alert('Nom et contenu requis.'); return; }}
-  const d = await _post('/api/dm_template/add', {{name, content}});
+  const d = await _post('/api/dm_template/add', {{name, content, content2}});
   if (d.ok) {{ showToast('Template ajouté !'); setTimeout(() => location.reload(), 1200); }}
   else alert('Erreur : ' + (d.detail || JSON.stringify(d)));
 }}
@@ -1178,8 +1444,33 @@ async function replyTpl(id) {{
   if (d.ok) {{ showToast('+1 réponse enregistrée !'); setTimeout(() => location.reload(), 800); }}
 }}
 document.addEventListener('DOMContentLoaded', () => {{
-  const ta = document.getElementById('tcontent');
-  if (ta) ta.addEventListener('keydown', e => {{ if (e.key==='Enter' && e.ctrlKey) addTpl(); }});
+  ['tcontent','tcontent2'].forEach(id => {{
+    const ta = document.getElementById(id);
+    if (ta) ta.addEventListener('keydown', e => {{ if (e.key==='Enter' && e.ctrlKey) addTpl(); }});
+  }});
+}});
+let _bioPid = '';
+function openBioModal(pid, currentBio) {{
+  _bioPid = pid;
+  document.getElementById('bioModalPid').textContent = pid;
+  document.getElementById('bioText').value = currentBio.replace(/&#39;/g,"'").replace(/&quot;/g,'"');
+  document.getElementById('bioModal').classList.add('open');
+}}
+function closeBioModal() {{
+  document.getElementById('bioModal').classList.remove('open');
+}}
+async function saveBio() {{
+  const bio = document.getElementById('bioText').value.trim();
+  const r = await fetch('/api/setup/bio', {{
+    method:'POST', headers:{{'Content-Type':'application/json'}},
+    body: JSON.stringify({{token:'Compte.1', profile_id: _bioPid, bio}})
+  }});
+  const d = await r.json();
+  if (d.ok) {{ showToast('Bio sauvegardée ✓'); closeBioModal(); setTimeout(() => location.reload(), 1200); }}
+  else alert('Erreur : ' + JSON.stringify(d));
+}}
+document.getElementById('bioModal').addEventListener('click', function(e) {{
+  if (e.target === this) closeBioModal();
 }});
 </script>
 </body></html>"""
@@ -1267,3 +1558,292 @@ def dashboard_scraper():
   {add_js('/api/channel/add', 'inp', 'Canal ajoute !')}
 </body></html>"""
     return html
+
+
+# ═══════════════════════════════════════════════════════════
+#  PAGE SETUP
+# ═══════════════════════════════════════════════════════════
+
+@app.get("/setup", response_class=HTMLResponse)
+def dashboard_setup():
+    configs     = load_profile_setup()
+    profile_ids = get_all_ids()
+    nb_config   = len(configs)
+    config_map  = {c["profile_id"]: c for c in configs}
+
+    # ── Tableau des profils configurés ───────────────────────
+    rows = ""
+    for c in configs:
+        pid   = c["profile_id"]
+        phone = c.get("phone", "") or "—"
+        fn    = c.get("first_name", "") or "—"
+        uname = c.get("username", "") or "—"
+        bio   = (c.get("bio", "") or "")[:55]
+        if len(c.get("bio","") or "") > 55:
+            bio += "…"
+        bio   = bio.replace("&","&amp;").replace("<","&lt;") or "—"
+        upd   = c.get("updated_at", "") or "—"
+
+        # Photo
+        pb64  = c.get("photo_b64", "") or ""
+        pname = c.get("photo_name", "") or ""
+        if pb64:
+            ext = "jpeg" if pname.lower().endswith(".jpg") or pname.lower().endswith(".jpeg") else "png"
+            photo_html = f'<img src="data:image/{ext};base64,{pb64}" class="profile-photo-thumb" alt="photo">'
+        else:
+            photo_html = '<div class="photo-placeholder">👤</div>'
+
+        # Données JS encodées
+        bio_esc  = (c.get("bio","") or "").replace('"','&quot;').replace("'","&#39;")
+        fn_esc   = fn.replace('"','&quot;')
+        un_esc   = (c.get("username","") or "").replace('"','&quot;')
+        ph_esc   = (c.get("phone","") or "").replace('"','&quot;')
+
+        rows += f"""<tr>
+          <td>{photo_html}</td>
+          <td class="pid">{pid}</td>
+          <td style="font-size:.8rem;color:#94a3b8;">{phone}</td>
+          <td style="font-size:.82rem;color:#e2e8f0;">{fn}</td>
+          <td style="font-family:monospace;font-size:.78rem;color:#22c55e;">{"@"+uname if uname != "—" else "—"}</td>
+          <td style="font-size:.75rem;color:#64748b;max-width:180px;">{bio}</td>
+          <td style="font-size:.72rem;color:#334155;">{upd[:16]}</td>
+          <td style="white-space:nowrap;">
+            <button class="btn-edit-setup" onclick="editProfile('{pid}','{ph_esc}','{fn_esc}','{un_esc}','{bio_esc}')">✏ Modifier</button>
+            &nbsp;
+            <button class="btn-del" onclick="deleteSetup('{pid}')" title="Supprimer">✕</button>
+          </td>
+        </tr>"""
+
+    if not rows:
+        rows = '<tr><td colspan="8" style="text-align:center;color:#475569;padding:30px;">Aucun profil configuré — remplis le formulaire ci-dessus</td></tr>'
+
+    # ── Options profils non-encore-configurés ─────────────────
+    non_config = [pid for pid in profile_ids if pid not in config_map]
+    opts_nc = "".join(f'<option value="{p}">{p}</option>' for p in non_config)
+    opts_all = "".join(f'<option value="{p}">{p}</option>' for p in profile_ids)
+
+    html = f"""<!DOCTYPE html><html lang="fr"><head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Setup Profils</title><style>{BASE_CSS}</style></head><body>
+  <div class="neon-logo">
+    <span class="neon-agency">Agency</span>
+    <div class="neon-box"><span class="neon-text">OF4MYM</span></div>
+  </div>
+  <h1>Setup Profils</h1>
+  <p class="subtitle">Configure les photos, pseudos et bios de tes comptes Telegram</p>
+  {nav_html("setup")}
+
+  <div class="stats">
+    <div class="stat"><div class="stat-value">{len(profile_ids)}</div><div class="stat-label">Profils totaux</div></div>
+    <div class="stat"><div class="stat-value">{nb_config}</div><div class="stat-label">Configurés</div></div>
+    <div class="stat"><div class="stat-value">{len(non_config)}</div><div class="stat-label">Sans config</div></div>
+  </div>
+
+  <!-- ══ FORMULAIRE AJOUT / MODIF ══ -->
+  <p class="section-title">Ajouter / Modifier un profil</p>
+  <div class="setup-grid">
+    <div class="setup-form">
+      <h2 id="formTitle">Nouveau profil</h2>
+
+      <div class="setup-field">
+        <label>ID Profil AdsPower</label>
+        <select id="fPid" style="background:#0f172a;border:1px solid #334155;border-radius:8px;padding:9px 12px;color:#e2e8f0;font-size:.82rem;">
+          <option value="">— Sélectionne un profil —</option>
+          {opts_all}
+        </select>
+      </div>
+      <div class="setup-field">
+        <label>Numéro de téléphone</label>
+        <input id="fPhone" type="text" placeholder="+33600000000">
+      </div>
+      <div class="setup-field">
+        <label>Prénom (affiché sur Telegram)</label>
+        <input id="fName" type="text" placeholder="Sophie">
+      </div>
+      <div class="setup-field">
+        <label>@Username (sans le @)</label>
+        <input id="fUsername" type="text" placeholder="sophie_agency">
+      </div>
+      <div class="setup-field">
+        <label>Bio Telegram</label>
+        <textarea id="fBio" placeholder="Gestion de comptes Instagram · OF Agency&#10;DM pour infos 📩"></textarea>
+      </div>
+      <div class="setup-field">
+        <label>Photo de profil</label>
+        <div style="display:flex;align-items:center;gap:14px;margin-top:4px;">
+          <div id="photoPreviewWrap"><div class="photo-placeholder">👤</div></div>
+          <div style="flex:1;">
+            <input type="file" id="fPhoto" accept="image/*" style="display:none;" onchange="previewPhoto(this)">
+            <button onclick="document.getElementById('fPhoto').click()"
+              style="background:#1e3a5f;border:1px solid #1e40af;color:#93c5fd;border-radius:8px;padding:8px 16px;font-size:.78rem;font-weight:700;cursor:pointer;">
+              📷 Choisir une photo
+            </button>
+            <p id="photoName" style="font-size:.7rem;color:#475569;margin-top:5px;"></p>
+          </div>
+        </div>
+      </div>
+      <div style="display:flex;gap:8px;margin-top:6px;">
+        <button onclick="saveSetup()"
+          style="background:#22c55e;border:none;border-radius:8px;padding:11px 24px;color:#fff;font-weight:700;font-size:.875rem;cursor:pointer;flex:1;">
+          💾 Enregistrer
+        </button>
+        <button onclick="resetForm()"
+          style="background:#1e293b;border:1px solid #334155;border-radius:8px;padding:11px 16px;color:#94a3b8;font-weight:600;font-size:.82rem;cursor:pointer;">
+          Réinitialiser
+        </button>
+      </div>
+      <p style="font-size:.68rem;color:#334155;margin-top:12px;line-height:1.5;">
+        💡 Les changements sont appliqués en lançant <code style="background:#0f172a;padding:1px 5px;border-radius:4px;">profile_changer.py</code> en local.
+      </p>
+    </div>
+
+    <!-- ══ INSTRUCTIONS ══ -->
+    <div class="setup-form" style="background:#060c18;border-color:#1e3a5f;">
+      <h2 style="color:#93c5fd;">Comment appliquer les changements ?</h2>
+      <div style="font-size:.8rem;color:#475569;line-height:1.8;">
+        <p style="color:#3b82f6;font-weight:700;margin-bottom:8px;">1. Configure ici ↑</p>
+        <p>Remplis le formulaire pour chaque profil AdsPower et enregistre.</p>
+        <br>
+        <p style="color:#3b82f6;font-weight:700;margin-bottom:8px;">2. Lance <code style="background:#0f172a;padding:2px 6px;border-radius:4px;color:#22c55e;">profile_changer.py</code></p>
+        <p>Le script lit les configs depuis Supabase et applique automatiquement :<br>
+          ✓ Photo de profil<br>
+          ✓ Prénom / Nom<br>
+          ✓ @Username<br>
+          ✓ Bio
+        </p>
+        <br>
+        <p style="color:#3b82f6;font-weight:700;margin-bottom:8px;">3. Mode Direct DM</p>
+        <p>Dans l'onglet <b>Warm-Up</b>, clique sur <b>WU→DM</b> à côté d'un profil pour qu'il saute la chauffe et passe directement aux Mass DMs progressifs.</p>
+        <br>
+        <div style="background:#052e16;border:1px solid #166534;border-radius:10px;padding:12px;">
+          <p style="color:#22c55e;font-weight:700;margin-bottom:4px;">SQL Supabase requis</p>
+          <code style="font-size:.7rem;color:#86efac;white-space:pre;">ALTER TABLE profiles ADD COLUMN IF NOT EXISTS dm_mode TEXT DEFAULT 'warmup';
+ALTER TABLE profiles ADD COLUMN IF NOT EXISTS dm_day INTEGER DEFAULT 0;
+CREATE TABLE IF NOT EXISTS profile_setup (
+  id SERIAL PRIMARY KEY,
+  profile_id TEXT NOT NULL UNIQUE,
+  phone TEXT DEFAULT '',
+  first_name TEXT DEFAULT '',
+  username TEXT DEFAULT '',
+  bio TEXT DEFAULT '',
+  photo_b64 TEXT DEFAULT '',
+  photo_name TEXT DEFAULT '',
+  updated_at TEXT DEFAULT ''
+);
+ALTER TABLE profile_setup DISABLE ROW LEVEL SECURITY;</code>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ══ TABLE DES PROFILS CONFIGURÉS ══ -->
+  <p class="section-title">Profils configurés ({nb_config})</p>
+  <div class="card">
+    <table class="setup-profiles-table">
+      <thead><tr>
+        <th>Photo</th><th>ID Profil</th><th>Téléphone</th>
+        <th>Prénom</th><th>@Username</th><th>Bio</th>
+        <th>Modifié</th><th style="width:120px;"></th>
+      </tr></thead>
+      <tbody>{rows}</tbody>
+    </table>
+  </div>
+
+<div id="toast" class="toast">Sauvegardé !</div>
+<script>
+let _editPhotoB64 = '';
+let _editPhotoName = '';
+
+function previewPhoto(input) {{
+  if (!input.files || !input.files[0]) return;
+  const file = input.files[0];
+  _editPhotoName = file.name;
+  const reader = new FileReader();
+  reader.onload = (e) => {{
+    _editPhotoB64 = e.target.result.split(',')[1]; // base64 only
+    const wrap = document.getElementById('photoPreviewWrap');
+    const ext  = file.name.toLowerCase().endsWith('.png') ? 'png' : 'jpeg';
+    wrap.innerHTML = '<img src="data:image/'+ext+';base64,'+_editPhotoB64+'" class="photo-preview">';
+    document.getElementById('photoName').textContent = file.name;
+  }};
+  reader.readAsDataURL(file);
+}}
+
+async function saveSetup() {{
+  const pid = document.getElementById('fPid').value.trim();
+  if (!pid) {{ alert('Sélectionne un profil AdsPower !'); return; }}
+  const body = {{
+    token:      'Compte.1',
+    profile_id: pid,
+    phone:      document.getElementById('fPhone').value.trim(),
+    first_name: document.getElementById('fName').value.trim(),
+    username:   document.getElementById('fUsername').value.trim(),
+    bio:        document.getElementById('fBio').value.trim(),
+    photo_b64:  _editPhotoB64,
+    photo_name: _editPhotoName,
+  }};
+  const r = await fetch('/api/setup/upsert', {{
+    method:'POST', headers:{{'Content-Type':'application/json'}},
+    body: JSON.stringify(body)
+  }});
+  const d = await r.json();
+  if (d.ok) {{
+    document.getElementById('toast').style.display='block';
+    setTimeout(() => location.reload(), 1200);
+  }} else alert('Erreur : ' + (d.detail || JSON.stringify(d)));
+}}
+
+function editProfile(pid, phone, fn, username, bio) {{
+  document.getElementById('fPid').value      = pid;
+  document.getElementById('fPhone').value    = phone.replace(/&#39;/g,"'");
+  document.getElementById('fName').value     = fn.replace(/&quot;/g,'"');
+  document.getElementById('fUsername').value = username.replace(/&quot;/g,'"');
+  document.getElementById('fBio').value      = bio.replace(/&#39;/g,"'").replace(/&quot;/g,'"');
+  document.getElementById('formTitle').textContent = 'Modifier — ' + pid;
+  window.scrollTo({{top:0, behavior:'smooth'}});
+}}
+
+function resetForm() {{
+  ['fPid','fPhone','fName','fUsername','fBio'].forEach(id => {{
+    const el = document.getElementById(id);
+    if (el) el.value = '';
+  }});
+  _editPhotoB64 = ''; _editPhotoName = '';
+  document.getElementById('photoPreviewWrap').innerHTML = '<div class="photo-placeholder">👤</div>';
+  document.getElementById('photoName').textContent = '';
+  document.getElementById('formTitle').textContent = 'Nouveau profil';
+}}
+
+async function deleteSetup(pid) {{
+  if (!confirm('Supprimer la config de ' + pid + ' ?')) return;
+  const r = await fetch('/api/setup/delete', {{
+    method:'POST', headers:{{'Content-Type':'application/json'}},
+    body: JSON.stringify({{token:'Compte.1', profile_id: pid}})
+  }});
+  const d = await r.json();
+  if (d.ok) location.reload();
+  else alert('Erreur : ' + JSON.stringify(d));
+}}
+</script>
+</body></html>"""
+    return html
+Étapes ensuite :
+
+Commit sur GitHub (message : feat: setup page + bio modal + direct DM + 2-msg templates)
+Manual Deploy sur Render
+SQL Supabase (une seule fois — si pas encore fait) :
+ALTER TABLE dm_templates ADD COLUMN IF NOT EXISTS content2 TEXT DEFAULT '';
+ALTER TABLE profiles ADD COLUMN IF NOT EXISTS dm_mode TEXT DEFAULT 'warmup';
+ALTER TABLE profiles ADD COLUMN IF NOT EXISTS dm_day INTEGER DEFAULT 0;
+CREATE TABLE IF NOT EXISTS profile_setup (
+  id SERIAL PRIMARY KEY,
+  profile_id TEXT NOT NULL UNIQUE,
+  phone TEXT DEFAULT '',
+  first_name TEXT DEFAULT '',
+  username TEXT DEFAULT '',
+  bio TEXT DEFAULT '',
+  photo_b64 TEXT DEFAULT '',
+  photo_name TEXT DEFAULT '',
+  updated_at TEXT DEFAULT ''
+);
+ALTER TABLE profile_setup DISABLE ROW LEVEL SECURITY;
