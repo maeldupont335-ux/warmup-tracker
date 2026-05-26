@@ -1467,8 +1467,12 @@ async def run_warmup_for_profile(profile_id: str, profile_num: int, total: int):
 
 # ── Entrée principale ─────────────────────────────────────────
 
-async def main():
-    args = sys.argv[1:]
+async def main(force: bool = False):
+    """
+    force=True : ignore done_today → relance même si déjà fait aujourd'hui
+    (utilisé quand le bouton dashboard est cliqué)
+    """
+    args = [a for a in sys.argv[1:] if a not in ("--daemon", "--auto")]
 
     # ── --status ──────────────────────────────────────────────
     if "--status" in args:
@@ -1535,9 +1539,17 @@ async def main():
             skip += 1
         print(f"  Profil {i+1:02d} ({pid}) — Jour {day}/15{tag}")
 
-    if skip == total:
+    if skip == total and not force:
         print("\n[OK] Tous les profils ont déjà été traités aujourd'hui.\n")
         return
+    elif skip == total and force:
+        print("\n[▶] Force=True — relance même si déjà fait aujourd'hui.\n")
+        # Remet done_today à False pour que run_warmup_for_profile reparte
+        for _, pid in profiles_to_run:
+            data = load_progress(pid)
+            if data.get("done_today"):
+                data["done_today"] = False
+                save_progress(pid, data)
 
     print()
     print("\n[->] Demarrage automatique dans 10 secondes... (Ctrl+C pour annuler)")
@@ -1583,36 +1595,49 @@ def check_warmup_trigger() -> bool:
     return False
 
 
+LOG_FILE = os.path.join(os.path.dirname(__file__), "output", "daemon_warmup.log")
+
+def log(msg: str):
+    """Écrit dans le fichier log ET affiche dans le terminal."""
+    from datetime import datetime as _dt
+    line = f"[{_dt.now().strftime('%Y-%m-%d %H:%M:%S')}] {msg}"
+    print(line)
+    try:
+        os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
+        with open(LOG_FILE, "a", encoding="utf-8") as f:
+            f.write(line + "\n")
+    except Exception:
+        pass
+
+
 async def daemon():
     """
     Mode daemon — tourne en continu.
     - Poll le dashboard toutes les 30s
-    - Lance le warm-up dès que le bouton 'Lancer' est cliqué sur le dashboard
-    - Ou automatiquement si le warm-up du jour n'a pas encore été fait
+    - Lance le warm-up dès que le bouton 'Lancer' est cliqué (force=True)
     """
-    from datetime import datetime as _dt
-    print("=" * 60)
-    print("  WARM-UP DAEMON — en attente du bouton dashboard")
-    print("  Poll toutes les 30s — Ctrl+C pour arrêter")
-    print("=" * 60)
-
-    last_run_date = None   # évite de relancer plusieurs fois dans la même journée sans trigger
+    log("=" * 50)
+    log("WARM-UP DAEMON démarré — poll toutes les 30s")
+    log(f"Log : {LOG_FILE}")
+    log("=" * 50)
 
     while True:
-        triggered = check_warmup_trigger()
-        today = date.today()
+        try:
+            triggered = check_warmup_trigger()
+        except Exception as e:
+            log(f"[!] Erreur poll : {e}")
+            triggered = False
 
         if triggered:
-            print(f"\n[▶] Signal reçu depuis le dashboard ! Lancement immédiat...")
-            last_run_date = today
+            log("[▶] Signal reçu ! Lancement du warm-up (force)...")
             try:
-                await main()
+                await main(force=True)
+                log("[OK] Warm-up terminé.")
             except Exception as e:
-                print(f"[!] Erreur : {e}")
-            print(f"\n[·] Retour en veille — poll toutes les 30s")
-
+                log(f"[!] Erreur pendant main() : {e}")
+            log("[·] Retour en veille...")
         else:
-            print(f"  [·] {_dt.now().strftime('%H:%M:%S')} — En attente du bouton dashboard...", end="\r")
+            log(f"[·] En attente du bouton dashboard...")
 
         await asyncio.sleep(30)
 
