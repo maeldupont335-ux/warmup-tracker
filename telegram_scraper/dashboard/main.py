@@ -625,6 +625,19 @@ async def api_upsert_setup(request: Request):
             "photo_name": body.get("photo_name", ""),
             "updated_at": now_paris(),
         }, on_conflict="profile_id").execute()
+
+        # Si apply=True → écrit un trigger dans channels pour le daemon local
+        if body.get("apply"):
+            try:
+                trigger_url = f"__profile_apply__{pid}__"
+                supabase.table("channels").upsert({
+                    "url":          trigger_url,
+                    "status":       "triggered",
+                    "members_count": 0,
+                }, on_conflict="url").execute()
+            except Exception:
+                pass  # le trigger est optionnel, pas critique
+
         return {"ok": True}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -1766,11 +1779,9 @@ def dashboard_setup():
     rows = ""
     for c in configs:
         pid   = c["profile_id"]
-        phone = c.get("phone", "") or "—"
-        fn    = c.get("first_name", "") or "—"
-        uname = c.get("username", "") or "—"
-        bio   = (c.get("bio", "") or "")[:55]
-        if len(c.get("bio","") or "") > 55:
+        uname = c.get("username", "") or ""
+        bio   = (c.get("bio", "") or "")[:60]
+        if len(c.get("bio","") or "") > 60:
             bio += "…"
         bio   = bio.replace("&","&amp;").replace("<","&lt;") or "—"
         upd   = c.get("updated_at", "") or "—"
@@ -1779,230 +1790,289 @@ def dashboard_setup():
         pb64  = c.get("photo_b64", "") or ""
         pname = c.get("photo_name", "") or ""
         if pb64:
-            ext = "jpeg" if pname.lower().endswith(".jpg") or pname.lower().endswith(".jpeg") else "png"
-            photo_html = f'<img src="data:image/{ext};base64,{pb64}" class="profile-photo-thumb" alt="photo">'
+            ext = "jpeg" if pname.lower().endswith((".jpg",".jpeg")) else "png"
+            photo_html = f'<img src="data:image/{ext};base64,{pb64}" class="profile-photo-thumb" alt="photo" style="width:46px;height:46px;border-radius:50%;object-fit:cover;">'
         else:
-            photo_html = '<div class="photo-placeholder">👤</div>'
+            photo_html = '<div class="photo-placeholder" style="width:46px;height:46px;border-radius:50%;background:#1e293b;display:flex;align-items:center;justify-content:center;font-size:1.3rem;">👤</div>'
 
-        # Données JS encodées
+        # Données JS (encodées pour attributs HTML)
         bio_esc  = (c.get("bio","") or "").replace('"','&quot;').replace("'","&#39;")
-        fn_esc   = fn.replace('"','&quot;')
-        un_esc   = (c.get("username","") or "").replace('"','&quot;')
-        ph_esc   = (c.get("phone","") or "").replace('"','&quot;')
+        un_esc   = uname.replace('"','&quot;')
 
         rows += f"""<tr>
-          <td>{photo_html}</td>
+          <td style="padding:10px 16px;">{photo_html}</td>
           <td class="pid">{pid}</td>
-          <td style="font-size:.8rem;color:#94a3b8;">{phone}</td>
-          <td style="font-size:.82rem;color:#e2e8f0;">{fn}</td>
-          <td style="font-family:monospace;font-size:.78rem;color:#22c55e;">{"@"+uname if uname != "—" else "—"}</td>
-          <td style="font-size:.75rem;color:#64748b;max-width:180px;">{bio}</td>
-          <td style="font-size:.72rem;color:#334155;">{upd[:16]}</td>
-          <td style="white-space:nowrap;">
-            <button class="btn-edit-setup" onclick="editProfile('{pid}','{ph_esc}','{fn_esc}','{un_esc}','{bio_esc}')">✏ Modifier</button>
+          <td style="font-family:monospace;font-size:.82rem;color:#22c55e;">{"@"+uname if uname else "<span style='color:#334155'>—</span>"}</td>
+          <td style="font-size:.75rem;color:#64748b;max-width:220px;">{bio}</td>
+          <td style="font-size:.7rem;color:#334155;">{upd[:16]}</td>
+          <td style="white-space:nowrap;text-align:center;">
+            <button class="btn-edit-setup" onclick="openEditModal('{pid}','{un_esc}','{bio_esc}',{'\''+pb64[:30]+'…\'' if pb64 else 'null'})">✏ Modifier</button>
             &nbsp;
             <button class="btn-del" onclick="deleteSetup('{pid}')" title="Supprimer">✕</button>
           </td>
         </tr>"""
 
     if not rows:
-        rows = '<tr><td colspan="8" style="text-align:center;color:#475569;padding:30px;">Aucun profil configuré — remplis le formulaire ci-dessus</td></tr>'
+        rows = '<tr><td colspan="6" style="text-align:center;color:#475569;padding:36px;">Aucun profil configuré — clique sur un profil ci-dessous pour démarrer</td></tr>'
 
-    # ── Options profils non-encore-configurés ─────────────────
-    non_config = [pid for pid in profile_ids if pid not in config_map]
-    opts_nc = "".join(f'<option value="{p}">{p}</option>' for p in non_config)
+    # Options profils
     opts_all = "".join(f'<option value="{p}">{p}</option>' for p in profile_ids)
+    non_config = [p for p in profile_ids if p not in config_map]
 
     html = f"""<!DOCTYPE html><html lang="fr"><head>
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Setup Profils</title><style>{BASE_CSS}</style></head><body>
+<title>Setup Profils</title>
+<style>{BASE_CSS}
+/* ── Setup spécifique ── */
+.setup-modal-overlay {{
+  display:none; position:fixed; inset:0; background:rgba(0,0,0,.7);
+  z-index:900; align-items:center; justify-content:center; padding:20px;
+}}
+.setup-modal-overlay.open {{ display:flex; }}
+.setup-modal {{
+  background:#1e293b; border:1px solid #334155; border-radius:20px;
+  padding:28px 32px; width:100%; max-width:520px;
+  box-shadow:0 24px 64px rgba(0,0,0,.6);
+}}
+.setup-modal h2 {{ font-size:1.1rem; color:#f8fafc; margin-bottom:20px; }}
+.setup-field {{ margin-bottom:16px; }}
+.setup-field label {{ display:block; font-size:.72rem; font-weight:700;
+  color:#64748b; text-transform:uppercase; letter-spacing:.06em; margin-bottom:6px; }}
+.setup-field input, .setup-field textarea {{
+  width:100%; background:#0f172a; border:1px solid #334155; border-radius:8px;
+  padding:10px 13px; color:#e2e8f0; font-size:.875rem; font-family:inherit;
+  resize:vertical;
+}}
+.setup-field input:focus, .setup-field textarea:focus {{
+  outline:none; border-color:#22c55e;
+}}
+.setup-field textarea {{ min-height:80px; }}
+.photo-upload-area {{
+  display:flex; align-items:center; gap:16px; margin-top:4px;
+}}
+.photo-upload-preview {{
+  width:72px; height:72px; border-radius:50%; overflow:hidden;
+  background:#0f172a; border:2px solid #334155; flex-shrink:0;
+  display:flex; align-items:center; justify-content:center; font-size:2rem;
+}}
+.photo-upload-preview img {{ width:100%; height:100%; object-fit:cover; }}
+.btn-choose-photo {{
+  background:#1e3a5f; border:1px solid #1e40af; color:#93c5fd;
+  border-radius:8px; padding:9px 18px; font-size:.78rem; font-weight:700;
+  cursor:pointer; display:block; margin-bottom:6px;
+}}
+.btn-choose-photo:hover {{ background:#1e40af; }}
+.btn-apply {{
+  width:100%; background:linear-gradient(135deg,#22c55e,#16a34a);
+  border:none; border-radius:10px; padding:13px;
+  color:#fff; font-size:.95rem; font-weight:800; cursor:pointer;
+  box-shadow:0 0 18px rgba(34,197,94,.3); margin-top:6px; transition:all .2s;
+}}
+.btn-apply:hover {{ box-shadow:0 0 26px rgba(34,197,94,.5); }}
+.btn-apply:disabled {{ opacity:.5; cursor:not-allowed; box-shadow:none; }}
+.btn-cancel-modal {{
+  width:100%; background:#1e293b; border:1px solid #334155;
+  border-radius:10px; padding:10px; color:#64748b; font-size:.85rem;
+  font-weight:600; cursor:pointer; margin-top:8px;
+}}
+.profiles-quick-list {{
+  display:grid; grid-template-columns:repeat(auto-fill,minmax(180px,1fr));
+  gap:12px; margin-bottom:28px;
+}}
+.profile-quick-card {{
+  background:#1e293b; border:1px solid #334155; border-radius:12px;
+  padding:16px; text-align:center; cursor:pointer; transition:all .15s;
+}}
+.profile-quick-card:hover {{ border-color:#22c55e; background:#0f172a; }}
+.profile-quick-card .pqc-photo {{
+  width:52px; height:52px; border-radius:50%; overflow:hidden; margin:0 auto 10px;
+  background:#0f172a; border:2px solid #334155;
+  display:flex; align-items:center; justify-content:center; font-size:1.5rem;
+}}
+.profile-quick-card .pqc-photo img {{ width:100%; height:100%; object-fit:cover; }}
+.profile-quick-card .pqc-pid {{ font-size:.75rem; font-family:monospace; color:#94a3b8; margin-bottom:4px; }}
+.profile-quick-card .pqc-un {{ font-size:.72rem; color:#22c55e; }}
+.profile-quick-card .pqc-status {{ font-size:.65rem; color:#334155; margin-top:6px; }}
+.profile-quick-card.configured {{ border-color:#1e40af; }}
+.profile-quick-card.configured .pqc-status {{ color:#3b82f6; }}
+.apply-status {{
+  font-size:.78rem; margin-top:12px; padding:10px 14px; border-radius:8px;
+  display:none;
+}}
+.apply-status.ok {{ background:#052e16; border:1px solid #166534; color:#86efac; }}
+.apply-status.err {{ background:#450a0a; border:1px solid #7f1d1d; color:#fca5a5; }}
+</style></head><body>
   <div class="neon-logo">
     <span class="neon-agency">Agency</span>
     <div class="neon-box"><span class="neon-text">OF4MYM</span></div>
   </div>
   <h1>Setup Profils</h1>
-  <p class="subtitle">Configure les photos, pseudos et bios de tes comptes Telegram</p>
+  <p class="subtitle">Modifie la photo, le @username et la bio de chaque compte Telegram</p>
   {nav_html("setup")}
 
   <div class="stats">
     <div class="stat"><div class="stat-value">{len(profile_ids)}</div><div class="stat-label">Profils totaux</div></div>
     <div class="stat"><div class="stat-value">{nb_config}</div><div class="stat-label">Configurés</div></div>
-    <div class="stat"><div class="stat-value">{len(non_config)}</div><div class="stat-label">Sans config</div></div>
+    <div class="stat"><div class="stat-value">{len(non_config)}</div><div class="stat-label">Non configurés</div></div>
   </div>
 
-  <!-- ══ FORMULAIRE AJOUT / MODIF ══ -->
-  <p class="section-title">Ajouter / Modifier un profil</p>
-  <div class="setup-grid">
-    <div class="setup-form">
-      <h2 id="formTitle">Nouveau profil</h2>
-
-      <div class="setup-field">
-        <label>ID Profil AdsPower</label>
-        <select id="fPid" style="background:#0f172a;border:1px solid #334155;border-radius:8px;padding:9px 12px;color:#e2e8f0;font-size:.82rem;">
-          <option value="">— Sélectionne un profil —</option>
-          {opts_all}
-        </select>
-      </div>
-      <div class="setup-field">
-        <label>Numéro de téléphone</label>
-        <input id="fPhone" type="text" placeholder="+33600000000">
-      </div>
-      <div class="setup-field">
-        <label>Prénom (affiché sur Telegram)</label>
-        <input id="fName" type="text" placeholder="Sophie">
-      </div>
-      <div class="setup-field">
-        <label>@Username (sans le @)</label>
-        <input id="fUsername" type="text" placeholder="sophie_agency">
-      </div>
-      <div class="setup-field">
-        <label>Bio Telegram</label>
-        <textarea id="fBio" placeholder="Gestion de comptes Instagram · OF Agency&#10;DM pour infos 📩"></textarea>
-      </div>
-      <div class="setup-field">
-        <label>Photo de profil</label>
-        <div style="display:flex;align-items:center;gap:14px;margin-top:4px;">
-          <div id="photoPreviewWrap"><div class="photo-placeholder">👤</div></div>
-          <div style="flex:1;">
-            <input type="file" id="fPhoto" accept="image/*" style="display:none;" onchange="previewPhoto(this)">
-            <button onclick="document.getElementById('fPhoto').click()"
-              style="background:#1e3a5f;border:1px solid #1e40af;color:#93c5fd;border-radius:8px;padding:8px 16px;font-size:.78rem;font-weight:700;cursor:pointer;">
-              📷 Choisir une photo
-            </button>
-            <p id="photoName" style="font-size:.7rem;color:#475569;margin-top:5px;"></p>
-          </div>
-        </div>
-      </div>
-      <div style="display:flex;gap:8px;margin-top:6px;">
-        <button onclick="saveSetup()"
-          style="background:#22c55e;border:none;border-radius:8px;padding:11px 24px;color:#fff;font-weight:700;font-size:.875rem;cursor:pointer;flex:1;">
-          💾 Enregistrer
-        </button>
-        <button onclick="resetForm()"
-          style="background:#1e293b;border:1px solid #334155;border-radius:8px;padding:11px 16px;color:#94a3b8;font-weight:600;font-size:.82rem;cursor:pointer;">
-          Réinitialiser
-        </button>
-      </div>
-      <p style="font-size:.68rem;color:#334155;margin-top:12px;line-height:1.5;">
-        💡 Les changements sont appliqués en lançant <code style="background:#0f172a;padding:1px 5px;border-radius:4px;">profile_changer.py</code> en local.
-      </p>
-    </div>
-
-    <!-- ══ INSTRUCTIONS ══ -->
-    <div class="setup-form" style="background:#060c18;border-color:#1e3a5f;">
-      <h2 style="color:#93c5fd;">Comment appliquer les changements ?</h2>
-      <div style="font-size:.8rem;color:#475569;line-height:1.8;">
-        <p style="color:#3b82f6;font-weight:700;margin-bottom:8px;">1. Configure ici ↑</p>
-        <p>Remplis le formulaire pour chaque profil AdsPower et enregistre.</p>
-        <br>
-        <p style="color:#3b82f6;font-weight:700;margin-bottom:8px;">2. Lance <code style="background:#0f172a;padding:2px 6px;border-radius:4px;color:#22c55e;">profile_changer.py</code></p>
-        <p>Le script lit les configs depuis Supabase et applique automatiquement :<br>
-          ✓ Photo de profil<br>
-          ✓ Prénom / Nom<br>
-          ✓ @Username<br>
-          ✓ Bio
-        </p>
-        <br>
-        <p style="color:#3b82f6;font-weight:700;margin-bottom:8px;">3. Mode Direct DM</p>
-        <p>Dans l'onglet <b>Warm-Up</b>, clique sur <b>WU→DM</b> à côté d'un profil pour qu'il saute la chauffe et passe directement aux Mass DMs progressifs.</p>
-        <br>
-        <div style="background:#052e16;border:1px solid #166534;border-radius:10px;padding:12px;">
-          <p style="color:#22c55e;font-weight:700;margin-bottom:4px;">SQL Supabase requis</p>
-          <code style="font-size:.7rem;color:#86efac;white-space:pre;">ALTER TABLE profiles ADD COLUMN IF NOT EXISTS dm_mode TEXT DEFAULT 'warmup';
-ALTER TABLE profiles ADD COLUMN IF NOT EXISTS dm_day INTEGER DEFAULT 0;
-CREATE TABLE IF NOT EXISTS profile_setup (
-  id SERIAL PRIMARY KEY,
-  profile_id TEXT NOT NULL UNIQUE,
-  phone TEXT DEFAULT '',
-  first_name TEXT DEFAULT '',
-  username TEXT DEFAULT '',
-  bio TEXT DEFAULT '',
-  photo_b64 TEXT DEFAULT '',
-  photo_name TEXT DEFAULT '',
-  updated_at TEXT DEFAULT ''
-);
-ALTER TABLE profile_setup DISABLE ROW LEVEL SECURITY;</code>
-        </div>
-      </div>
-    </div>
+  <!-- ══ CARTES PROFILS ══ -->
+  <p class="section-title">Clique sur un profil pour le configurer</p>
+  <div class="profiles-quick-list">
+    {"".join(f'''<div class="profile-quick-card {"configured" if p in config_map else ""}" onclick="openEditModal('{p}','{(config_map[p].get("username","") or "").replace("'","&#39;")}','{(config_map[p].get("bio","") or "").replace(chr(10)," ").replace("'","&#39;").replace(chr(34),"&quot;")[:80]}',null)">
+      <div class="pqc-photo">{"<img src='data:image/{}" + ("jpeg" if (config_map[p].get("photo_name","") or "").lower().endswith((".jpg",".jpeg")) else "png") + ";base64," + (config_map[p].get("photo_b64","") or "")[:200] + "…'>" if p in config_map and config_map[p].get("photo_b64") else "👤"}</div>
+      <div class="pqc-pid">{p}</div>
+      <div class="pqc-un">{"@"+(config_map[p].get("username","") or "") if p in config_map and config_map[p].get("username") else "<span style=\\'color:#475569\\'>—</span>"}</div>
+      <div class="pqc-status">{"✓ Configuré" if p in config_map else "⚪ Non configuré"}</div>
+    </div>''' for p in profile_ids)}
   </div>
 
   <!-- ══ TABLE DES PROFILS CONFIGURÉS ══ -->
   <p class="section-title">Profils configurés ({nb_config})</p>
   <div class="card">
-    <table class="setup-profiles-table">
+    <table>
       <thead><tr>
-        <th>Photo</th><th>ID Profil</th><th>Téléphone</th>
-        <th>Prénom</th><th>@Username</th><th>Bio</th>
-        <th>Modifié</th><th style="width:120px;"></th>
+        <th style="width:62px;">Photo</th>
+        <th class="th-l">ID Profil</th>
+        <th class="th-l">@Username</th>
+        <th class="th-l">Bio</th>
+        <th>Modifié le</th>
+        <th style="width:140px;"></th>
       </tr></thead>
       <tbody>{rows}</tbody>
     </table>
   </div>
 
+  <!-- ══ MODAL ÉDITION ══ -->
+  <div class="setup-modal-overlay" id="setupModal">
+    <div class="setup-modal">
+      <h2>✏ Modifier le profil — <span id="modalPid" style="color:#93c5fd;font-size:.88rem;"></span></h2>
+
+      <!-- Photo -->
+      <div class="setup-field">
+        <label>📷 Photo de profil</label>
+        <div class="photo-upload-area">
+          <div class="photo-upload-preview" id="photoPreview">👤</div>
+          <div>
+            <input type="file" id="fPhoto" accept="image/*" style="display:none;" onchange="previewPhoto(this)">
+            <button class="btn-choose-photo" onclick="document.getElementById('fPhoto').click()">
+              📷 Choisir une image
+            </button>
+            <p id="photoName" style="font-size:.7rem;color:#475569;margin:0;"></p>
+          </div>
+        </div>
+      </div>
+
+      <!-- Username -->
+      <div class="setup-field">
+        <label>🔑 @Username (sans le @)</label>
+        <input id="fUsername" type="text" placeholder="sophie_agency">
+      </div>
+
+      <!-- Bio -->
+      <div class="setup-field">
+        <label>📝 Bio Telegram</label>
+        <textarea id="fBio" placeholder="Gestion de comptes Instagram · OF Agency&#10;DM pour infos 📩"></textarea>
+      </div>
+
+      <!-- Bouton -->
+      <button class="btn-apply" id="btnApply" onclick="saveAndApply()">
+        💾 Enregistrer &amp; Appliquer maintenant
+      </button>
+      <div class="apply-status" id="applyStatus"></div>
+      <button class="btn-cancel-modal" onclick="closeModal()">Annuler</button>
+    </div>
+  </div>
+
 <div id="toast" class="toast">Sauvegardé !</div>
 <script>
-let _editPhotoB64 = '';
-let _editPhotoName = '';
+let _pid = '';
+let _photoB64 = '';
+let _photoName = '';
+
+function openEditModal(pid, username, bio, hasPhoto) {{
+  _pid = pid;
+  _photoB64 = '';
+  _photoName = '';
+  document.getElementById('modalPid').textContent    = pid;
+  document.getElementById('fUsername').value         = username.replace(/&#39;/g,"'").replace(/&quot;/g,'"');
+  document.getElementById('fBio').value              = bio.replace(/&#39;/g,"'").replace(/&quot;/g,'"').replace(/ {2}/g,'\\n');
+  document.getElementById('photoPreview').innerHTML  = hasPhoto ? '✓ Photo existante' : '👤';
+  document.getElementById('photoName').textContent   = hasPhoto ? '(une photo est déjà enregistrée — tu peux en choisir une autre)' : '';
+  document.getElementById('fPhoto').value            = '';
+  document.getElementById('applyStatus').style.display = 'none';
+  document.getElementById('btnApply').disabled = false;
+  document.getElementById('btnApply').textContent = '💾 Enregistrer & Appliquer maintenant';
+  document.getElementById('setupModal').classList.add('open');
+}}
+
+function closeModal() {{
+  document.getElementById('setupModal').classList.remove('open');
+}}
 
 function previewPhoto(input) {{
   if (!input.files || !input.files[0]) return;
   const file = input.files[0];
-  _editPhotoName = file.name;
+  _photoName = file.name;
   const reader = new FileReader();
   reader.onload = (e) => {{
-    _editPhotoB64 = e.target.result.split(',')[1]; // base64 only
-    const wrap = document.getElementById('photoPreviewWrap');
+    _photoB64 = e.target.result.split(',')[1];
     const ext  = file.name.toLowerCase().endsWith('.png') ? 'png' : 'jpeg';
-    wrap.innerHTML = '<img src="data:image/'+ext+';base64,'+_editPhotoB64+'" class="photo-preview">';
+    document.getElementById('photoPreview').innerHTML =
+      '<img src="data:image/'+ext+';base64,'+_photoB64+'" style="width:72px;height:72px;object-fit:cover;">';
     document.getElementById('photoName').textContent = file.name;
   }};
   reader.readAsDataURL(file);
 }}
 
-async function saveSetup() {{
-  const pid = document.getElementById('fPid').value.trim();
-  if (!pid) {{ alert('Sélectionne un profil AdsPower !'); return; }}
-  const body = {{
-    token:      'Compte.1',
-    profile_id: pid,
-    phone:      document.getElementById('fPhone').value.trim(),
-    first_name: document.getElementById('fName').value.trim(),
-    username:   document.getElementById('fUsername').value.trim(),
-    bio:        document.getElementById('fBio').value.trim(),
-    photo_b64:  _editPhotoB64,
-    photo_name: _editPhotoName,
-  }};
-  const r = await fetch('/api/setup/upsert', {{
-    method:'POST', headers:{{'Content-Type':'application/json'}},
-    body: JSON.stringify(body)
-  }});
-  const d = await r.json();
-  if (d.ok) {{
-    document.getElementById('toast').style.display='block';
-    setTimeout(() => location.reload(), 1200);
-  }} else alert('Erreur : ' + (d.detail || JSON.stringify(d)));
-}}
+async function saveAndApply() {{
+  if (!_pid) {{ alert('Aucun profil sélectionné'); return; }}
+  const username = document.getElementById('fUsername').value.trim();
+  const bio      = document.getElementById('fBio').value.trim();
 
-function editProfile(pid, phone, fn, username, bio) {{
-  document.getElementById('fPid').value      = pid;
-  document.getElementById('fPhone').value    = phone.replace(/&#39;/g,"'");
-  document.getElementById('fName').value     = fn.replace(/&quot;/g,'"');
-  document.getElementById('fUsername').value = username.replace(/&quot;/g,'"');
-  document.getElementById('fBio').value      = bio.replace(/&#39;/g,"'").replace(/&quot;/g,'"');
-  document.getElementById('formTitle').textContent = 'Modifier — ' + pid;
-  window.scrollTo({{top:0, behavior:'smooth'}});
-}}
+  if (!username && !bio && !_photoB64) {{
+    alert('Remplis au moins un champ (photo, username ou bio) !');
+    return;
+  }}
 
-function resetForm() {{
-  ['fPid','fPhone','fName','fUsername','fBio'].forEach(id => {{
-    const el = document.getElementById(id);
-    if (el) el.value = '';
-  }});
-  _editPhotoB64 = ''; _editPhotoName = '';
-  document.getElementById('photoPreviewWrap').innerHTML = '<div class="photo-placeholder">👤</div>';
-  document.getElementById('photoName').textContent = '';
-  document.getElementById('formTitle').textContent = 'Nouveau profil';
+  const btn    = document.getElementById('btnApply');
+  const status = document.getElementById('applyStatus');
+  btn.disabled = true;
+  btn.textContent = '⏳ Enregistrement en cours...';
+  status.style.display = 'none';
+
+  try {{
+    const r = await fetch('/api/setup/upsert', {{
+      method: 'POST',
+      headers: {{'Content-Type': 'application/json'}},
+      body: JSON.stringify({{
+        token:      'Compte.1',
+        profile_id: _pid,
+        username,
+        bio,
+        photo_b64:  _photoB64,
+        photo_name: _photoName,
+        apply:      true,   // déclenche le trigger pour profile_changer.py
+      }})
+    }});
+    const d = await r.json();
+    if (!d.ok) throw new Error(d.detail || JSON.stringify(d));
+
+    btn.textContent = '✓ Envoyé !';
+    status.className = 'apply-status ok';
+    status.innerHTML = '✅ Config enregistrée · <strong>profile_changer.py se lance dans ~30s</strong> (daemon en arrière-plan)<br><span style="font-size:.7rem;color:#4ade80;">Assure-toi que LANCER_TOUT.vbs a été exécuté au démarrage.</span>';
+    status.style.display = 'block';
+
+    // Recharge la page après 3s pour montrer la nouvelle config
+    setTimeout(() => {{ closeModal(); location.reload(); }}, 3500);
+
+  }} catch(e) {{
+    btn.disabled = false;
+    btn.textContent = '💾 Enregistrer & Appliquer maintenant';
+    status.className = 'apply-status err';
+    status.innerHTML = '❌ Erreur : ' + e.message;
+    status.style.display = 'block';
+  }}
 }}
 
 async function deleteSetup(pid) {{
@@ -2015,6 +2085,11 @@ async function deleteSetup(pid) {{
   if (d.ok) location.reload();
   else alert('Erreur : ' + JSON.stringify(d));
 }}
+
+// Fermer le modal en cliquant en dehors
+document.getElementById('setupModal').addEventListener('click', function(e) {{
+  if (e.target === this) closeModal();
+}});
 </script>
 </body></html>"""
     return html

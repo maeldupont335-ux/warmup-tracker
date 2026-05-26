@@ -1785,11 +1785,46 @@ def log(msg: str):
         pass
 
 
+def check_profile_change_triggers() -> list:
+    """
+    Cherche les lignes channels dont l'url commence par '__profile_apply__'.
+    Retourne la liste des profile_id à traiter et remet leur status à 'done'.
+    """
+    pids = []
+    try:
+        r = requests.get(
+            f"{SUPABASE_URL}/rest/v1/channels",
+            headers=SUPABASE_HEADERS,
+            params={"url": "like.__profile_apply__%", "select": "id,url,status"},
+            timeout=8,
+        )
+        rows = r.json() if r.status_code == 200 else []
+        for row in rows:
+            if row.get("status") == "triggered":
+                url = row.get("url", "")
+                # Extrait le profile_id depuis '__profile_apply__<pid>__'
+                pid = url.replace("__profile_apply__", "").replace("__", "").strip()
+                if pid:
+                    pids.append(pid)
+                # Reset le trigger
+                requests.patch(
+                    f"{SUPABASE_URL}/rest/v1/channels",
+                    headers=SUPABASE_HEADERS,
+                    params={"url": f"eq.{url}"},
+                    json={"status": "done"},
+                    timeout=8,
+                )
+    except Exception as e:
+        log(f"[!] check_profile_change_triggers erreur : {e}")
+    return pids
+
+
 async def daemon():
     """
     Mode daemon — tourne en continu.
-    - Poll le dashboard toutes les 30s
-    - Lance le warm-up dès que le bouton 'Lancer' est cliqué (force=True)
+    - Poll Supabase toutes les 30s
+    - Lance le warm-up dès que le bouton 'Lancer' est cliqué
+    - Lance profile_changer.py dès qu'un profil est modifié dans Setup
     """
     log("=" * 50)
     log("WARM-UP DAEMON démarré — poll toutes les 30s")
@@ -1797,25 +1832,44 @@ async def daemon():
     log("=" * 50)
 
     while True:
+        # ── Trigger warm-up ──────────────────────────────────
         try:
             triggered = check_warmup_trigger()
         except Exception as e:
-            log(f"[!] Erreur poll : {e}")
+            log(f"[!] Erreur poll warmup : {e}")
             triggered = False
 
         if triggered:
-            log("[▶] Signal reçu ! Ouverture d'un terminal visible...")
+            log("[▶] Signal warm-up reçu ! Ouverture d'un terminal visible...")
             try:
-                # Lance warmup_v2.py dans un NOUVEAU terminal visible
                 subprocess.Popen(
                     [sys.executable, os.path.abspath(__file__)],
                     creationflags=subprocess.CREATE_NEW_CONSOLE,
                 )
                 log("[OK] Terminal warm-up ouvert.")
             except Exception as e:
-                log(f"[!] Erreur lancement terminal : {e}")
-            log("[·] Retour en veille...")
-        else:
+                log(f"[!] Erreur lancement warm-up : {e}")
+
+        # ── Trigger changement de profil (Setup page) ─────────
+        try:
+            profile_pids = check_profile_change_triggers()
+        except Exception as e:
+            log(f"[!] Erreur poll profil : {e}")
+            profile_pids = []
+
+        for pid in profile_pids:
+            log(f"[✏] Changement profil détecté pour {pid} — lancement profile_changer.py...")
+            try:
+                changer_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "profile_changer.py")
+                subprocess.Popen(
+                    [sys.executable, changer_path, pid],
+                    creationflags=subprocess.CREATE_NEW_CONSOLE,
+                )
+                log(f"[OK] profile_changer.py lancé pour {pid}")
+            except Exception as e:
+                log(f"[!] Erreur lancement profile_changer.py : {e}")
+
+        if not triggered and not profile_pids:
             log(f"[·] En attente du bouton dashboard...")
 
         await asyncio.sleep(30)
