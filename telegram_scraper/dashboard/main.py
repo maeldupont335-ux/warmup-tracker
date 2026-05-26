@@ -2097,7 +2097,7 @@ async function saveAndApply() {{
 
     btn.textContent = '✓ Envoyé !';
     status.className = 'apply-status ok';
-    status.innerHTML = '✅ Config enregistrée · <strong>profile_changer.py se lance dans ~30s</strong> (daemon en arrière-plan)<br><span style="font-size:.7rem;color:#4ade80;">Assure-toi que LANCER_TOUT.vbs a été exécuté au démarrage.</span>';
+    status.innerHTML = '✅ Config enregistrée — les changements seront appliqués automatiquement dans <strong>~30 secondes</strong> sans ouvrir de terminal.<br><span style="font-size:.7rem;color:#64748b;">Le daemon (LANCER_TOUT.vbs) doit être en cours d\'exécution.</span>';
     status.style.display = 'block';
 
     // Recharge la page après 3s pour montrer la nouvelle config

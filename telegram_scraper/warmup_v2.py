@@ -1963,10 +1963,12 @@ async def daemon():
             try:
                 changer_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "profile_changer.py")
                 subprocess.Popen(
-                    [sys.executable, changer_path, pid],
-                    creationflags=subprocess.CREATE_NEW_CONSOLE,
+                    [sys.executable, changer_path, pid, "--silent"],
+                    creationflags=0x08000000,  # CREATE_NO_WINDOW — silencieux, sans terminal
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
                 )
-                log(f"[OK] profile_changer.py lancé pour {pid}")
+                log(f"[OK] profile_changer.py lancé silencieusement pour {pid}")
             except Exception as e:
                 log(f"[!] Erreur lancement profile_changer.py : {e}")
 

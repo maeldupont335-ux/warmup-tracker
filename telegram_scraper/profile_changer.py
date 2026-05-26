@@ -484,9 +484,11 @@ async def apply_changes(page, config: dict):
 # ── Main ─────────────────────────────────────────────────────
 
 async def main():
-    if len(sys.argv) < 2:
-        print("[X] Usage : python profile_changer.py <profile_id>")
+    if len(sys.argv) < 2 or sys.argv[1].startswith("--"):
+        print("[X] Usage : python profile_changer.py <profile_id> [--silent]")
         sys.exit(1)
+
+    IS_SILENT = "--silent" in sys.argv   # lancé depuis le daemon → pas de pause
 
     profile_id = sys.argv[1].strip()
     print(f"\n{'='*56}")
@@ -498,7 +500,8 @@ async def main():
     if not config:
         print(f"[X] Aucune config trouvée pour {profile_id} dans Supabase (table profile_setup)")
         print("    → Configure d'abord le profil dans le dashboard onglet ⚙ Setup")
-        input("\nAppuie sur Entrée pour fermer...")
+        if not IS_SILENT:
+            input("\nAppuie sur Entrée pour fermer...")
         sys.exit(1)
 
     print(f"[OK] Config chargée pour {profile_id}")
@@ -510,7 +513,8 @@ async def main():
     except Exception as e:
         print(f"[X] Impossible de démarrer AdsPower : {e}")
         print("    → Vérifie qu'AdsPower est lancé et que le profil existe")
-        input("\nAppuie sur Entrée pour fermer...")
+        if not IS_SILENT:
+            input("\nAppuie sur Entrée pour fermer...")
         sys.exit(1)
 
     print(f"[OK] Navigateur démarré")
@@ -538,7 +542,8 @@ async def main():
         stop_browser(profile_id)
         print(f"[OK] AdsPower fermé ({profile_id})")
 
-    input("\nTerminé ! Appuie sur Entrée pour fermer...")
+    if not IS_SILENT:
+        input("\nTerminé ! Appuie sur Entrée pour fermer...")
 
 
 if __name__ == "__main__":
