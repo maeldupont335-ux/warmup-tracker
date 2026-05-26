@@ -169,6 +169,50 @@ PLAN = {
     13: (4, 1, 6),   14: (3, 1, 8),   15: (4, 1, 10),
 }
 
+# ── Plan Direct DM (sans chauffe — progression du J1 au J7+) ──
+DIRECT_DM_LIMITS = {1: 5, 2: 8, 3: 12, 4: 15, 5: 20, 6: 25}
+# Jour 7+ → random 28-33
+
+def get_direct_dm_limit(dm_day: int) -> int:
+    if dm_day in DIRECT_DM_LIMITS:
+        return DIRECT_DM_LIMITS[dm_day]
+    return random.randint(28, 33)
+
+
+def load_direct_dm_templates() -> list:
+    """Charge les templates actifs depuis le dashboard pour le mode Direct DM."""
+    try:
+        r = requests.get(f"{DASHBOARD_URL}/api/dm_templates", timeout=10)
+        if r.status_code == 200:
+            all_t = r.json()
+            active = [t for t in all_t if t.get("active", True)]
+            return active
+    except Exception as e:
+        print(f"[!] Impossible de charger les templates DM : {e}")
+    return []
+
+
+def pick_dm_template(templates: list, session_counts: dict) -> dict | None:
+    """Sélectionne le template avec le moins d'envois (round-robin)."""
+    if not templates:
+        return None
+    scores = {t["id"]: t.get("sends", 0) + session_counts.get(t["id"], 0) for t in templates}
+    min_score = min(scores.values())
+    candidates = [t for t in templates if scores[t["id"]] == min_score]
+    return random.choice(candidates)
+
+
+def report_dm_send(template_id: int):
+    """Incrémente le compteur d'envois du template dans le dashboard."""
+    try:
+        requests.post(
+            f"{DASHBOARD_URL}/api/dm_template/stats",
+            json={"token": DASHBOARD_TOKEN, "template_id": template_id, "sends": 1, "replies": 0},
+            timeout=8,
+        )
+    except Exception:
+        pass
+
 # Chemin du script Mass DM à lancer après J15 (à configurer)
 MASS_DM_SCRIPT = r"C:\Users\MAEL\Downloads\AGENCY\AUTOMATION\telegram_scraper\dm_sender.py"
 # ============================================================
@@ -625,9 +669,18 @@ async def lire_chat(page, url: str):
     print(f"    [->] Lecture de {label}...")
     try:
         await page.bring_to_front()
-        # Délai humain avant navigation
         await page.wait_for_timeout(random.randint(1200, 2800))
-        await page.goto(url, wait_until="domcontentloaded", timeout=20000)
+        # Navigation 2 étapes pour forcer le routeur SPA
+        try:
+            await page.goto("https://web.telegram.org/k/",
+                            wait_until="domcontentloaded", timeout=15000)
+        except Exception:
+            pass
+        await page.wait_for_timeout(2000)
+        try:
+            await page.goto(url, wait_until="domcontentloaded", timeout=20000)
+        except Exception:
+            pass
         await page.wait_for_timeout(random.randint(2000, 4000))
         for _ in range(random.randint(3, 7)):
             await page.mouse.wheel(0, random.randint(-220, -70))
@@ -691,43 +744,56 @@ async def repondre_dms_recus(page) -> int:
     try:
         await page.bring_to_front()
         await page.goto("https://web.telegram.org/k/", wait_until="domcontentloaded", timeout=15000)
+
+        # Attendre que la chatlist soit vraiment chargée
+        try:
+            await page.wait_for_selector("li.chatlist-chat", timeout=10000)
+        except Exception:
+            pass
         await page.wait_for_timeout(3000)
 
-        # Trouve directement les li.chatlist-chat qui contiennent un badge non-gris
-        chats_avec_badge = await page.evaluate("""
+        # Cherche les chats non lus via JS (retourne leurs index dans la liste)
+        indices_non_lus = await page.evaluate("""
             () => {
-                const items = document.querySelectorAll('li.chatlist-chat');
+                const items = Array.from(document.querySelectorAll('li.chatlist-chat'));
                 const result = [];
-                for (const item of items) {
-                    const badge = item.querySelector('.badge:not(.badge-gray)');
-                    if (badge) {
-                        const rect = item.getBoundingClientRect();
-                        result.push({ x: rect.x + rect.width/2, y: rect.y + rect.height/2 });
-                    }
-                }
+                items.forEach((item, idx) => {
+                    const badge = item.querySelector('.badge:not(.badge-gray):not(.badge-muted)');
+                    if (badge && idx < 8) result.push(idx);
+                });
                 return result.slice(0, 5);
             }
         """)
 
-        if not chats_avec_badge:
+        if not indices_non_lus:
             print("    [OK] Aucun DM non lu\n")
             return 0
 
-        print(f"    [->] {len(chats_avec_badge)} chat(s) non lu(s)")
+        print(f"    [->] {len(indices_non_lus)} chat(s) non lu(s)")
 
-        for coords in chats_avec_badge:
+        all_chats = page.locator("li.chatlist-chat")
+
+        for idx in indices_non_lus:
             try:
-                # Clic direct aux coordonnées du chat
-                await page.mouse.click(coords['x'], coords['y'])
-                await page.wait_for_timeout(random.randint(1500, 3000))
+                item = all_chats.nth(idx)
+
+                # Scroll vers l'élément puis clic Playwright (fiable)
+                await item.scroll_into_view_if_needed()
+                await page.wait_for_timeout(500)
+                await item.click()
+                await page.wait_for_timeout(random.randint(1800, 3200))
 
                 inp = await get_real_input(page)
                 if not inp:
                     continue
 
-                # Vérifie que c'est bien un DM (peer_id positif)
+                # Vérifie que c'est bien un DM (pas un groupe → peer_id positif)
                 peer_id = await inp.get_attribute("data-peer-id") or ""
                 if peer_id.startswith("-"):
+                    # C'est un groupe, on passe
+                    await page.goto("https://web.telegram.org/k/",
+                                    wait_until="domcontentloaded", timeout=10000)
+                    await page.wait_for_timeout(2000)
                     continue
 
                 reponse = random.choice(DM_RESPONSES)
@@ -735,6 +801,11 @@ async def repondre_dms_recus(page) -> int:
                 await type_message(page, inp, reponse)
                 reponses += 1
                 await page.wait_for_timeout(random.randint(12000, 25000))
+
+                # Retour à la liste pour le prochain
+                await page.goto("https://web.telegram.org/k/",
+                                wait_until="domcontentloaded", timeout=10000)
+                await page.wait_for_timeout(2500)
 
             except Exception as e:
                 print(f"    [X] Erreur reponse : {e}")
@@ -746,17 +817,123 @@ async def repondre_dms_recus(page) -> int:
     return reponses
 
 
+async def envoyer_dm_template(page, username: str, prenom: str, message: str, message2: str = "") -> bool:
+    """Envoie un DM avec le texte du template (pour le mode Direct DM)."""
+    print(f"    [->] DM template à @{username}...")
+    try:
+        await page.bring_to_front()
+        await page.wait_for_timeout(random.randint(1000, 2000))
+
+        # ── Étape 1 : base URL pour réinitialiser le routeur SPA ──
+        try:
+            await page.goto("https://web.telegram.org/k/",
+                            wait_until="domcontentloaded", timeout=15000)
+        except Exception:
+            pass
+        # Attendre que la chatlist soit prête (SPA initialisé)
+        try:
+            await page.wait_for_selector("li.chatlist-chat, .chatlist", timeout=8000)
+        except Exception:
+            pass
+        await page.wait_for_timeout(1500)
+
+        # ── Étape 2 : navigation vers le profil ───────────────────
+        try:
+            await page.goto(
+                f"https://web.telegram.org/k/#@{username}",
+                wait_until="domcontentloaded", timeout=25000,
+            )
+        except Exception:
+            pass
+
+        # ── Bouton "Démarrer" si première conversation ─────────────
+        for sel in ["button.btn-primary", ".start-bot-button"]:
+            try:
+                btn = page.locator(sel).first
+                if await btn.is_visible(timeout=2000):
+                    await btn.click()
+                    await page.wait_for_timeout(2000)
+                    break
+            except Exception:
+                pass
+
+        # ── Attente du vrai input (retry jusqu'à 18s) ─────────────
+        # div.input-message-input existe TOUJOURS (éléments "fake") →
+        # on attend spécifiquement le vrai contenteditable="true"
+        real_input = None
+        for attempt in range(4):   # 4 tentatives × ~4s = ~16s max
+            try:
+                all_inp = page.locator("div.input-message-input")
+                count   = await all_inp.count()
+                for i in range(count):
+                    el  = all_inp.nth(i)
+                    cls = await el.get_attribute("class") or ""
+                    ce  = await el.get_attribute("contenteditable") or ""
+                    if "fake" in cls:
+                        continue
+                    if ce == "false":
+                        print(f"    [--] @{username} DMs bloqués (confidentialité)")
+                        return False
+                    if ce == "true":
+                        real_input = el
+                        break
+            except Exception:
+                pass
+
+            if real_input:
+                break
+
+            if attempt < 3:
+                await page.wait_for_timeout(4000)   # Attendre 4s de plus et réessayer
+
+        if not real_input:
+            print(f"    [--] @{username} introuvable (profil privé ou inexistant)")
+            return False
+
+        # ── Envoi du 1er message ───────────────────────────────────
+        await type_message(page, real_input, message)
+
+        # ── 2ème message si configuré ──────────────────────────────
+        if message2.strip():
+            delay2 = random.uniform(5, 18)
+            print(f"    [->] 2ème message dans {delay2:.0f}s...")
+            await page.wait_for_timeout(int(delay2 * 1000))
+            inp2 = await get_real_input(page)
+            if inp2:
+                await type_message(page, inp2, message2)
+
+        print(f"    [OK] DM template envoyé à {prenom} (@{username})")
+        return True
+
+    except Exception as e:
+        print(f"    [X] Erreur DM template @{username} : {e}")
+        return False
+
+
 async def envoyer_dm(page, username: str, prenom: str) -> bool:
     print(f"    [->] DM à @{username}...")
     try:
         await page.bring_to_front()
-        # Délai humain avant d'ouvrir la conversation
-        await page.wait_for_timeout(random.randint(2000, 5000))
+        await page.wait_for_timeout(random.randint(1500, 3000))
+        # Navigation 2 étapes pour forcer le routeur SPA
+        try:
+            await page.goto("https://web.telegram.org/k/",
+                            wait_until="domcontentloaded", timeout=15000)
+        except Exception:
+            pass
+        await page.wait_for_timeout(2000)
         await page.goto(
             f"https://web.telegram.org/k/#@{username}",
             wait_until="domcontentloaded", timeout=20000,
         )
-        await page.wait_for_timeout(random.randint(3000, 5000))
+        try:
+            await page.wait_for_selector(
+                "div.input-message-input, .empty-peer-placeholder",
+                timeout=12000
+            )
+        except Exception:
+            pass
+        await page.wait_for_timeout(random.randint(1500, 3000))
 
         for sel in ["button.btn-primary", ".start-bot-button"]:
             try:
@@ -811,9 +988,208 @@ async def envoyer_dm(page, username: str, prenom: str) -> bool:
 
 # ── Session warm-up pour UN profil ───────────────────────────
 
+async def run_direct_dm_for_profile(profile_id: str, profile_num: int, total: int, current_dm_day: int):
+    """Mode Direct DM : saute la chauffe, envoie des DMs avec templates progressifs."""
+
+    dm_day  = current_dm_day + 1
+    max_dms = get_direct_dm_limit(dm_day)
+    bar_dm  = "⚡" * min(dm_day, 7) + "·" * max(0, 7 - dm_day)
+
+    print(f"\n{'='*60}", flush=True)
+    print(f"  PROFIL [{profile_num}/{total}]  ID: {profile_id}", flush=True)
+    print(f"  ⚡ MODE DIRECT DM — Jour {dm_day}  [{bar_dm}]", flush=True)
+    print(f"  Limite aujourd'hui : {max_dms} DMs", flush=True)
+    print(f"{'='*60}", flush=True)
+
+    # Charge les templates
+    templates = load_direct_dm_templates()
+    if not templates:
+        print(f"  [!] Aucun template configuré sur le dashboard — session annulée")
+        print(f"      → Va sur le dashboard onglet Mass DM pour créer des templates")
+        return
+
+    print(f"  [OK] {len(templates)} template(s) A/B chargé(s)")
+
+    # Prépare les cibles DM
+    if not os.path.exists(DM_CSV):
+        print(f"  [!] Fichier membres introuvable : {DM_CSV}")
+        print(f"      → Lance scraper.py d'abord")
+        return
+
+    progress = load_progress(profile_id)
+    already  = load_already_dmed(profile_id) | set(progress.get("dms_sent", []))
+
+    with open(DM_CSV, newline="", encoding="utf-8-sig") as f:
+        import csv as csv_mod
+        members = list(csv_mod.DictReader(f))
+
+    candidates = [m for m in members
+                  if m.get("username") and m.get("bot") != "Oui"
+                  and m["username"] not in already]
+
+    if not candidates:
+        print(f"  [OK] Plus personne à contacter pour ce profil.")
+        return
+
+    dm_targets     = random.sample(candidates, min(max_dms, len(candidates)))
+    session_counts = {}
+    session_errors = []
+
+    # Démarrage AdsPower
+    try:
+        print(f"[->] Démarrage du navigateur AdsPower ({profile_id})...", flush=True)
+        cdp_url = start_browser(profile_id)
+    except Exception as e:
+        print(f"[X] Démarrage échoué : {e}\n")
+        return
+
+    dms_ok = 0
+
+    try:
+        async with async_playwright() as p:
+            browser = await p.chromium.connect_over_cdp(cdp_url)
+            context = browser.contexts[0]
+            page    = context.pages[0] if context.pages else await context.new_page()
+
+            await page.bring_to_front()
+
+            # Attend Telegram Web
+            for _ in range(15):
+                if "web.telegram.org" in page.url:
+                    break
+                await page.wait_for_timeout(1000)
+
+            if "web.telegram.org" not in page.url:
+                try:
+                    await page.goto("https://web.telegram.org/k/", wait_until="domcontentloaded", timeout=30000)
+                except Exception:
+                    pass
+
+            telegram_ok = False
+            for _ in range(20):
+                try:
+                    ok = await page.locator(".chatlist-chat, .chat-list").first.is_visible(timeout=1500)
+                    if ok:
+                        telegram_ok = True
+                        break
+                except Exception:
+                    pass
+                await page.wait_for_timeout(1000)
+
+            if not telegram_ok:
+                print(f"  [X] Telegram non connecté sur ce profil — session annulée")
+                session_errors.append("Telegram non connecte")
+            else:
+                print(f"\n[->] ⚡ Direct DM — envoi de {len(dm_targets)} message(s)\n", flush=True)
+
+                for i, membre in enumerate(dm_targets, 1):
+                    username = membre["username"]
+                    prenom   = membre.get("prenom") or "toi"
+
+                    # Sélection du template (round-robin)
+                    tmpl = pick_dm_template(templates, session_counts)
+                    if not tmpl:
+                        continue
+
+                    texte  = tmpl["content"].replace("{prenom}", prenom)
+                    texte2 = (tmpl.get("content2") or "").strip().replace("{prenom}", prenom)
+
+                    ok = await envoyer_dm_template(page, username, prenom, texte, texte2)
+                    if ok:
+                        progress["dms_sent"].append(username)
+                        log_dm(profile_id, username, prenom)
+                        session_counts[tmpl["id"]] = session_counts.get(tmpl["id"], 0) + 1
+                        report_dm_send(tmpl["id"])
+                        dms_ok += 1
+                        save_progress(profile_id, progress)
+
+                    if i < len(dm_targets):
+                        pause = random.uniform(10, 22)
+                        await asyncio.sleep(pause)
+
+            # Fermeture
+            try:
+                await page.goto("about:blank", timeout=5000)
+            except Exception:
+                pass
+            await asyncio.sleep(2)
+            try:
+                await browser.disconnect()
+            except Exception as e:
+                session_errors.append(f"Deconnexion Playwright echouee : {e}")
+            await asyncio.sleep(4)
+
+    except Exception as e:
+        err = f"Erreur session critique : {type(e).__name__} — {e}"
+        print(f"[X] {err}")
+        session_errors.append(err)
+    finally:
+        stop_ok = _stop_browser_check(profile_id)
+        if not stop_ok:
+            session_errors.append("Fermeture AdsPower echouee")
+        await asyncio.sleep(2)
+
+    # Met à jour le dm_day dans le dashboard
+    try:
+        requests.post(f"{DASHBOARD_URL}/api/update", json={
+            "token":      DASHBOARD_TOKEN,
+            "profile_id": profile_id,
+            "day":        1,   # warm-up day ne change pas
+            "done_today": True,
+            "dms_total":  len(progress.get("dms_sent", [])),
+            "posts_total": 0,
+            "groups_joined": 0,
+            "dm_responses":  0,
+            "dms_session":   dms_ok,
+            "posts_session": 0,
+            "last_error":    " | ".join(session_errors) if session_errors else "",
+            "dm_day":        dm_day,
+        }, timeout=30)
+    except Exception as e:
+        print(f"[!] Dashboard non joignable : {e}")
+
+    next_limit = get_direct_dm_limit(dm_day + 1)
+    print(f"""
+{'='*60}
+  ⚡ DIRECT DM  [{profile_id}]  —  Jour {dm_day} terminé
+
+  DMs envoyés aujourd'hui  : {dms_ok}
+  Total DMs toutes sessions: {len(progress.get('dms_sent', []))}
+  Demain (Jour {dm_day+1})         : {next_limit} DMs max
+{'='*60}
+""", flush=True)
+
+    if profile_num < total:
+        pause = random.uniform(90, 130)
+        print(f"[->] Pause {pause:.0f}s avant le profil suivant...\n")
+        await asyncio.sleep(pause)
+
+
 async def run_warmup_for_profile(profile_id: str, profile_num: int, total: int):
     """Lance la session du jour pour un profil AdsPower donné."""
 
+    # ── Récupère le mode du profil depuis le dashboard ────────
+    dm_mode = "warmup"
+    dm_day  = 0
+    try:
+        r = requests.get(f"{DASHBOARD_URL}/api/status", timeout=10)
+        if r.status_code == 200:
+            all_data = r.json()
+            if profile_id in all_data:
+                dm_mode = all_data[profile_id].get("dm_mode", "warmup") or "warmup"
+                dm_day  = int(all_data[profile_id].get("dm_day", 0) or 0)
+    except Exception:
+        pass
+
+    # ════════════════════════════════════════════════════════
+    #  MODE DIRECT DM — saute la chauffe, envoie des DMs
+    # ════════════════════════════════════════════════════════
+    if dm_mode == "direct_dm":
+        return await run_direct_dm_for_profile(profile_id, profile_num, total, dm_day)
+
+    # ════════════════════════════════════════════════════════
+    #  MODE WARM-UP (normal)
+    # ════════════════════════════════════════════════════════
     progress        = load_progress(profile_id)
     day             = progress["day"]
     n_lect, n_posts, n_dms = PLAN.get(day, (3, 0, 0))
@@ -1132,13 +1508,27 @@ async def main():
     print(f"  Date : {date.today()}")
     print(f"{'='*60}")
 
+    # Récupère les modes depuis le dashboard (pour détecter direct_dm)
+    dash_modes = {}
+    try:
+        r = requests.get(f"{DASHBOARD_URL}/api/status", timeout=10)
+        if r.status_code == 200:
+            dash_modes = r.json()
+    except Exception:
+        pass
+
     # Aperçu rapide de ce qui va être fait
     skip = 0
     for i, pid in profiles_to_run:
-        data = load_progress(pid)
-        day  = data["day"]
-        tag  = ""
-        if day > 15:
+        data    = load_progress(pid)
+        day     = data["day"]
+        dm_mode = (dash_modes.get(pid) or {}).get("dm_mode", "warmup")
+        tag     = ""
+        if dm_mode == "direct_dm":
+            dm_day_cur = int((dash_modes.get(pid) or {}).get("dm_day", 0) or 0)
+            tag = f"  [⚡ DIRECT DM — J{dm_day_cur + 1}]"
+            # Ne pas compter dans skip : les direct_dm doivent toujours tourner
+        elif day > 15:
             tag = "  [TERMINÉ]"
         elif data.get("done_today"):
             tag = "  [DÉJÀ FAIT AUJOURD'HUI]"
