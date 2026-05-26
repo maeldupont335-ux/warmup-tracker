@@ -674,6 +674,27 @@ async def api_set_profile_mode(request: Request):
 
 
 # ═══════════════════════════════════════════════════════════
+#  Supabase helpers — Settings (triggers)
+# ═══════════════════════════════════════════════════════════
+
+def get_setting(key: str, default: str = "0") -> str:
+    try:
+        r = supabase.table("settings").select("value").eq("key", key).execute()
+        if r.data:
+            return r.data[0]["value"]
+    except Exception:
+        pass
+    return default
+
+
+def set_setting(key: str, value: str):
+    try:
+        supabase.table("settings").upsert({"key": key, "value": value, "updated_at": now_paris()}).execute()
+    except Exception as e:
+        print(f"[!] set_setting error: {e}")
+
+
+# ═══════════════════════════════════════════════════════════
 #  Supabase helpers — Canaux Scraper
 # ═══════════════════════════════════════════════════════════
 
@@ -787,6 +808,25 @@ async def api_request_scrape(request: Request):
         return {"ok": True}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/warmup/trigger")
+async def api_warmup_trigger(request: Request):
+    """Déclenche le warm-up immédiatement — warmup_v2.py détecte en 30s."""
+    body = await request.json()
+    if body.get("token") != SECRET_TOKEN:
+        raise HTTPException(status_code=401, detail="Token invalide")
+    set_setting("warmup_now", "1")
+    return {"ok": True}
+
+
+@app.get("/api/warmup/poll")
+def api_warmup_poll():
+    """warmup_v2.py appelle cet endpoint toutes les 30s pour savoir s'il doit démarrer."""
+    triggered = get_setting("warmup_now", "0") == "1"
+    if triggered:
+        set_setting("warmup_now", "0")   # reset après lecture
+    return {"triggered": triggered}
 
 
 @app.post("/api/update")
@@ -967,6 +1007,12 @@ def dashboard():
     <input id="inp" type="text" placeholder="ID AdsPower  ex: k1abc123">
     <button onclick="addItem()">Ajouter</button>
   </div>
+  <div style="margin-bottom:20px">
+    <button id="btn-launch" onclick="launchWarmup()" style="background:linear-gradient(135deg,#22c55e,#16a34a);color:#fff;border:none;border-radius:10px;padding:12px 28px;font-size:1rem;font-weight:700;cursor:pointer;box-shadow:0 0 18px rgba(34,197,94,.35);transition:all .2s">
+      ▶ Lancer le Warm-Up maintenant
+    </button>
+    <span id="launch-msg" style="display:none;margin-left:14px;color:#22c55e;font-weight:600">✓ Signal envoyé — démarrage dans ~30s</span>
+  </div>
   <div class="stats">
     <div class="stat"><div class="stat-value">{done_today}<span style="color:#334155;font-size:1.2rem">/{n}</span></div><div class="stat-label">Faits aujourd'hui</div></div>
     <div class="stat"><div class="stat-value">{total_dms}</div><div class="stat-label">DMs envoyes</div></div>
@@ -991,6 +1037,26 @@ def dashboard():
   <p class="refresh">Mis a jour par warmup_v2.py apres chaque profil</p>
   {add_js('/api/profile/add', 'inp', 'Profil ajoute !')}
 <script>
+async function launchWarmup() {{
+  const btn = document.getElementById('btn-launch');
+  btn.disabled = true;
+  btn.textContent = '⏳ Envoi du signal...';
+  const r = await fetch('/api/warmup/trigger', {{
+    method: 'POST',
+    headers: {{'Content-Type': 'application/json'}},
+    body: JSON.stringify({{token: 'Compte.1'}})
+  }});
+  const d = await r.json();
+  if (d.ok) {{
+    btn.textContent = '✓ Signal envoyé';
+    btn.style.background = '#1e293b';
+    document.getElementById('launch-msg').style.display = 'inline';
+  }} else {{
+    btn.disabled = false;
+    btn.textContent = '▶ Lancer le Warm-Up maintenant';
+    alert('Erreur : ' + JSON.stringify(d));
+  }}
+}}
 async function toggleMode(pid, mode) {{
   const label = mode === 'direct_dm'
     ? '⚡ Passer ce profil en mode Direct DM ?\\n(Il sautera le warm-up et enverra directement des Mass DMs)'
