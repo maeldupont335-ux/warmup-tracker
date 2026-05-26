@@ -1477,6 +1477,13 @@ def dashboard_massdm():
   <p class="subtitle">Analyse et suivi de tes messages DM · {n} profils actifs</p>
   {nav_html("massdm")}
 
+  <div style="margin-bottom:20px">
+    <button id="btn-launch-dm" onclick="launchMassDm()" style="background:linear-gradient(135deg,#3b82f6,#1d4ed8);color:#fff;border:none;border-radius:10px;padding:12px 28px;font-size:1rem;font-weight:700;cursor:pointer;box-shadow:0 0 18px rgba(59,130,246,.35);transition:all .2s">
+      ⚡ Lancer le Mass DM maintenant
+    </button>
+    <span id="launch-dm-msg" style="display:none;margin-left:14px;color:#3b82f6;font-weight:600">✓ Signal envoyé — démarrage dans ~30s</span>
+  </div>
+
   <div class="stats">
     <div class="stat"><div class="stat-value">{len(massdm_pids)}<span style="color:#334155;font-size:1.2rem">/{n}</span></div><div class="stat-label">Profils Mass DM</div></div>
     <div class="stat"><div class="stat-value">{total_sent}</div><div class="stat-label">DMs envoyés</div></div>
@@ -1617,6 +1624,36 @@ async function saveBio() {{
 document.getElementById('bioModal').addEventListener('click', function(e) {{
   if (e.target === this) closeBioModal();
 }});
+async function launchMassDm() {{
+  const btn = document.getElementById('btn-launch-dm');
+  btn.disabled = true;
+  btn.textContent = '⏳ Envoi du signal...';
+  const SUPA_URL = 'https://pirlgavzihmnwmqlyeir.supabase.co';
+  const SUPA_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InBpcmxnYXZ6aWhtbndtcWx5ZWlyIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzk3MzQxMTAsImV4cCI6MjA5NTMxMDExMH0.0QdskD9IBsx1rUZ_7Sljb8DshovkQMJIhmnAM-Zc6Ps';
+  try {{
+    const r = await fetch(`${{SUPA_URL}}/rest/v1/channels`, {{
+      method: 'POST',
+      headers: {{
+        'apikey': SUPA_KEY,
+        'Authorization': `Bearer ${{SUPA_KEY}}`,
+        'Content-Type': 'application/json',
+        'Prefer': 'resolution=merge-duplicates,return=minimal'
+      }},
+      body: JSON.stringify({{url:'__massdm_trigger__', status:'triggered', members_count:0}})
+    }});
+    if (r.ok || r.status === 201 || r.status === 200) {{
+      btn.textContent = '✓ Signal envoyé';
+      btn.style.background = '#1e293b';
+      document.getElementById('launch-dm-msg').style.display = 'inline';
+    }} else {{
+      throw new Error(await r.text());
+    }}
+  }} catch(e) {{
+    btn.disabled = false;
+    btn.textContent = '⚡ Lancer le Mass DM maintenant';
+    alert('Erreur Supabase : ' + e.message);
+  }}
+}}
 async function toggleModeMassDm(pid, mode) {{
   const label = mode === 'direct_dm'
     ? '⚡ Activer le Mass DM pour ce profil ?\\n(Il quittera le warm-up et enverra des DMs depuis le CSV scrapé)'

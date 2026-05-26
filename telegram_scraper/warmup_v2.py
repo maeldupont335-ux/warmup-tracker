@@ -1312,8 +1312,11 @@ async def run_direct_dm_for_profile(profile_id: str, profile_num: int, total: in
         await asyncio.sleep(pause)
 
 
-async def run_warmup_for_profile(profile_id: str, profile_num: int, total: int):
-    """Lance la session du jour pour un profil AdsPower donné."""
+async def run_warmup_for_profile(profile_id: str, profile_num: int, total: int,
+                                 force_warmup: bool = False):
+    """Lance la session du jour pour un profil AdsPower donné.
+    force_warmup=True → ignore le dm_mode, fait TOUJOURS le warm-up.
+    """
 
     # ── Récupère le mode du profil depuis le dashboard ────────
     dm_mode = "warmup"
@@ -1329,9 +1332,9 @@ async def run_warmup_for_profile(profile_id: str, profile_num: int, total: int):
         pass
 
     # ════════════════════════════════════════════════════════
-    #  MODE DIRECT DM — saute la chauffe, envoie des DMs
+    #  MODE DIRECT DM — seulement si force_warmup est False
     # ════════════════════════════════════════════════════════
-    if dm_mode == "direct_dm":
+    if dm_mode == "direct_dm" and not force_warmup:
         return await run_direct_dm_for_profile(profile_id, profile_num, total, dm_day)
 
     # ════════════════════════════════════════════════════════
@@ -1614,12 +1617,16 @@ async def run_warmup_for_profile(profile_id: str, profile_num: int, total: int):
 
 # ── Entrée principale ─────────────────────────────────────────
 
-async def main(force: bool = False):
+async def main(force: bool = False, warmup_only: bool = False, massdm_only: bool = False):
     """
-    force=True : ignore done_today → relance même si déjà fait aujourd'hui
-    (utilisé quand le bouton dashboard est cliqué)
+    warmup_only=True : force le warm-up pour TOUS les profils, ignore le dm_mode,
+                       réinitialise done_today. (bouton 'Lancer Warm-Up')
+    massdm_only=True : lance uniquement les profils en mode direct_dm.
+                       (bouton 'Lancer Mass DM')
+    force=True       : relance même si déjà fait aujourd'hui (mode normal).
     """
-    args = [a for a in sys.argv[1:] if a not in ("--daemon", "--auto")]
+    args = [a for a in sys.argv[1:]
+            if a not in ("--daemon", "--auto", "--warmup-only", "--massdm-only")]
 
     # ── --status ──────────────────────────────────────────────
     if "--status" in args:
@@ -1653,13 +1660,7 @@ async def main(force: bool = False):
     else:
         profiles_to_run = list(enumerate(ADSPOWER_PROFILES))
 
-    total = len(profiles_to_run)
-    print(f"\n{'='*60}")
-    print(f"  WARM-UP MULTI-PROFILS — {total} profil(s) à traiter")
-    print(f"  Date : {date.today()}")
-    print(f"{'='*60}")
-
-    # Récupère les modes depuis le dashboard (pour détecter direct_dm)
+    # Charge les modes depuis le dashboard
     dash_modes = {}
     try:
         r = requests.get(f"{DASHBOARD_URL}/api/status", timeout=10)
@@ -1668,7 +1669,67 @@ async def main(force: bool = False):
     except Exception:
         pass
 
-    # Aperçu rapide de ce qui va être fait
+    # ── Mode MASS DM UNIQUEMENT ───────────────────────────────
+    if massdm_only:
+        dm_profiles = [
+            (i, pid) for i, pid in profiles_to_run
+            if (dash_modes.get(pid) or {}).get("dm_mode", "warmup") == "direct_dm"
+        ]
+        if not dm_profiles:
+            print("\n[!] Aucun profil en mode Mass DM trouvé.")
+            print("    → Passe d'abord des profils en mode Mass DM dans l'onglet Warm-Up du dashboard")
+            return
+        profiles_to_run = dm_profiles
+        print(f"\n{'='*60}")
+        print(f"  ⚡ MASS DM — {len(profiles_to_run)} profil(s) en mode Direct DM")
+        print(f"  Date : {date.today()}")
+        print(f"{'='*60}")
+        for i, pid in profiles_to_run:
+            dm_day_cur = int((dash_modes.get(pid) or {}).get("dm_day", 0) or 0)
+            print(f"  Profil ({pid}) — Jour {dm_day_cur + 1}")
+        print()
+        print("\n[->] Démarrage dans 10 secondes... (Ctrl+C pour annuler)")
+        await asyncio.sleep(10)
+        for i, pid in profiles_to_run:
+            await run_warmup_for_profile(pid, i + 1, len(profiles_to_run))
+        print(f"\n{'='*60}")
+        print(f"  MASS DM TERMINÉ POUR TOUS LES PROFILS")
+        print(f"{'='*60}\n")
+        return
+
+    # ── Mode WARM-UP FORCÉ ────────────────────────────────────
+    if warmup_only:
+        print(f"\n{'='*60}")
+        print(f"  🔥 WARM-UP FORCÉ — {len(profiles_to_run)} profil(s)")
+        print(f"  (Mode dm ignoré — warm-up uniquement)")
+        print(f"  Date : {date.today()}")
+        print(f"{'='*60}")
+        # Réinitialise done_today pour tous les profils warm-up
+        for _, pid in profiles_to_run:
+            data = load_progress(pid)
+            if data.get("done_today"):
+                data["done_today"] = False
+                save_progress(pid, data)
+                print(f"  [->] Reset done_today pour {pid}")
+        print()
+        print("\n[->] Démarrage dans 10 secondes... (Ctrl+C pour annuler)")
+        await asyncio.sleep(10)
+        for i, pid in profiles_to_run:
+            # force_warmup=True → ignore dm_mode, fait toujours le warm-up
+            await run_warmup_for_profile(pid, i + 1, len(profiles_to_run), force_warmup=True)
+        print(f"\n{'='*60}")
+        print(f"  WARM-UP TERMINÉ POUR TOUS LES PROFILS")
+        print(f"{'='*60}\n")
+        return
+
+    # ── Mode NORMAL ───────────────────────────────────────────
+    total = len(profiles_to_run)
+    print(f"\n{'='*60}")
+    print(f"  WARM-UP MULTI-PROFILS — {total} profil(s) à traiter")
+    print(f"  Date : {date.today()}")
+    print(f"{'='*60}")
+
+    # Aperçu rapide
     skip = 0
     for i, pid in profiles_to_run:
         data    = load_progress(pid)
@@ -1678,7 +1739,6 @@ async def main(force: bool = False):
         if dm_mode == "direct_dm":
             dm_day_cur = int((dash_modes.get(pid) or {}).get("dm_day", 0) or 0)
             tag = f"  [⚡ DIRECT DM — J{dm_day_cur + 1}]"
-            # Ne pas compter dans skip : les direct_dm doivent toujours tourner
         elif day > 15:
             tag = "  [TERMINÉ]"
         elif data.get("done_today"):
@@ -1691,7 +1751,6 @@ async def main(force: bool = False):
         return
     elif skip == total and force:
         print("\n[▶] Force=True — relance même si déjà fait aujourd'hui.\n")
-        # Remet done_today à False pour que run_warmup_for_profile reparte
         for _, pid in profiles_to_run:
             data = load_progress(pid)
             if data.get("done_today"):
@@ -1699,7 +1758,7 @@ async def main(force: bool = False):
                 save_progress(pid, data)
 
     print()
-    print("\n[->] Demarrage automatique dans 10 secondes... (Ctrl+C pour annuler)")
+    print("\n[->] Démarrage automatique dans 10 secondes... (Ctrl+C pour annuler)")
     await asyncio.sleep(10)
 
     for i, pid in profiles_to_run:
@@ -1738,6 +1797,30 @@ SUPABASE_HEADERS = {
     "Authorization": f"Bearer {SUPABASE_KEY}",
     "Content-Type":  "application/json",
 }
+
+def _check_trigger(url_key: str) -> bool:
+    """Cherche un trigger dans la table channels par url_key. Retourne True + reset."""
+    try:
+        r = requests.get(
+            f"{SUPABASE_URL}/rest/v1/channels",
+            headers=SUPABASE_HEADERS,
+            params={"url": f"eq.{url_key}", "select": "id,status"},
+            timeout=8,
+        )
+        rows = r.json() if r.status_code == 200 else []
+        if any(row.get("status") == "triggered" for row in rows):
+            requests.patch(
+                f"{SUPABASE_URL}/rest/v1/channels",
+                headers=SUPABASE_HEADERS,
+                params={"url": f"eq.{url_key}"},
+                json={"status": "done"},
+                timeout=8,
+            )
+            return True
+    except Exception as e:
+        log(f"[!] check_trigger({url_key}) erreur : {e}")
+    return False
+
 
 def check_warmup_trigger() -> bool:
     """
@@ -1834,7 +1917,7 @@ async def daemon():
     while True:
         # ── Trigger warm-up ──────────────────────────────────
         try:
-            triggered = check_warmup_trigger()
+            triggered = _check_trigger("__warmup_trigger__")
         except Exception as e:
             log(f"[!] Erreur poll warmup : {e}")
             triggered = False
@@ -1843,12 +1926,30 @@ async def daemon():
             log("[▶] Signal warm-up reçu ! Ouverture d'un terminal visible...")
             try:
                 subprocess.Popen(
-                    [sys.executable, os.path.abspath(__file__)],
+                    [sys.executable, os.path.abspath(__file__), "--warmup-only"],
                     creationflags=subprocess.CREATE_NEW_CONSOLE,
                 )
-                log("[OK] Terminal warm-up ouvert.")
+                log("[OK] Terminal warm-up ouvert (--warmup-only).")
             except Exception as e:
                 log(f"[!] Erreur lancement warm-up : {e}")
+
+        # ── Trigger mass DM ───────────────────────────────────
+        try:
+            massdm_triggered = _check_trigger("__massdm_trigger__")
+        except Exception as e:
+            log(f"[!] Erreur poll massdm : {e}")
+            massdm_triggered = False
+
+        if massdm_triggered:
+            log("[⚡] Signal Mass DM reçu ! Ouverture d'un terminal visible...")
+            try:
+                subprocess.Popen(
+                    [sys.executable, os.path.abspath(__file__), "--massdm-only"],
+                    creationflags=subprocess.CREATE_NEW_CONSOLE,
+                )
+                log("[OK] Terminal Mass DM ouvert (--massdm-only).")
+            except Exception as e:
+                log(f"[!] Erreur lancement Mass DM : {e}")
 
         # ── Trigger changement de profil (Setup page) ─────────
         try:
@@ -1869,16 +1970,20 @@ async def daemon():
             except Exception as e:
                 log(f"[!] Erreur lancement profile_changer.py : {e}")
 
-        if not triggered and not profile_pids:
+        if not triggered and not massdm_triggered and not profile_pids:
             log(f"[·] En attente du bouton dashboard...")
 
         await asyncio.sleep(30)
 
 
 if __name__ == "__main__":
-    # Si lancé avec --daemon (ou via start_all.vbs), mode daemon
     if "--daemon" in sys.argv or "--auto" in sys.argv:
-        from datetime import datetime
         asyncio.run(daemon())
+    elif "--warmup-only" in sys.argv:
+        # Lancé par le daemon via bouton "Lancer Warm-Up"
+        asyncio.run(main(force=True, warmup_only=True))
+    elif "--massdm-only" in sys.argv:
+        # Lancé par le daemon via bouton "Lancer Mass DM"
+        asyncio.run(main(massdm_only=True))
     else:
         asyncio.run(main())
