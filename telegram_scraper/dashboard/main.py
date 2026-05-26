@@ -820,12 +820,12 @@ async def api_warmup_trigger(request: Request):
     if body.get("token") != SECRET_TOKEN:
         raise HTTPException(status_code=401, detail="Token invalide")
     try:
-        supabase.table("channels").upsert({
+        result = supabase.table("channels").upsert({
             "url":           "__warmup_trigger__",
             "status":        "triggered",
             "members_count": 0,
         }).execute()
-        return {"ok": True}
+        return {"ok": True, "debug_data": result.data}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
