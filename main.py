@@ -171,6 +171,63 @@ BASE_CSS = """
     background:#22c55e; flex-shrink:0;
     box-shadow:0 0 6px rgba(34,197,94,.8); }
   .chart-empty { padding:40px; text-align:center; color:#475569; font-size:.875rem; }
+  /* ── Section titles ── */
+  .section-title { font-size:.68rem; font-weight:800; color:#3b5278; text-transform:uppercase;
+    letter-spacing:.14em; display:flex; align-items:center; gap:8px; margin-bottom:16px; }
+  .section-title::before { content:''; width:3px; height:14px; background:#22c55e;
+    border-radius:99px; flex-shrink:0; }
+  /* ── Templates A/B ── */
+  .templates-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(265px,1fr));
+    gap:14px; margin-bottom:28px; }
+  .tpl-card { background:#0f172a; border:1px solid #1e3a5f; border-radius:14px;
+    padding:18px; display:flex; flex-direction:column; gap:10px; }
+  .tpl-card.inactive { opacity:.48; border-style:dashed; }
+  .tpl-name { font-size:.85rem; font-weight:700; color:#e2e8f0; display:flex;
+    align-items:center; gap:7px; flex-wrap:wrap; line-height:1.3; }
+  .tpl-num { font-size:.62rem; font-weight:800; padding:2px 9px; border-radius:99px;
+    text-transform:uppercase; letter-spacing:.06em; flex-shrink:0; }
+  .tpl-preview { font-size:.72rem; color:#475569; line-height:1.55; font-family:monospace;
+    white-space:pre-wrap; word-break:break-word; max-height:68px; overflow:hidden;
+    padding:9px 11px; background:#060c18; border-radius:8px; border:1px solid #1e293b; margin:0; }
+  .tpl-stats { display:flex; border-top:1px solid #1e293b; padding-top:12px; }
+  .tstat { flex:1; text-align:center; }
+  .tstat + .tstat { border-left:1px solid #1e293b; }
+  .tstat-val { font-size:1.15rem; font-weight:800; color:#f8fafc; line-height:1.2; }
+  .tstat-val.blue  { color:#93c5fd; }
+  .tstat-val.green { color:#22c55e; }
+  .tstat-val.gold  { color:#fbbf24; }
+  .tstat-lab { font-size:.59rem; color:#475569; text-transform:uppercase;
+    letter-spacing:.06em; margin-top:2px; }
+  .tpl-actions { display:flex; gap:6px; }
+  .btn-tpl { font-size:.72rem; font-weight:700; padding:6px 12px; border-radius:7px;
+    border:none; cursor:pointer; transition:all .15s; white-space:nowrap; }
+  .btn-tpl-del { background:#450a0a; color:#fca5a5; }
+  .btn-tpl-del:hover { background:#7f1d1d; }
+  .btn-tpl-on  { background:#052e16; color:#86efac; border:1px solid #166534; }
+  .btn-tpl-on:hover  { background:#14532d; }
+  .btn-tpl-off { background:#1e293b; color:#64748b; border:1px solid #334155; }
+  .btn-tpl-off:hover { background:#334155; }
+  .add-textarea { width:100%; background:#0f172a; border:1px solid #334155;
+    border-radius:8px; padding:10px 14px; color:#e2e8f0; font-size:.8rem;
+    font-family:monospace; resize:vertical; line-height:1.5; min-height:90px; }
+  .add-textarea:focus { outline:none; border-color:#22c55e; }
+  .add-textarea::placeholder { color:#334155; }
+  /* ── A/B Analytics table ── */
+  .ab-table { width:100%; border-collapse:collapse; font-size:.875rem; }
+  .ab-table th { background:#070d1b; color:#3b5278; font-weight:800; padding:10px 16px;
+    text-align:center; font-size:.65rem; text-transform:uppercase; letter-spacing:.12em;
+    border-bottom:2px solid #1e3a5f; white-space:nowrap; }
+  .ab-table th.th-l { text-align:left; }
+  .ab-table td { padding:13px 16px; border-bottom:1px solid #1e293b; vertical-align:middle; }
+  .ab-table tr:last-child td { border-bottom:none; }
+  .ab-table tr:hover td { background:#0f172a55; }
+  .rate-bar-wrap { display:flex; align-items:center; gap:10px; }
+  .rate-bar-bg { flex:1; height:7px; background:#0f172a; border-radius:99px;
+    overflow:hidden; min-width:60px; }
+  .rate-bar-fg { height:100%; border-radius:99px; transition:width .6s ease; }
+  .rate-pct { font-size:.82rem; font-weight:800; min-width:44px; text-align:right; }
+  .winner-badge { background:#052e16; color:#22c55e; border:1px solid #166534;
+    font-size:.62rem; font-weight:700; padding:2px 8px; border-radius:99px; margin-left:5px; }
   /* ── Logo neon ── */
   .neon-logo { position: fixed; top: 20px; right: 24px; text-align: center; z-index: 200;
     pointer-events: none; }
@@ -332,6 +389,109 @@ def save_massdm(profile: dict):
             "status": profile["status"], "history": profile["history"]}).execute()
     except Exception as e:
         print(f"[!] save_massdm error: {e}")
+
+
+# ═══════════════════════════════════════════════════════════
+#  Supabase helpers — Templates A/B
+# ═══════════════════════════════════════════════════════════
+
+def load_dm_templates() -> list:
+    try:
+        result = supabase.table("dm_templates").select("*").order("id").execute()
+        return result.data or []
+    except Exception as e:
+        print(f"[!] load_dm_templates error: {e}")
+        return []
+
+
+@app.get("/api/dm_templates")
+def api_get_dm_templates():
+    return JSONResponse(load_dm_templates())
+
+
+@app.post("/api/dm_template/add")
+async def api_add_dm_template(request: Request):
+    body = await request.json()
+    if body.get("token") != SECRET_TOKEN:
+        raise HTTPException(status_code=401, detail="Token invalide")
+    name    = body.get("name", "").strip()
+    content = body.get("content", "").strip()
+    if not name or not content:
+        raise HTTPException(status_code=400, detail="Nom et contenu requis")
+    try:
+        supabase.table("dm_templates").insert({
+            "name": name, "content": content, "active": True, "sends": 0, "replies": 0
+        }).execute()
+        return {"ok": True}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/dm_template/delete")
+async def api_del_dm_template(request: Request):
+    body = await request.json()
+    if body.get("token") != SECRET_TOKEN:
+        raise HTTPException(status_code=401, detail="Token invalide")
+    tid = body.get("id")
+    try:
+        supabase.table("dm_templates").delete().eq("id", tid).execute()
+        return {"ok": True}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/dm_template/toggle")
+async def api_toggle_dm_template(request: Request):
+    body = await request.json()
+    if body.get("token") != SECRET_TOKEN:
+        raise HTTPException(status_code=401, detail="Token invalide")
+    tid    = body.get("id")
+    active = body.get("active", True)
+    try:
+        supabase.table("dm_templates").update({"active": active}).eq("id", tid).execute()
+        return {"ok": True}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/dm_template/reply")
+async def api_reply_dm_template(request: Request):
+    """Incrémente manuellement le compteur de réponses d'un template (+1)."""
+    body = await request.json()
+    if body.get("token") != SECRET_TOKEN:
+        raise HTTPException(status_code=401, detail="Token invalide")
+    tid = body.get("id")
+    try:
+        cur = supabase.table("dm_templates").select("replies").eq("id", tid).execute()
+        if cur.data:
+            supabase.table("dm_templates").update(
+                {"replies": cur.data[0]["replies"] + 1}
+            ).eq("id", tid).execute()
+        return {"ok": True}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/dm_template/stats")
+async def api_stats_dm_template(request: Request):
+    """Incrémente sends et/ou replies d'un template (appelé par dm_sender.py)."""
+    body = await request.json()
+    if body.get("token") != SECRET_TOKEN:
+        raise HTTPException(status_code=401, detail="Token invalide")
+    tid     = body.get("template_id")
+    n_sends = int(body.get("sends",   0))
+    n_rep   = int(body.get("replies", 0))
+    try:
+        cur = supabase.table("dm_templates").select("sends,replies").eq("id", tid).execute()
+        if cur.data:
+            row = cur.data[0]
+            supabase.table("dm_templates").update({
+                "sends":   row["sends"]   + n_sends,
+                "replies": row["replies"] + n_rep,
+            }).eq("id", tid).execute()
+        return {"ok": True}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # ═══════════════════════════════════════════════════════════
@@ -508,11 +668,9 @@ def _traduire_erreur(err: str) -> tuple[str, str]:
         return ("Le script a perdu le contrôle du navigateur en cours de session.",
                 "💡 Relance simplement le script, cela se règle souvent tout seul.")
     if "erreur session critique" in e:
-        # Extrait le détail après "—"
         detail = err.split("—")[-1].strip()[:120] if "—" in err else err[:120]
         return (f"Erreur inattendue pendant la session : {detail}",
                 "💡 Regarde le terminal pour plus de détails et relance le script.")
-    # Erreur générique
     msg = err[:150].replace("<", "&lt;")
     return (f"Erreur technique : {msg}",
             "💡 Consulte le terminal pour le détail complet de l'erreur.")
@@ -556,7 +714,6 @@ def dashboard():
     rows = ""
     for i, p in enumerate(profiles, 1):
         day = p["day"]
-        # Jours completes = day si session faite aujourd'hui, sinon day-1
         completed = day if p["done_today"] else max(day - 1, 0)
         if day > 15: completed = 15
         pct = min(int(completed / 15 * 100), 100)
@@ -638,12 +795,9 @@ def dashboard():
       var dot = wrap.querySelector('.err-dot');
       var r   = dot.getBoundingClientRect();
       var W   = 280;
-      /* alignement horizontal : bord droit du tooltip = bord droit du point, sans deborder a gauche */
       var left = Math.max(10, r.right - W);
-      /* afficher hors-ecran pour mesurer la hauteur reelle */
       box.style.cssText = 'display:block;position:fixed;width:'+W+'px;left:'+left+'px;top:-9999px;right:auto;bottom:auto;z-index:9999;';
       var H   = box.offsetHeight;
-      /* prefere au-dessus, bascule en-dessous si pas assez de place */
       var top = r.top - H - 12;
       if (top < 10) top = r.bottom + 8;
       box.style.top = top + 'px';
@@ -664,22 +818,184 @@ def dashboard():
 
 @app.get("/massdm", response_class=HTMLResponse)
 def dashboard_massdm():
+    from collections import defaultdict
+
     data        = load_massdm()
     profile_ids = get_all_ids()
     profiles    = [data.get(pid, _default_massdm(pid)) for pid in profile_ids]
     n           = len(profiles)
-    total_sent    = sum(p["dms_sent"] for p in profiles)
+    total_sent    = sum(p["dms_sent"]    for p in profiles)
     total_replied = sum(p["dms_replied"] for p in profiles)
     total_conv    = sum(p["conversions"] for p in profiles)
     taux_rep      = round(total_replied / total_sent * 100, 1) if total_sent > 0 else 0
     actifs        = sum(1 for p in profiles if p["status"] == "Actif")
 
-    # ── Graphique : DMs envoyés par jour (cumul tous profils) ──
-    from collections import defaultdict
+    # ── Templates A/B ─────────────────────────────────────────
+    templates = load_dm_templates()
+    COLORS = ['#22c55e','#3b82f6','#a855f7','#f59e0b','#ef4444',
+              '#06b6d4','#ec4899','#84cc16','#f97316','#8b5cf6','#14b8a6','#e11d48']
+
+    tpl_active_count = sum(1 for t in templates if t.get("active", True))
+    tpl_total_sends  = sum(t.get("sends", 0) for t in templates)
+
+    def _rate(t):
+        s = t.get("sends", 0)
+        return t.get("replies", 0) / s if s > 0 else 0
+
+    best_id = None
+    if templates:
+        best = max(templates, key=_rate)
+        if _rate(best) > 0:
+            best_id = best["id"]
+
+    # Cards
+    tpl_cards_html = ""
+    for idx, t in enumerate(templates):
+        tid     = t["id"]
+        sends   = t.get("sends",   0)
+        replies = t.get("replies", 0)
+        active  = t.get("active",  True)
+        rate    = round(replies / sends * 100, 1) if sends > 0 else 0
+        preview = t["content"][:115].replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
+        if len(t["content"]) > 115:
+            preview += "…"
+        color    = COLORS[idx % len(COLORS)]
+        card_cls = "tpl-card" + ("" if active else " inactive")
+        tog_lbl  = "● Actif"  if active else "○ Inactif"
+        tog_cls  = "btn-tpl btn-tpl-on" if active else "btn-tpl btn-tpl-off"
+        name_esc = t["name"].replace("&","&amp;").replace("<","&lt;")
+        best_badge = '<span class="winner-badge">🏆 Meilleur</span>' if tid == best_id else ""
+        tpl_cards_html += f"""
+<div class="{card_cls}">
+  <div class="tpl-name">
+    <span class="tpl-num" style="background:{color}22;color:{color};border:1px solid {color}55;">T{idx+1}</span>
+    {name_esc}{best_badge}
+  </div>
+  <pre class="tpl-preview">{preview}</pre>
+  <div class="tpl-stats">
+    <div class="tstat"><div class="tstat-val blue">{sends}</div><div class="tstat-lab">Envoyés</div></div>
+    <div class="tstat"><div class="tstat-val green">{replies}</div><div class="tstat-lab">Réponses</div></div>
+    <div class="tstat"><div class="tstat-val gold">{rate}%</div><div class="tstat-lab">Taux</div></div>
+  </div>
+  <div class="tpl-actions">
+    <button class="{tog_cls}" onclick="toggleTpl({tid},{str(not active).lower()})">{tog_lbl}</button>
+    <button class="btn-tpl" style="background:#1e3a5f;color:#93c5fd;flex:1;" onclick="replyTpl({tid})">+1 Réponse</button>
+    <button class="btn-tpl btn-tpl-del" onclick="delTpl({tid})">✕</button>
+  </div>
+</div>"""
+
+    if not tpl_cards_html:
+        tpl_cards_html = '<p style="color:#475569;text-align:center;padding:30px 0;grid-column:1/-1;">Aucun template — ajoute ton premier message A/B ci-dessus.</p>'
+
+    # ── Analyse comparative A/B ───────────────────────────────
+    chart_tpls = [(idx, t) for idx, t in enumerate(templates) if t.get("sends", 0) > 0]
+    if chart_tpls:
+        srt = sorted(chart_tpls, key=lambda x: _rate(x[1]), reverse=True)
+        medals = ["🥇","🥈","🥉"] + [f"#{i}" for i in range(4, 50)]
+
+        ab_rows = ""
+        for rank, (idx, t) in enumerate(srt):
+            r2  = round(_rate(t) * 100, 1)
+            bw  = min(r2, 100)
+            co  = COLORS[idx % len(COLORS)]
+            wb  = '<span class="winner-badge">Top ✓</span>' if rank == 0 and t["replies"] > 0 else ""
+            nm  = t["name"].replace("&","&amp;").replace("<","&lt;")
+            ab_rows += f"""<tr>
+              <td class="center" style="font-weight:800;font-size:.95rem;">{medals[rank]}</td>
+              <td><span style="font-size:.7rem;font-weight:800;color:{co};margin-right:6px;">T{idx+1}</span>
+                  <span style="font-size:.82rem;color:#e2e8f0;">{nm}</span>{wb}</td>
+              <td class="center" style="color:#93c5fd;font-weight:700;">{t["sends"]}</td>
+              <td class="center" style="color:#22c55e;font-weight:700;">{t["replies"]}</td>
+              <td><div class="rate-bar-wrap">
+                <div class="rate-bar-bg"><div class="rate-bar-fg" style="width:{bw}%;background:{co};"></div></div>
+                <span class="rate-pct" style="color:{co};">{r2}%</span>
+              </div></td>
+            </tr>"""
+
+        _cl  = "[" + ",".join(f'"T{idx+1} — {t["name"][:16].replace(chr(34),chr(39))}"' for idx, t in chart_tpls) + "]"
+        _cr  = "[" + ",".join(str(round(_rate(t)*100,1)) for _, t in chart_tpls) + "]"
+        _cbg = "[" + ",".join(f'"{COLORS[idx%len(COLORS)]}2e"' for idx,_ in chart_tpls) + "]"
+        _cbd = "[" + ",".join(f'"{COLORS[idx%len(COLORS)]}"'   for idx,_ in chart_tpls) + "]"
+        _cs  = "[" + ",".join(str(t["sends"])   for _, t in chart_tpls) + "]"
+        _crp = "[" + ",".join(str(t["replies"]) for _, t in chart_tpls) + "]"
+        ch_h = max(160, 55 * len(chart_tpls))
+
+        ab_section = f"""
+<div class="card chart-card" style="margin-bottom:16px;">
+  <div class="chart-header">
+    <div>
+      <p class="chart-title">Analyse comparative A/B</p>
+      <p class="chart-sub">Taux de réponse par template · tous profils confondus</p>
+    </div>
+  </div>
+  <canvas id="abChart" height="{ch_h}" style="max-height:420px;"></canvas>
+</div>
+<div class="card" style="margin-bottom:24px;">
+  <p style="padding:14px 20px 12px;font-size:.65rem;font-weight:800;color:#3b5278;
+     text-transform:uppercase;letter-spacing:.14em;border-bottom:2px solid #1e3a5f;">
+    Classement des templates
+  </p>
+  <table class="ab-table"><thead><tr>
+    <th style="width:52px;">Rang</th>
+    <th class="th-l">Template</th>
+    <th>Envoyés</th>
+    <th>Réponses</th>
+    <th style="min-width:200px;">Taux de réponse</th>
+  </tr></thead><tbody>{ab_rows}</tbody></table>
+</div>
+<script>
+(function(){{
+  const ctx = document.getElementById('abChart');
+  if (!ctx) return;
+  new Chart(ctx, {{
+    type: 'bar', indexAxis: 'y',
+    data: {{
+      labels: {_cl},
+      datasets: [{{
+        label: 'Taux de réponse (%)',
+        data: {_cr},
+        backgroundColor: {_cbg},
+        borderColor: {_cbd},
+        borderWidth: 2.5,
+        borderRadius: 8,
+      }}]
+    }},
+    options: {{
+      responsive: true,
+      plugins: {{
+        legend: {{ display: false }},
+        tooltip: {{
+          backgroundColor: '#1e293b', borderColor: '#334155', borderWidth: 1,
+          titleColor: '#94a3b8', bodyColor: '#f8fafc', padding: 12, cornerRadius: 10,
+          callbacks: {{
+            label: (c) => {{
+              const i = c.dataIndex;
+              return [' Taux : ' + c.raw + '%',
+                      ' Envoyés : ' + {_cs}[i],
+                      ' Réponses : ' + {_crp}[i]];
+            }}
+          }}
+        }}
+      }},
+      scales: {{
+        x: {{ grid: {{ color: '#1a2639' }},
+              ticks: {{ color: '#475569', font: {{ size: 11 }} }},
+              beginAtZero: true, max: 100 }},
+        y: {{ grid: {{ color: '#1a2639', drawBorder: false }},
+              ticks: {{ color: '#94a3b8', font: {{ size: 11, weight: '600' }} }} }}
+      }}
+    }}
+  }});
+}})();
+</script>"""
+    else:
+        ab_section = '<div class="card chart-empty" style="margin-bottom:24px;">Lance dm_sender.py pour voir l\'analyse A/B — les données apparaîtront ici automatiquement.</div>'
+
+    # ── Graphique DMs par jour ────────────────────────────────
     _daily = defaultdict(int)
     for p in profiles:
         for entry in p.get("history", []):
-            d = (entry.get("date") or "")[:10]   # "dd/mm/yyyy"
+            d = (entry.get("date") or "")[:10]
             if len(d) == 10:
                 _daily[d] += entry.get("sent", 0)
 
@@ -687,13 +1003,13 @@ def dashboard_massdm():
         try:    return datetime.strptime(d, "%d/%m/%Y")
         except: return datetime.min
 
-    _days      = sorted(_daily.keys(), key=_dk)[-14:]
-    _c_labels  = "[" + ",".join(f'"{x}"' for x in _days) + "]"
-    _c_data    = "[" + ",".join(str(_daily[x]) for x in _days) + "]"
-    _max_val   = max((_daily[x] for x in _days), default=0)
+    _days    = sorted(_daily.keys(), key=_dk)[-14:]
+    _dl      = "[" + ",".join(f'"{x}"' for x in _days) + "]"
+    _dd      = "[" + ",".join(str(_daily[x]) for x in _days) + "]"
+    _maxv    = max((_daily[x] for x in _days), default=0)
 
     if _days:
-        chart_section = f"""
+        daily_chart = f"""
 <div class="card chart-card">
   <div class="chart-header">
     <div>
@@ -704,106 +1020,114 @@ def dashboard_massdm():
   </div>
   <canvas id="dmChart" height="90"></canvas>
 </div>
-<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
 <script>
-new Chart(document.getElementById('dmChart'), {{
-  type: 'line',
-  data: {{
-    labels: {_c_labels},
-    datasets: [{{
-      label: 'DMs envoyes',
-      data: {_c_data},
-      borderColor: '#22c55e',
-      backgroundColor: (ctx) => {{
-        const g = ctx.chart.ctx.createLinearGradient(0, 0, 0, ctx.chart.height);
-        g.addColorStop(0,   'rgba(34,197,94,.18)');
-        g.addColorStop(1,   'rgba(34,197,94,.01)');
-        return g;
-      }},
-      borderWidth: 2.5,
-      tension: 0.4,
-      fill: true,
-      pointBackgroundColor: '#22c55e',
-      pointBorderColor: '#0f172a',
-      pointBorderWidth: 2,
-      pointRadius: 5,
-      pointHoverRadius: 9,
-      pointHoverBackgroundColor: '#4ade80',
-    }}]
-  }},
-  options: {{
-    responsive: true,
-    interaction: {{ mode: 'index', intersect: false }},
-    plugins: {{
-      legend: {{ display: false }},
-      tooltip: {{
-        backgroundColor: '#1e293b',
+(function(){{
+  const ctx = document.getElementById('dmChart');
+  if (!ctx) return;
+  new Chart(ctx, {{
+    type: 'line',
+    data: {{
+      labels: {_dl},
+      datasets: [{{
+        data: {_dd},
         borderColor: '#22c55e',
-        borderWidth: 1,
-        titleColor: '#94a3b8',
-        titleFont: {{ size: 11 }},
-        bodyColor: '#f8fafc',
-        bodyFont: {{ size: 13, weight: '700' }},
-        padding: 12,
-        cornerRadius: 10,
-        callbacks: {{ label: ctx => '  ' + ctx.raw + ' DMs envoyés' }}
-      }}
+        backgroundColor: (c) => {{
+          const g = c.chart.ctx.createLinearGradient(0,0,0,c.chart.height);
+          g.addColorStop(0,'rgba(34,197,94,.18)'); g.addColorStop(1,'rgba(34,197,94,.01)');
+          return g;
+        }},
+        borderWidth:2.5, tension:0.4, fill:true,
+        pointBackgroundColor:'#22c55e', pointBorderColor:'#0f172a',
+        pointBorderWidth:2, pointRadius:5, pointHoverRadius:9,
+      }}]
     }},
-    scales: {{
-      x: {{
-        grid: {{ color: '#1a2639', drawBorder: false }},
-        ticks: {{ color: '#475569', font: {{ size: 11 }} }}
+    options: {{
+      responsive: true,
+      interaction: {{ mode:'index', intersect:false }},
+      plugins: {{
+        legend: {{ display:false }},
+        tooltip: {{
+          backgroundColor:'#1e293b', borderColor:'#22c55e', borderWidth:1,
+          titleColor:'#94a3b8', bodyColor:'#f8fafc', padding:12, cornerRadius:10,
+          callbacks: {{ label: c => '  ' + c.raw + ' DMs envoyés' }}
+        }}
       }},
-      y: {{
-        grid: {{ color: '#1a2639', drawBorder: false }},
-        ticks: {{ color: '#475569', font: {{ size: 11 }}, stepSize: Math.max(1, Math.ceil({_max_val}/6)) }},
-        beginAtZero: true,
-        suggestedMax: {_max_val} + 2
+      scales: {{
+        x: {{ grid:{{ color:'#1a2639',drawBorder:false }},
+              ticks:{{ color:'#475569',font:{{ size:11 }} }} }},
+        y: {{ grid:{{ color:'#1a2639',drawBorder:false }},
+              ticks:{{ color:'#475569',font:{{ size:11 }},stepSize:Math.max(1,Math.ceil({_maxv}/6)) }},
+              beginAtZero:true, suggestedMax:{_maxv}+2 }}
       }}
     }}
-  }}
-}});
+  }});
+}})();
 </script>"""
     else:
-        chart_section = '<div class="card chart-empty">Aucune donnée — lance dm_sender.py pour voir les statistiques ici.</div>'
+        daily_chart = '<div class="card chart-empty">Aucune donnée — lance dm_sender.py pour voir les statistiques ici.</div>'
 
+    # ── Table profils ─────────────────────────────────────────
     rows = ""
     for i, p in enumerate(profiles, 1):
         sent    = p["dms_sent"]
         replied = p["dms_replied"]
         taux    = round(replied / sent * 100, 1) if sent > 0 else 0
         pct_bar = min(int(taux), 100)
-        if p["status"] == "Actif":   sb = '<span class="badge active">Actif</span>'
-        elif p["status"] == "Termine": sb = '<span class="badge done">Termine ✓</span>'
+        if p["status"] == "Actif":     sb = '<span class="badge active">Actif</span>'
+        elif p["status"] == "Termine": sb = '<span class="badge done">Terminé ✓</span>'
         else:                          sb = '<span class="badge waiting">En attente</span>'
         rows += f"""<tr>
           <td class="num">{i}</td><td class="pid">{p['id']}</td>
           <td class="center">{sent}</td><td class="center">{replied}</td>
           <td><div class="progress-wrap"><div class="progress-bar" style="width:{pct_bar}%;background:#22c55e"></div></div>
-          <span class="day-label">{taux}% de reponse</span></td>
+          <span class="day-label">{taux}% de réponse</span></td>
           <td class="center">{p['conversions']}</td><td>{sb}</td>
           <td class="last">{p['last_run'] or '—'}</td>
         </tr>"""
 
     html = f"""<!DOCTYPE html><html lang="fr"><head>
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Mass DM Tracker</title><style>{BASE_CSS}</style>
+<title>Mass DM — A/B Testing</title><style>{BASE_CSS}</style>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
 <meta http-equiv="refresh" content="60"></head><body>
   <div class="neon-logo">
     <span class="neon-agency">Agency</span>
     <div class="neon-box"><span class="neon-text">OF4MYM</span></div>
   </div>
-  <h1>Mass DM Tracker</h1>
-  <p class="subtitle">Suivi des campagnes DM sur {n} profils</p>
+  <h1>Mass DM — A/B Testing</h1>
+  <p class="subtitle">Analyse et suivi de tes messages DM · {n} profils actifs</p>
   {nav_html("massdm")}
+
   <div class="stats">
     <div class="stat"><div class="stat-value">{actifs}<span style="color:#334155;font-size:1.2rem">/{n}</span></div><div class="stat-label">Profils actifs</div></div>
-    <div class="stat"><div class="stat-value">{total_sent}</div><div class="stat-label">DMs envoyes</div></div>
-    <div class="stat"><div class="stat-value">{total_replied}</div><div class="stat-label">Reponses</div></div>
-    <div class="stat"><div class="stat-value">{taux_rep}<span style="font-size:1.2rem">%</span></div><div class="stat-label">Taux reponse</div></div>
-    <div class="stat"><div class="stat-value">{total_conv}</div><div class="stat-label">Conversions</div></div>
+    <div class="stat"><div class="stat-value">{total_sent}</div><div class="stat-label">DMs envoyés</div></div>
+    <div class="stat"><div class="stat-value">{total_replied}</div><div class="stat-label">Réponses</div></div>
+    <div class="stat"><div class="stat-value">{taux_rep}<span style="font-size:1.2rem">%</span></div><div class="stat-label">Taux global</div></div>
+    <div class="stat"><div class="stat-value">{tpl_active_count}<span style="color:#334155;font-size:1.2rem">/{len(templates)}</span></div><div class="stat-label">Templates actifs</div></div>
   </div>
-  <div class="card"><table><thead><tr>
+
+  <!-- ══ TEMPLATES ══ -->
+  <p class="section-title">Gestion des templates A/B</p>
+  <div class="card" style="padding:20px 24px 22px;margin-bottom:16px;">
+    <div class="add-box" style="border:none;padding:0;margin:0;flex-wrap:wrap;">
+      <div style="display:flex;flex-direction:column;flex:1;gap:8px;min-width:260px;">
+        <input id="tname" type="text" placeholder="Nom du template  ex: Template A — Recrutement court">
+        <textarea id="tcontent" class="add-textarea" placeholder="Contenu du message...&#10;Utilise {{prenom}} pour personnaliser.&#10;Ctrl+Entrée pour ajouter rapidement."></textarea>
+      </div>
+      <button onclick="addTpl()" style="align-self:flex-end;height:40px;white-space:nowrap;">+ Ajouter</button>
+    </div>
+  </div>
+  <div class="templates-grid">
+    {tpl_cards_html}
+  </div>
+
+  <!-- ══ ANALYSE A/B ══ -->
+  <p class="section-title">Analyse comparative des messages</p>
+  {ab_section}
+
+  <!-- ══ PROFILS ══ -->
+  <p class="section-title">Statistiques par profil</p>
+  <div class="card" style="margin-bottom:24px;"><table><thead><tr>
     <th class="th-l" style="width:36px">#</th>
     <th class="th-l">ID Profil</th>
     <th>DMs envoyés</th>
@@ -813,8 +1137,51 @@ new Chart(document.getElementById('dmChart'), {{
     <th>Statut</th>
     <th>Dernière session</th>
   </tr></thead><tbody>{rows}</tbody></table></div>
-  {chart_section}
-  <p class="refresh">Mis a jour par dm_sender.py apres chaque session</p>
+
+  <!-- ══ ACTIVITÉ QUOTIDIENNE ══ -->
+  <p class="section-title">Activité quotidienne</p>
+  {daily_chart}
+
+  <p class="refresh">Mis à jour automatiquement · rechargement dans 60s</p>
+
+<div id="toast" class="toast">Enregistré !</div>
+<script>
+function showToast(msg) {{
+  const t = document.getElementById('toast');
+  t.textContent = msg; t.style.display = 'block';
+  setTimeout(() => t.style.display='none', 2200);
+}}
+async function _post(url, body) {{
+  const r = await fetch(url, {{method:'POST', headers:{{'Content-Type':'application/json'}},
+    body: JSON.stringify(Object.assign({{token:'Compte.1'}}, body))}});
+  return r.json();
+}}
+async function addTpl() {{
+  const name    = document.getElementById('tname').value.trim();
+  const content = document.getElementById('tcontent').value.trim();
+  if (!name || !content) {{ alert('Nom et contenu requis.'); return; }}
+  const d = await _post('/api/dm_template/add', {{name, content}});
+  if (d.ok) {{ showToast('Template ajouté !'); setTimeout(() => location.reload(), 1200); }}
+  else alert('Erreur : ' + (d.detail || JSON.stringify(d)));
+}}
+async function delTpl(id) {{
+  if (!confirm('Supprimer ce template définitivement ?')) return;
+  const d = await _post('/api/dm_template/delete', {{id}});
+  if (d.ok) location.reload();
+}}
+async function toggleTpl(id, active) {{
+  const d = await _post('/api/dm_template/toggle', {{id, active}});
+  if (d.ok) {{ showToast(active ? 'Template activé ✓' : 'Template désactivé'); setTimeout(() => location.reload(), 800); }}
+}}
+async function replyTpl(id) {{
+  const d = await _post('/api/dm_template/reply', {{id}});
+  if (d.ok) {{ showToast('+1 réponse enregistrée !'); setTimeout(() => location.reload(), 800); }}
+}}
+document.addEventListener('DOMContentLoaded', () => {{
+  const ta = document.getElementById('tcontent');
+  if (ta) ta.addEventListener('keydown', e => {{ if (e.key==='Enter' && e.ctrlKey) addTpl(); }});
+}});
+</script>
 </body></html>"""
     return html
 
