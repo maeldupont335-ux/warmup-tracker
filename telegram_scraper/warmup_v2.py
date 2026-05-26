@@ -838,13 +838,46 @@ async def envoyer_dm_template(page, username: str, prenom: str, message: str, me
         await page.wait_for_timeout(1500)
 
         # ── Étape 2 : navigation vers le profil ───────────────────
+        target_url = f"https://web.telegram.org/k/#@{username}"
         try:
-            await page.goto(
-                f"https://web.telegram.org/k/#@{username}",
-                wait_until="domcontentloaded", timeout=25000,
-            )
+            await page.goto(target_url, wait_until="domcontentloaded", timeout=25000)
         except Exception:
             pass
+        await page.wait_for_timeout(2000)
+
+        # ── Vérification critique : sommes-nous bien chez @{username} ? ──
+        # Si Telegram n'a pas trouvé l'user, l'URL revient à la base
+        # et la conversation précédente reste ouverte → on enverrait au mauvais
+        current_url = page.url
+        if f"@{username}" not in current_url:
+            # Deuxième tentative via la barre de recherche
+            try:
+                # Clique sur la loupe / barre de recherche
+                for search_sel in [".btn-icon.sidebar-left-section-content", "button.btn-icon[class*='search']", ".search-input"]:
+                    try:
+                        s = page.locator(search_sel).first
+                        if await s.is_visible(timeout=1500):
+                            await s.click()
+                            break
+                    except Exception:
+                        pass
+                await page.wait_for_timeout(800)
+                # Tape le username dans la recherche
+                await page.keyboard.type(f"@{username}", delay=60)
+                await page.wait_for_timeout(2000)
+                # Clique sur le premier résultat
+                first_result = page.locator(".chatlist-chat, .search-group-peer").first
+                if await first_result.is_visible(timeout=3000):
+                    await first_result.click()
+                    await page.wait_for_timeout(1500)
+                else:
+                    # Personne trouvé → ferme la recherche et skip
+                    await page.keyboard.press("Escape")
+                    print(f"    [--] @{username} introuvable via URL et recherche")
+                    return False
+            except Exception:
+                print(f"    [--] @{username} introuvable")
+                return False
 
         # ── Bouton "Démarrer" si première conversation ─────────────
         for sel in ["button.btn-primary", ".start-bot-button"]:
@@ -857,11 +890,9 @@ async def envoyer_dm_template(page, username: str, prenom: str, message: str, me
             except Exception:
                 pass
 
-        # ── Attente du vrai input (retry jusqu'à 18s) ─────────────
-        # div.input-message-input existe TOUJOURS (éléments "fake") →
-        # on attend spécifiquement le vrai contenteditable="true"
+        # ── Attente du vrai input (retry jusqu'à 16s) ─────────────
         real_input = None
-        for attempt in range(4):   # 4 tentatives × ~4s = ~16s max
+        for attempt in range(4):
             try:
                 all_inp = page.locator("div.input-message-input")
                 count   = await all_inp.count()
@@ -882,9 +913,8 @@ async def envoyer_dm_template(page, username: str, prenom: str, message: str, me
 
             if real_input:
                 break
-
             if attempt < 3:
-                await page.wait_for_timeout(4000)   # Attendre 4s de plus et réessayer
+                await page.wait_for_timeout(4000)
 
         if not real_input:
             print(f"    [--] @{username} introuvable (profil privé ou inexistant)")
