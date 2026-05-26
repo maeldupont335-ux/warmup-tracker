@@ -1827,23 +1827,3 @@ async function deleteSetup(pid) {{
 </script>
 </body></html>"""
     return html
-Étapes ensuite :
-
-Commit sur GitHub (message : feat: setup page + bio modal + direct DM + 2-msg templates)
-Manual Deploy sur Render
-SQL Supabase (une seule fois — si pas encore fait) :
-ALTER TABLE dm_templates ADD COLUMN IF NOT EXISTS content2 TEXT DEFAULT '';
-ALTER TABLE profiles ADD COLUMN IF NOT EXISTS dm_mode TEXT DEFAULT 'warmup';
-ALTER TABLE profiles ADD COLUMN IF NOT EXISTS dm_day INTEGER DEFAULT 0;
-CREATE TABLE IF NOT EXISTS profile_setup (
-  id SERIAL PRIMARY KEY,
-  profile_id TEXT NOT NULL UNIQUE,
-  phone TEXT DEFAULT '',
-  first_name TEXT DEFAULT '',
-  username TEXT DEFAULT '',
-  bio TEXT DEFAULT '',
-  photo_b64 TEXT DEFAULT '',
-  photo_name TEXT DEFAULT '',
-  updated_at TEXT DEFAULT ''
-);
-ALTER TABLE profile_setup DISABLE ROW LEVEL SECURITY;
