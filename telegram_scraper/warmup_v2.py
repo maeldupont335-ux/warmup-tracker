@@ -1572,5 +1572,55 @@ async def main():
             print(f"[!] Modifie la variable MASS_DM_SCRIPT dans warmup_v2.py")
 
 
+def check_warmup_trigger() -> bool:
+    """Appelle le dashboard pour savoir si le bouton 'Lancer' a été cliqué."""
+    try:
+        r = requests.get(f"{DASHBOARD_URL}/api/warmup/poll", timeout=8)
+        if r.status_code == 200:
+            return r.json().get("triggered", False)
+    except Exception:
+        pass
+    return False
+
+
+async def daemon():
+    """
+    Mode daemon — tourne en continu.
+    - Poll le dashboard toutes les 30s
+    - Lance le warm-up dès que le bouton 'Lancer' est cliqué sur le dashboard
+    - Ou automatiquement si le warm-up du jour n'a pas encore été fait
+    """
+    from datetime import datetime as _dt
+    print("=" * 60)
+    print("  WARM-UP DAEMON — en attente du bouton dashboard")
+    print("  Poll toutes les 30s — Ctrl+C pour arrêter")
+    print("=" * 60)
+
+    last_run_date = None   # évite de relancer plusieurs fois dans la même journée sans trigger
+
+    while True:
+        triggered = check_warmup_trigger()
+        today = date.today()
+
+        if triggered:
+            print(f"\n[▶] Signal reçu depuis le dashboard ! Lancement immédiat...")
+            last_run_date = today
+            try:
+                await main()
+            except Exception as e:
+                print(f"[!] Erreur : {e}")
+            print(f"\n[·] Retour en veille — poll toutes les 30s")
+
+        else:
+            print(f"  [·] {_dt.now().strftime('%H:%M:%S')} — En attente du bouton dashboard...", end="\r")
+
+        await asyncio.sleep(30)
+
+
 if __name__ == "__main__":
-    asyncio.run(main())
+    # Si lancé avec --daemon (ou via start_all.vbs), mode daemon
+    if "--daemon" in sys.argv or "--auto" in sys.argv:
+        from datetime import datetime
+        asyncio.run(daemon())
+    else:
+        asyncio.run(main())
