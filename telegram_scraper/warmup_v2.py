@@ -817,45 +817,182 @@ async def repondre_dms_recus(page) -> int:
     return reponses
 
 
+async def _ouvrir_via_recherche(page, username: str) -> bool:
+    """
+    Ouvre une conversation Telegram en passant par la barre de recherche.
+    Retourne True si la conversation est ouverte avec succès, False sinon.
+    """
+    # ── 1. Aller à la page principale ────────────────────────────
+    try:
+        await page.goto("https://web.telegram.org/k/",
+                        wait_until="domcontentloaded", timeout=15000)
+    except Exception:
+        pass
+    try:
+        await page.wait_for_selector("li.chatlist-chat, .chatlist", timeout=10000)
+    except Exception:
+        pass
+    await page.wait_for_timeout(1200)
+
+    # Fermer tout overlay / modal ouvert
+    for _ in range(2):
+        try:
+            await page.keyboard.press("Escape")
+            await page.wait_for_timeout(400)
+        except Exception:
+            pass
+
+    # ── 2. Trouver la barre de recherche ─────────────────────────
+    search_input = None
+    search_selectors = [
+        "input.input-search-input",
+        ".search-container input",
+        ".search input",
+        ".topbar-search input",
+        ".chatlist-search input",
+        "input[placeholder*='earch']",   # Search / Recherche
+        "input[type='search']",
+        "input[type='text']",            # fallback générique
+    ]
+    for sel in search_selectors:
+        try:
+            el = page.locator(sel).first
+            if await el.is_visible(timeout=1500):
+                search_input = el
+                break
+        except Exception:
+            continue
+
+    if not search_input:
+        # Essayer via JS : cliquer le premier input visible dans la sidebar gauche
+        try:
+            await page.evaluate("""
+                () => {
+                    const inp = document.querySelector(
+                        '.sidebar-left input, .search input, input[type="text"]'
+                    );
+                    if (inp) inp.click();
+                }
+            """)
+            await page.wait_for_timeout(600)
+            for sel in ["input.input-search-input", ".search input", "input"]:
+                try:
+                    el = page.locator(sel).first
+                    if await el.is_visible(timeout=1000):
+                        search_input = el
+                        break
+                except Exception:
+                    continue
+        except Exception:
+            pass
+
+    if not search_input:
+        print(f"    [X] Barre de recherche introuvable (@{username})")
+        return False
+
+    # ── 3. Taper @username dans la recherche ─────────────────────
+    await search_input.click()
+    await page.wait_for_timeout(400)
+    # Vider le champ
+    await search_input.press("Control+a")
+    await page.wait_for_timeout(150)
+    await search_input.press("Delete")
+    await page.wait_for_timeout(200)
+    # Taper avec délai humain
+    await search_input.type(f"@{username}", delay=random.randint(60, 130))
+    await page.wait_for_timeout(2500)   # laisser les résultats apparaître
+
+    # ── 4. Cliquer sur le résultat correspondant ──────────────────
+    clicked = False
+
+    # Tentative A : li.chatlist-chat contenant le username (résultat le plus courant)
+    for attempt in range(3):
+        try:
+            chats = page.locator("li.chatlist-chat")
+            count = await chats.count()
+            for i in range(count):
+                el = chats.nth(i)
+                try:
+                    text = (await el.inner_text()).lower()
+                    if username.lower() in text:
+                        await el.click()
+                        clicked = True
+                        break
+                except Exception:
+                    continue
+        except Exception:
+            pass
+        if clicked:
+            break
+        await page.wait_for_timeout(1000)
+
+    if not clicked:
+        # Tentative B : éléments dans les groupes de résultats de recherche globale
+        result_selectors = [
+            ".search-group__items li",
+            ".search-group .chatlist-chat",
+            ".search-results li",
+            ".search-super li",
+            "[class*='search-result']",
+        ]
+        for sel in result_selectors:
+            try:
+                results = page.locator(sel)
+                count   = await results.count()
+                for i in range(count):
+                    el = results.nth(i)
+                    try:
+                        text = (await el.inner_text()).lower()
+                        if username.lower() in text:
+                            await el.click()
+                            clicked = True
+                            break
+                    except Exception:
+                        continue
+                if clicked:
+                    break
+            except Exception:
+                continue
+
+    if not clicked:
+        # Tentative C : flèche bas + Entrée (premier résultat de la liste)
+        try:
+            await search_input.press("ArrowDown")
+            await page.wait_for_timeout(300)
+            await search_input.press("Enter")
+            await page.wait_for_timeout(2000)
+            # Valide uniquement si un vrai input de message est apparu
+            if await get_real_input(page):
+                clicked = True
+        except Exception:
+            pass
+
+    if not clicked:
+        print(f"    [--] @{username} introuvable dans les résultats de recherche")
+        try:
+            await page.keyboard.press("Escape")
+            await page.wait_for_timeout(500)
+        except Exception:
+            pass
+        return False
+
+    # ── 5. Attendre l'ouverture de la conversation ────────────────
+    await page.wait_for_timeout(2500)
+    return True
+
+
 async def envoyer_dm_template(page, username: str, prenom: str, message: str, message2: str = "") -> bool:
-    """Envoie un DM avec le texte du template (pour le mode Direct DM)."""
+    """Envoie un DM via la barre de recherche Telegram Web K (approche stable)."""
     print(f"    [->] DM template à @{username}...")
     try:
         await page.bring_to_front()
-        await page.wait_for_timeout(random.randint(1000, 2000))
+        await page.wait_for_timeout(random.randint(800, 1500))
 
-        # ── Étape 1 : base URL pour réinitialiser le routeur SPA ──
-        try:
-            await page.goto("https://web.telegram.org/k/",
-                            wait_until="domcontentloaded", timeout=15000)
-        except Exception:
-            pass
-        # Attendre que la chatlist soit prête
-        try:
-            await page.wait_for_selector("li.chatlist-chat, .chatlist", timeout=8000)
-        except Exception:
-            pass
-        await page.wait_for_timeout(1500)
-        # Ferme tout modal / barre de recherche AVANT de naviguer vers le contact
-        # (sinon la recherche ouverte bloque la conversation derrière)
-        for _ in range(2):
-            try:
-                await page.keyboard.press("Escape")
-                await page.wait_for_timeout(300)
-            except Exception:
-                pass
+        # ── Ouvrir la conversation via la recherche ───────────────
+        if not await _ouvrir_via_recherche(page, username):
+            return False
 
-        # ── Étape 2 : navigation vers le profil ───────────────────
-        try:
-            await page.goto(
-                f"https://web.telegram.org/k/#@{username}",
-                wait_until="domcontentloaded", timeout=25000,
-            )
-        except Exception:
-            pass
-        await page.wait_for_timeout(3000)
-
-        # ── Bouton "Démarrer" si première conversation ─────────────
+        # ── Bouton "Démarrer" si première conversation ────────────
         for sel in ["button.btn-primary", ".start-bot-button"]:
             try:
                 btn = page.locator(sel).first
@@ -866,16 +1003,8 @@ async def envoyer_dm_template(page, username: str, prenom: str, message: str, me
             except Exception:
                 pass
 
-        # ── Attente du vrai input (retry jusqu'à 16s) ─────────────
-        # NOTE: on cherche le vrai input ET on vérifie que l'URL a changé
-        # (si Telegram n'a pas trouvé le profil, l'URL reste à /k/ sans hash)
+        # ── Trouver le vrai input de message (retry 4×4s) ─────────
         real_input = None
-        url_after  = page.url
-        # Si l'URL est revenue à la base sans hash → navigation échouée
-        if url_after.rstrip("/") in ("https://web.telegram.org/k", "https://web.telegram.org/k/"):
-            print(f"    [--] @{username} introuvable (URL revenueà la base)")
-            return False
-
         for attempt in range(4):
             try:
                 all_inp = page.locator("div.input-message-input")
@@ -894,20 +1023,19 @@ async def envoyer_dm_template(page, username: str, prenom: str, message: str, me
                         break
             except Exception:
                 pass
-
             if real_input:
                 break
             if attempt < 3:
                 await page.wait_for_timeout(4000)
 
         if not real_input:
-            print(f"    [--] @{username} introuvable (profil privé ou inexistant)")
+            print(f"    [--] @{username} input introuvable après sélection")
             return False
 
-        # ── Envoi du 1er message ───────────────────────────────────
+        # ── Envoyer le 1er message ────────────────────────────────
         await type_message(page, real_input, message)
 
-        # ── 2ème message si configuré ──────────────────────────────
+        # ── 2ème message si configuré ─────────────────────────────
         if message2.strip():
             delay2 = random.uniform(5, 18)
             print(f"    [->] 2ème message dans {delay2:.0f}s...")
@@ -929,25 +1057,10 @@ async def envoyer_dm(page, username: str, prenom: str) -> bool:
     try:
         await page.bring_to_front()
         await page.wait_for_timeout(random.randint(1500, 3000))
-        # Navigation 2 étapes pour forcer le routeur SPA
-        try:
-            await page.goto("https://web.telegram.org/k/",
-                            wait_until="domcontentloaded", timeout=15000)
-        except Exception:
-            pass
-        await page.wait_for_timeout(2000)
-        await page.goto(
-            f"https://web.telegram.org/k/#@{username}",
-            wait_until="domcontentloaded", timeout=20000,
-        )
-        try:
-            await page.wait_for_selector(
-                "div.input-message-input, .empty-peer-placeholder",
-                timeout=12000
-            )
-        except Exception:
-            pass
-        await page.wait_for_timeout(random.randint(1500, 3000))
+
+        # Ouvrir via la barre de recherche (même approche que envoyer_dm_template)
+        if not await _ouvrir_via_recherche(page, username):
+            return False
 
         for sel in ["button.btn-primary", ".start-bot-button"]:
             try:
@@ -960,23 +1073,28 @@ async def envoyer_dm(page, username: str, prenom: str) -> bool:
                 pass
 
         real_input = None
-        try:
-            all_inp = page.locator("div.input-message-input")
-            count   = await all_inp.count()
-            for i in range(count):
-                el  = all_inp.nth(i)
-                cls = await el.get_attribute("class") or ""
-                ce  = await el.get_attribute("contenteditable") or ""
-                if "fake" in cls:
-                    continue
-                if ce == "false":
-                    print(f"    [--] @{username} DMs bloqués")
-                    return False
-                if ce == "true":
-                    real_input = el
-                    break
-        except Exception:
-            pass
+        for attempt in range(3):
+            try:
+                all_inp = page.locator("div.input-message-input")
+                count   = await all_inp.count()
+                for i in range(count):
+                    el  = all_inp.nth(i)
+                    cls = await el.get_attribute("class") or ""
+                    ce  = await el.get_attribute("contenteditable") or ""
+                    if "fake" in cls:
+                        continue
+                    if ce == "false":
+                        print(f"    [--] @{username} DMs bloqués")
+                        return False
+                    if ce == "true":
+                        real_input = el
+                        break
+            except Exception:
+                pass
+            if real_input:
+                break
+            if attempt < 2:
+                await page.wait_for_timeout(3000)
 
         if not real_input:
             print(f"    [--] @{username} introuvable")
