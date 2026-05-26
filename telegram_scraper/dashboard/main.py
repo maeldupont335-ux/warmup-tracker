@@ -21,6 +21,9 @@ from supabase import create_client, Client
 app = FastAPI()
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
+# Flag en mémoire — trigger warm-up sans table Supabase
+_warmup_trigger: bool = False
+
 PARIS_TZ = ZoneInfo("Europe/Paris")
 
 def now_paris(fmt: str = "%d/%m/%Y %H:%M") -> str:
@@ -813,19 +816,20 @@ async def api_request_scrape(request: Request):
 @app.post("/api/warmup/trigger")
 async def api_warmup_trigger(request: Request):
     """Déclenche le warm-up immédiatement — warmup_v2.py détecte en 30s."""
+    global _warmup_trigger
     body = await request.json()
     if body.get("token") != SECRET_TOKEN:
         raise HTTPException(status_code=401, detail="Token invalide")
-    set_setting("warmup_now", "1")
+    _warmup_trigger = True
     return {"ok": True}
 
 
 @app.get("/api/warmup/poll")
 def api_warmup_poll():
     """warmup_v2.py appelle cet endpoint toutes les 30s pour savoir s'il doit démarrer."""
-    triggered = get_setting("warmup_now", "0") == "1"
-    if triggered:
-        set_setting("warmup_now", "0")   # reset après lecture
+    global _warmup_trigger
+    triggered = _warmup_trigger
+    _warmup_trigger = False   # reset immédiatement après lecture
     return {"triggered": triggered}
 
 
