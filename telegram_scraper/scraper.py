@@ -1,13 +1,16 @@
 """
-Telegram Member Scraper — Multi-canaux depuis le dashboard
-Lit la liste des canaux sur /scraper du dashboard et scrappe tous leurs membres.
-Lance : python scraper.py
+Telegram Member Scraper — Mode daemon (auto)
+Tourne en arrière-plan et scrape automatiquement dès qu'un canal
+est marqué "A scraper" via le bouton du dashboard.
+
+Lance une seule fois : python scraper.py
 """
 
 import asyncio
 import csv
 import os
 import sys
+import time
 from datetime import datetime
 
 import requests
@@ -33,6 +36,7 @@ from config import API_ID, API_HASH, PHONE, OUTPUT_CSV, DELAY
 # ── Dashboard ──────────────────────────────────────────────
 DASHBOARD_URL   = "https://warmup-tracker.onrender.com"
 DASHBOARD_TOKEN = "Compte.1"
+POLL_INTERVAL   = 30   # secondes entre deux vérifications
 # ───────────────────────────────────────────────────────────
 
 
@@ -56,18 +60,16 @@ def is_active_recently(status) -> bool:
       ✗ Hors ligne depuis plus de 30 jours → exclu
       ✗ Inconnu / vide → exclu
     """
-    if isinstance(status, UserStatusOnline):    return True   # En ligne maintenant
-    if isinstance(status, UserStatusRecently):  return True   # < 1 semaine
-    if isinstance(status, UserStatusLastWeek):  return True   # < 7 jours
-    if isinstance(status, UserStatusLastMonth): return True   # < 30 jours
-    # UserStatusOffline : on vérifie la date de dernière connexion
+    if isinstance(status, UserStatusOnline):    return True
+    if isinstance(status, UserStatusRecently):  return True
+    if isinstance(status, UserStatusLastWeek):  return True
+    if isinstance(status, UserStatusLastMonth): return True
     if isinstance(status, UserStatusOffline):
         if status.was_online:
             from datetime import timezone
             delta = datetime.now(timezone.utc) - status.was_online
-            return delta.days <= 30   # garde si vu il y a ≤ 30 jours
-        return False   # date inconnue → exclu
-    # UserStatusEmpty ou autre → inconnu → exclu
+            return delta.days <= 30
+        return False
     return False
 
 
@@ -85,25 +87,16 @@ def parse_user(user) -> dict:
     }
 
 
-def load_channels_from_dashboard() -> list:
-    """
-    Charge depuis le dashboard uniquement les canaux marqués 'A scraper'.
-    Si aucun n'est marqué, retourne une liste vide et affiche un message.
-    """
+def load_pending_channels() -> list:
+    """Charge uniquement les canaux marqués 'A scraper' depuis le dashboard."""
     try:
         r = requests.get(f"{DASHBOARD_URL}/api/channels", timeout=10)
         if r.status_code == 200:
-            all_channels = r.json()
-            # Filtre : seulement les canaux marqués "A scraper" via le dashboard
-            to_scrape = [c for c in all_channels if c.get("status") == "A scraper"]
-            if to_scrape:
-                print(f"[OK] {len(to_scrape)} canal(aux) marqué(s) 'A scraper' sur {len(all_channels)} total")
-            else:
-                print(f"[!] Aucun canal marqué 'A scraper' ({len(all_channels)} canal(aux) enregistré(s))")
-                print("    → Va sur le dashboard onglet Scraper et clique '🔍 Scraper' sur les canaux à scrapper.")
-            return to_scrape
+            all_ch = r.json()
+            pending = [c for c in all_ch if c.get("status") == "A scraper"]
+            return pending
     except Exception as e:
-        print(f"[!] Impossible de charger les canaux : {e}")
+        print(f"[!] Erreur dashboard : {e}")
     return []
 
 
@@ -136,7 +129,7 @@ def normalize_target(url: str) -> str:
 
 
 async def scrape_channel(client: TelegramClient, target: str) -> list:
-    """Scrappe les membres d'un canal. Retourne une liste de dicts."""
+    """Scrappe les membres actifs (≤30j) d'un canal. Retourne une liste de dicts."""
     print(f"\n  [->] Résolution : {target}")
     try:
         entity = await client.get_entity(target)
@@ -204,48 +197,20 @@ def save_csv(members: list, path: str) -> None:
     if not members:
         return
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w", newline="", encoding="utf-8-sig") as f:
+    # Ajoute au fichier existant (sans dupliquer les headers)
+    file_exists = os.path.isfile(path)
+    with open(path, "a" if file_exists else "w", newline="", encoding="utf-8-sig") as f:
         writer = csv.DictWriter(f, fieldnames=members[0].keys())
-        writer.writeheader()
+        if not file_exists:
+            writer.writeheader()
         writer.writerows(members)
-    print(f"[OK] CSV enregistré : {path}  ({len(members)} membres)")
+    print(f"[OK] CSV mis à jour : {path}  ({len(members)} membres ajoutés)")
 
 
-async def main():
-    if not API_ID or not API_HASH or not PHONE:
-        print("[X] Configure API_ID, API_HASH et PHONE dans config.py")
-        sys.exit(1)
-
-    print("=" * 58)
-    print("  Telegram Multi-Scraper — canaux depuis le dashboard")
-    print("=" * 58)
-
-    # ── Charge les canaux depuis le dashboard ──────────────
-    channels = load_channels_from_dashboard()
-    if not channels:
-        print("\n[!] Aucun canal à scrapper.")
-        print("    → Va sur le dashboard onglet Scraper, clique '🔍 Scraper' sur les canaux voulus, puis relance.")
-        sys.exit(0)
-
-    print(f"\n  Canaux à scrapper :")
-    for i, c in enumerate(channels, 1):
-        print(f"  {i:02d}. {c['url']}  (statut : {c.get('status','?')})")
-
-    print()
-    confirm = input("Lancer le scraping ? (oui/non) : ").strip().lower()
-    if confirm not in ("oui", "o", "yes", "y"):
-        print("Annulé.")
-        return
-
-    # ── Connexion Telethon ─────────────────────────────────
-    client = TelegramClient("session_scraper", API_ID, API_HASH)
-    await client.start(phone=PHONE)
-    me = await client.get_me()
-    print(f"\n[OK] Connecté : {me.first_name} (@{me.username})\n")
-
-    # ── Scraping de chaque canal ───────────────────────────
+async def run_scraping_session(client: TelegramClient, channels: list):
+    """Scrappe tous les canaux de la liste et sauvegarde le CSV."""
     all_members = {}   # username → dict (dédoublonnage)
-    total_channels = len(channels)
+    total = len(channels)
 
     for idx, channel in enumerate(channels, 1):
         cid    = channel["id"]
@@ -253,10 +218,9 @@ async def main():
         target = normalize_target(url)
 
         print(f"\n{'='*58}")
-        print(f"  Canal {idx}/{total_channels} : {url}")
+        print(f"  Canal {idx}/{total} : {url}")
         print(f"{'='*58}")
 
-        # Marque "En cours" sur le dashboard
         update_channel_status(cid, "En cours")
 
         members = await scrape_channel(client, target)
@@ -270,26 +234,59 @@ async def main():
         else:
             update_channel_status(cid, "Erreur", 0)
 
-        if idx < total_channels:
+        if idx < total:
             print(f"\n[->] Pause 5s avant le canal suivant...")
             await asyncio.sleep(5)
 
-    # ── Sauvegarde ─────────────────────────────────────────
     final_members = list(all_members.values())
     print(f"\n{'='*58}")
-    print(f"  Scraping terminé !")
-    print(f"  {len(final_members)} membres uniques avec @username")
+    print(f"  Scraping terminé ! {len(final_members)} membres uniques")
     print(f"{'='*58}")
 
-    save_csv(final_members, OUTPUT_CSV)
+    if final_members:
+        save_csv(final_members, OUTPUT_CSV)
+        print(f"  Fichier : {OUTPUT_CSV}")
 
-    print(f"""
-  Les membres sont dans : {OUTPUT_CSV}
-  Lance maintenant warmup_v2.py (mode Direct DM activé)
-  ou dm_sender.py pour envoyer les Mass DMs.
-""")
 
-    await client.disconnect()
+async def main():
+    if not API_ID or not API_HASH or not PHONE:
+        print("[X] Configure API_ID, API_HASH et PHONE dans config.py")
+        sys.exit(1)
+
+    print("=" * 58)
+    print("  Telegram Scraper — Mode Daemon (auto)")
+    print(f"  Vérification toutes les {POLL_INTERVAL}s")
+    print("=" * 58)
+
+    # ── Connexion Telethon (une seule fois au démarrage) ───
+    client = TelegramClient("session_scraper", API_ID, API_HASH)
+    await client.start(phone=PHONE)
+    me = await client.get_me()
+    print(f"\n[OK] Connecté : {me.first_name} (@{me.username})")
+    print(f"[OK] En attente de canaux à scrapper sur le dashboard...\n")
+    print("     → Va sur le dashboard, clique '🔍 Scraper' sur les canaux voulus")
+    print("     → Ce script les détectera automatiquement et lancera le scraping")
+    print("     → Ctrl+C pour arrêter\n")
+
+    # ── Boucle daemon ──────────────────────────────────────
+    try:
+        while True:
+            pending = load_pending_channels()
+
+            if pending:
+                print(f"\n[🔍] {len(pending)} canal(aux) détecté(s) — démarrage du scraping...")
+                await run_scraping_session(client, pending)
+                print(f"\n[OK] Session terminée. Reprise surveillance dans {POLL_INTERVAL}s...\n")
+            else:
+                # Affiche un point toutes les 30s pour montrer que ça tourne
+                print(f"  [·] {datetime.now().strftime('%H:%M:%S')} — En attente de canaux à scrapper...", end="\r")
+
+            await asyncio.sleep(POLL_INTERVAL)
+
+    except KeyboardInterrupt:
+        print("\n\n[OK] Scraper arrêté.")
+    finally:
+        await client.disconnect()
 
 
 if __name__ == "__main__":
