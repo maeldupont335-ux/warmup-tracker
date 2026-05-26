@@ -775,6 +775,20 @@ async def api_update_channel(request: Request):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.post("/api/channel/request-scrape")
+async def api_request_scrape(request: Request):
+    """Marque un canal 'A scraper' — scraper.py le prendra au prochain lancement."""
+    body = await request.json()
+    if body.get("token") != SECRET_TOKEN:
+        raise HTTPException(status_code=401, detail="Token invalide")
+    cid = body.get("channel_id")
+    try:
+        supabase.table("channels").update({"status": "A scraper"}).eq("id", cid).execute()
+        return {"ok": True}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.post("/api/update")
 async def update_profile(request: Request):
     body = await request.json()
@@ -1486,7 +1500,9 @@ def dashboard_scraper():
     channels      = load_channels()
     total_members = sum(c.get("members_count", 0) for c in channels)
     scraped       = sum(1 for c in channels if c.get("status") == "Scrappe")
-    en_attente    = sum(1 for c in channels if c.get("status") == "En attente")
+    a_scraper     = sum(1 for c in channels if c.get("status") == "A scraper")
+    en_cours      = sum(1 for c in channels if c.get("status") == "En cours")
+    en_attente    = sum(1 for c in channels if c.get("status") not in ("Scrappe", "A scraper", "En cours", "Erreur"))
 
     rows = ""
     for i, c in enumerate(channels, 1):
@@ -1496,10 +1512,24 @@ def dashboard_scraper():
         cid    = c.get("id")
         url    = c.get("url", "")
 
-        if status == "Scrappe":   sb = '<span class="badge scrapped">Scrappe ✓</span>'
-        elif status == "En cours": sb = '<span class="badge active">En cours...</span>'
-        elif status == "Erreur":   sb = '<span class="badge error">Erreur</span>'
-        else:                      sb = '<span class="badge waiting">En attente</span>'
+        if status == "Scrappe":
+            sb = '<span class="badge scrapped">Scrappe ✓</span>'
+        elif status == "En cours":
+            sb = '<span class="badge active">En cours...</span>'
+        elif status == "Erreur":
+            sb = '<span class="badge error">Erreur</span>'
+        elif status == "A scraper":
+            sb = '<span class="badge todo">A scraper ⏳</span>'
+        else:
+            sb = '<span class="badge waiting">En attente</span>'
+
+        # Bouton scraper : desactive si deja en cours ou marque
+        if status in ("En cours",):
+            scrape_btn = '<button class="btn-scrape" disabled title="En cours...">⏳</button>'
+        elif status == "A scraper":
+            scrape_btn = '<button class="btn-scrape todo" disabled title="En attente du script">⏳ Queue</button>'
+        else:
+            scrape_btn = f'<button class="btn-scrape" onclick="requestScrape({cid})" title="Marquer ce canal pour scraping">🔍 Scraper</button>'
 
         rows += f"""<tr>
           <td class="num">{i}</td>
@@ -1507,12 +1537,20 @@ def dashboard_scraper():
           <td class="center">{count if count > 0 else '—'}</td>
           <td>{sb}</td>
           <td class="last">{last}</td>
-          <td class="center"><button class="btn-del" onclick="delItem({cid},'/api/channel/delete')" title="Supprimer">✕</button></td>
+          <td class="center actions-cell">{scrape_btn}<button class="btn-del" onclick="delItem({cid},'/api/channel/delete')" title="Supprimer">✕</button></td>
         </tr>"""
 
     html = f"""<!DOCTYPE html><html lang="fr"><head>
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Scraper — Canaux</title><style>{BASE_CSS}</style>
+<title>Scraper — Canaux</title><style>{BASE_CSS}
+.badge.todo{{background:rgba(251,191,36,.15);color:#fbbf24;border:1px solid rgba(251,191,36,.3)}}
+.btn-scrape{{background:linear-gradient(135deg,#0ea5e9,#6366f1);color:#fff;border:none;border-radius:6px;padding:5px 11px;font-size:.78rem;cursor:pointer;font-weight:600;transition:opacity .15s;white-space:nowrap}}
+.btn-scrape:hover{{opacity:.82}}
+.btn-scrape.todo,.btn-scrape:disabled{{background:#334155;color:#64748b;cursor:not-allowed;opacity:.7}}
+.actions-cell{{display:flex;gap:6px;justify-content:center;align-items:center}}
+.stat-total{{background:linear-gradient(135deg,rgba(14,165,233,.12),rgba(99,102,241,.12));border:1px solid rgba(99,102,241,.3)}}
+.stat-total .stat-value{{color:#818cf8}}
+</style>
 <meta http-equiv="refresh" content="30"></head><body>
   <div class="neon-logo">
     <span class="neon-agency">Agency</span>
@@ -1531,31 +1569,53 @@ def dashboard_scraper():
   <div class="stats">
     <div class="stat"><div class="stat-value">{len(channels)}</div><div class="stat-label">Canaux enregistres</div></div>
     <div class="stat"><div class="stat-value">{scraped}</div><div class="stat-label">Deja scrapes</div></div>
-    <div class="stat"><div class="stat-value">{en_attente}</div><div class="stat-label">En attente</div></div>
-    <div class="stat"><div class="stat-value">{total_members}</div><div class="stat-label">Membres collectes</div></div>
+    <div class="stat"><div class="stat-value" style="color:#fbbf24">{a_scraper}</div><div class="stat-label">En attente scraping</div></div>
+    <div class="stat"><div class="stat-value">{en_attente}</div><div class="stat-label">Pas encore marques</div></div>
+    <div class="stat stat-total"><div class="stat-value">{total_members}</div><div class="stat-label">Membres collectes au total</div></div>
   </div>
 
   <div class="card"><table><thead><tr>
     <th class="th-l" style="width:36px">#</th>
     <th class="th-l">Lien du canal</th>
-    <th>Membres</th>
+    <th>Membres actifs</th>
     <th>Statut</th>
     <th>Dernier scraping</th>
-    <th style="width:40px"></th>
+    <th style="width:160px">Actions</th>
   </tr></thead><tbody>{rows if rows else '<tr><td colspan="6" style="text-align:center;color:#64748b;padding:30px">Aucun canal — ajoutes-en un ci-dessus</td></tr>'}</tbody></table></div>
 
   <div class="card" style="padding:20px;background:#0f172a;border-color:#1e3a5f">
     <p style="color:#93c5fd;font-size:.875rem;">
       <strong>Comment ca marche :</strong><br><br>
       1. Ajoute ici les liens des canaux Telegram a scrapper<br>
-      2. Quand le warm-up J15 est termine, <code style="background:#1e293b;padding:2px 6px;border-radius:4px">scraper.py</code> se lance automatiquement<br>
-      3. Il scrappe tous les membres de ces canaux → les sauvegarde dans <code style="background:#1e293b;padding:2px 6px;border-radius:4px">output/membres.csv</code><br>
-      4. Puis <code style="background:#1e293b;padding:2px 6px;border-radius:4px">dm_sender.py</code> envoie 28-37 DMs par session depuis chaque profil
+      2. Clique <strong>🔍 Scraper</strong> sur les canaux a scrapper (statut devient <em>A scraper ⏳</em>)<br>
+      3. Lance <code style="background:#1e293b;padding:2px 6px;border-radius:4px">python scraper.py</code> sur ton PC — il scrappe uniquement les canaux marques<br>
+      4. Seuls les membres actifs (&le;30 jours) avec @username sont gardes → <code style="background:#1e293b;padding:2px 6px;border-radius:4px">output/membres.csv</code><br>
+      5. Puis <code style="background:#1e293b;padding:2px 6px;border-radius:4px">dm_sender.py</code> (ou warmup_v2.py en mode Direct DM) envoie les DMs
     </p>
   </div>
 
-  <p class="refresh">Les statuts se mettent a jour pendant le scraping</p>
+  <p class="refresh">Les statuts se mettent a jour pendant le scraping (refresh auto 30s)</p>
   {add_js('/api/channel/add', 'inp', 'Canal ajoute !')}
+<script>
+async function requestScrape(cid) {{
+  const btn = event.target.closest('button');
+  btn.disabled = true;
+  btn.textContent = '⏳ Queue';
+  const r = await fetch('/api/channel/request-scrape', {{
+    method: 'POST',
+    headers: {{'Content-Type': 'application/json'}},
+    body: JSON.stringify({{token: 'Compte.1', channel_id: cid}})
+  }});
+  const data = await r.json();
+  if (data.ok) {{
+    setTimeout(() => window.location.reload(), 800);
+  }} else {{
+    btn.disabled = false;
+    btn.textContent = '🔍 Scraper';
+    alert('Erreur : ' + (data.detail || JSON.stringify(data)));
+  }}
+}}
+</script>
 </body></html>"""
     return html
 
