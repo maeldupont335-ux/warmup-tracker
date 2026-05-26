@@ -1657,12 +1657,16 @@ async def daemon():
             triggered = False
 
         if triggered:
-            log("[▶] Signal reçu ! Lancement du warm-up (force)...")
+            log("[▶] Signal reçu ! Ouverture d'un terminal visible...")
             try:
-                await main(force=True)
-                log("[OK] Warm-up terminé.")
+                # Lance warmup_v2.py dans un NOUVEAU terminal visible
+                subprocess.Popen(
+                    [sys.executable, os.path.abspath(__file__)],
+                    creationflags=subprocess.CREATE_NEW_CONSOLE,
+                )
+                log("[OK] Terminal warm-up ouvert.")
             except Exception as e:
-                log(f"[!] Erreur pendant main() : {e}")
+                log(f"[!] Erreur lancement terminal : {e}")
             log("[·] Retour en veille...")
         else:
             log(f"[·] En attente du bouton dashboard...")
