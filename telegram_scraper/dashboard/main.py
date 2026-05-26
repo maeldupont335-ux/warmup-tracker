@@ -1085,7 +1085,7 @@ async function launchWarmup() {{
 }}
 async function toggleMode(pid, mode) {{
   const label = mode === 'direct_dm'
-    ? '⚡ Passer ce profil en mode Direct DM ?\\n(Il sautera le warm-up et enverra directement des Mass DMs)'
+    ? '⚡ Passer ce profil en mode Mass DM ?\\n(Il sautera le warm-up et enverra directement des DMs depuis le CSV scrappe)'
     : 'Repasser ce profil en mode Warm-Up ?';
   if (!confirm(label)) return;
   const r = await fetch('/api/profile/mode', {{
@@ -1093,8 +1093,11 @@ async function toggleMode(pid, mode) {{
     body: JSON.stringify({{token:'Compte.1', profile_id: pid, mode}})
   }});
   const d = await r.json();
-  if (d.ok) location.reload();
-  else alert('Erreur : ' + JSON.stringify(d));
+  if (d.ok) {{
+    // Redirige vers l'onglet Mass DM si on active le mode, sinon recharge
+    if (mode === 'direct_dm') window.location.href = '/massdm';
+    else location.reload();
+  }} else alert('Erreur : ' + JSON.stringify(d));
 }}
 </script>
 <script>
@@ -1396,29 +1399,51 @@ def dashboard_massdm():
     else:
         daily_chart = '<div class="card chart-empty">Aucune donnée — lance dm_sender.py pour voir les statistiques ici.</div>'
 
-    # ── Charge les bios sauvegardées ──────────────────────────
-    setup_map = {s["profile_id"]: s for s in load_profile_setup()}
+    # ── Charge les bios + modes ───────────────────────────────
+    setup_map  = {s["profile_id"]: s for s in load_profile_setup()}
+    warmup_data = load_data()  # contient dm_mode pour chaque profil
+
+    # Recompte les actifs en mode direct_dm uniquement
+    massdm_pids   = [pid for pid in profile_ids
+                     if warmup_data.get(pid, {}).get("dm_mode") == "direct_dm"]
+    massdm_actifs = sum(1 for pid in massdm_pids
+                        if data.get(pid, _default_massdm(pid))["status"] == "Actif")
 
     # ── Table profils ─────────────────────────────────────────
     rows = ""
-    for i, p in enumerate(profiles, 1):
+    for i, pid in enumerate(profile_ids, 1):
+        p       = data.get(pid, _default_massdm(pid))
+        wp      = warmup_data.get(pid, {})
+        dm_mode = wp.get("dm_mode", "warmup")
+        dm_day  = wp.get("dm_day", 0)
+
         sent    = p["dms_sent"]
         replied = p["dms_replied"]
         taux    = round(replied / sent * 100, 1) if sent > 0 else 0
         pct_bar = min(int(taux), 100)
+
         if p["status"] == "Actif":     sb = '<span class="badge active">Actif</span>'
         elif p["status"] == "Termine": sb = '<span class="badge done">Terminé ✓</span>'
         else:                          sb = '<span class="badge waiting">En attente</span>'
-        pid         = p["id"]
-        bio_saved   = (setup_map.get(pid, {}).get("bio") or "").replace('"', "&quot;").replace("'", "&#39;")
-        bio_label   = "✏ Bio" if not bio_saved else "✏ Bio ✓"
-        bio_color   = "#22c55e" if bio_saved else "#1e40af"
-        rows += f"""<tr>
+
+        bio_saved  = (setup_map.get(pid, {}).get("bio") or "").replace('"', "&quot;").replace("'", "&#39;")
+        bio_label  = "✏ Bio" if not bio_saved else "✏ Bio ✓"
+        bio_color  = "#22c55e" if bio_saved else "#1e40af"
+
+        if dm_mode == "direct_dm":
+            mode_badge = f'<button class="btn-ddm btn-ddm-active" onclick="toggleModeMassDm(\'{pid}\',\'warmup\')" title="Repasser en Warm-Up">⚡ Mass DM<br><small style="font-size:.58rem">J{dm_day}</small></button>'
+            row_style  = ""
+        else:
+            mode_badge = f'<button class="btn-ddm btn-ddm-warmup" onclick="toggleModeMassDm(\'{pid}\',\'direct_dm\')" title="Passer en Mass DM">WU→DM</button>'
+            row_style  = 'style="opacity:.45"'  # profil en warm-up : grisé
+
+        rows += f"""<tr {row_style}>
           <td class="num">{i}</td><td class="pid">{pid}</td>
           <td class="center">{sent}</td><td class="center">{replied}</td>
           <td><div class="progress-wrap"><div class="progress-bar" style="width:{pct_bar}%;background:#22c55e"></div></div>
           <span class="day-label">{taux}% de réponse</span></td>
           <td class="center">{p['conversions']}</td><td>{sb}</td>
+          <td class="center">{mode_badge}</td>
           <td class="last" style="white-space:nowrap;">
             {p['last_run'] or '—'}&nbsp;
             <button class="btn-bio" style="border-color:{bio_color};color:{bio_color};"
@@ -1440,7 +1465,7 @@ def dashboard_massdm():
   {nav_html("massdm")}
 
   <div class="stats">
-    <div class="stat"><div class="stat-value">{actifs}<span style="color:#334155;font-size:1.2rem">/{n}</span></div><div class="stat-label">Profils actifs</div></div>
+    <div class="stat"><div class="stat-value">{len(massdm_pids)}<span style="color:#334155;font-size:1.2rem">/{n}</span></div><div class="stat-label">Profils Mass DM</div></div>
     <div class="stat"><div class="stat-value">{total_sent}</div><div class="stat-label">DMs envoyés</div></div>
     <div class="stat"><div class="stat-value">{total_replied}</div><div class="stat-label">Réponses</div></div>
     <div class="stat"><div class="stat-value">{taux_rep}<span style="font-size:1.2rem">%</span></div><div class="stat-label">Taux global</div></div>
@@ -1478,6 +1503,7 @@ def dashboard_massdm():
     <th style="min-width:160px">Taux réponse</th>
     <th>Conversions</th>
     <th>Statut</th>
+    <th>Mode</th>
     <th>Dernière session</th>
   </tr></thead><tbody>{rows}</tbody></table></div>
 
@@ -1578,6 +1604,19 @@ async function saveBio() {{
 document.getElementById('bioModal').addEventListener('click', function(e) {{
   if (e.target === this) closeBioModal();
 }});
+async function toggleModeMassDm(pid, mode) {{
+  const label = mode === 'direct_dm'
+    ? '⚡ Activer le Mass DM pour ce profil ?\\n(Il quittera le warm-up et enverra des DMs depuis le CSV scrapé)'
+    : '↩ Repasser ce profil en Warm-Up ?';
+  if (!confirm(label)) return;
+  const r = await fetch('/api/profile/mode', {{
+    method: 'POST', headers: {{'Content-Type':'application/json'}},
+    body: JSON.stringify({{token:'Compte.1', profile_id: pid, mode}})
+  }});
+  const d = await r.json();
+  if (d.ok) location.reload();
+  else alert('Erreur : ' + JSON.stringify(d));
+}}
 </script>
 </body></html>"""
     return html

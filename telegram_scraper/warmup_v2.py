@@ -1261,14 +1261,14 @@ async def run_direct_dm_for_profile(profile_id: str, profile_num: int, total: in
             session_errors.append("Fermeture AdsPower echouee")
         await asyncio.sleep(2)
 
-    # Met à jour le dm_day dans le dashboard
+    # ── Met à jour la page Warm-Up (dm_day, done_today…) ─────────
     try:
         requests.post(f"{DASHBOARD_URL}/api/update", json={
-            "token":      DASHBOARD_TOKEN,
-            "profile_id": profile_id,
-            "day":        1,   # warm-up day ne change pas
-            "done_today": True,
-            "dms_total":  len(progress.get("dms_sent", [])),
+            "token":       DASHBOARD_TOKEN,
+            "profile_id":  profile_id,
+            "day":         1,   # warm-up day ne change pas
+            "done_today":  True,
+            "dms_total":   len(progress.get("dms_sent", [])),
             "posts_total": 0,
             "groups_joined": 0,
             "dm_responses":  0,
@@ -1278,7 +1278,22 @@ async def run_direct_dm_for_profile(profile_id: str, profile_num: int, total: in
             "dm_day":        dm_day,
         }, timeout=30)
     except Exception as e:
-        print(f"[!] Dashboard non joignable : {e}")
+        print(f"[!] Dashboard /api/update non joignable : {e}")
+
+    # ── Met à jour la page Mass DM (stats Supabase massdm) ───────
+    try:
+        requests.post(f"{DASHBOARD_URL}/api/massdm", json={
+            "token":            DASHBOARD_TOKEN,
+            "profile_id":       profile_id,
+            "dms_sent":         len(progress.get("dms_sent", [])),
+            "dms_sent_session": dms_ok,
+            "dms_replied":      0,   # mis à jour manuellement via le dashboard
+            "conversions":      0,
+            "status":           "Actif" if dms_ok > 0 else "En attente",
+        }, timeout=30)
+        print(f"[->] Stats Mass DM envoyées : {dms_ok} DM(s) cette session")
+    except Exception as e:
+        print(f"[!] Dashboard /api/massdm non joignable : {e}")
 
     next_limit = get_direct_dm_limit(dm_day + 1)
     print(f"""
