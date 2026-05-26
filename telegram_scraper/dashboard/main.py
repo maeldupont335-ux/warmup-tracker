@@ -815,22 +815,32 @@ async def api_request_scrape(request: Request):
 
 @app.post("/api/warmup/trigger")
 async def api_warmup_trigger(request: Request):
-    """Déclenche le warm-up immédiatement — warmup_v2.py détecte en 30s."""
-    global _warmup_trigger
+    """Déclenche le warm-up — stocke dans Supabase (survit aux redémarrages Render)."""
     body = await request.json()
     if body.get("token") != SECRET_TOKEN:
         raise HTTPException(status_code=401, detail="Token invalide")
-    _warmup_trigger = True
-    return {"ok": True}
+    try:
+        supabase.table("channels").upsert({
+            "url":           "__warmup_trigger__",
+            "status":        "triggered",
+            "members_count": 0,
+        }).execute()
+        return {"ok": True}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/api/warmup/poll")
 def api_warmup_poll():
-    """warmup_v2.py appelle cet endpoint toutes les 30s pour savoir s'il doit démarrer."""
-    global _warmup_trigger
-    triggered = _warmup_trigger
-    _warmup_trigger = False   # reset immédiatement après lecture
-    return {"triggered": triggered}
+    """warmup_v2.py poll toutes les 30s — retourne triggered=true une fois puis reset."""
+    try:
+        r = supabase.table("channels").select("status").eq("url", "__warmup_trigger__").execute()
+        if r.data and r.data[0]["status"] == "triggered":
+            supabase.table("channels").update({"status": "done"}).eq("url", "__warmup_trigger__").execute()
+            return {"triggered": True}
+    except Exception:
+        pass
+    return {"triggered": False}
 
 
 @app.post("/api/update")
