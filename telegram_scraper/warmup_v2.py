@@ -845,12 +845,7 @@ async def envoyer_dm_template(page, username: str, prenom: str, message: str, me
             )
         except Exception:
             pass
-        # Ferme toute recherche ouverte (Escape) pour ne pas bloquer le chat
-        try:
-            await page.keyboard.press("Escape")
-        except Exception:
-            pass
-        await page.wait_for_timeout(2000)
+        await page.wait_for_timeout(3000)
 
         # ── Bouton "Démarrer" si première conversation ─────────────
         for sel in ["button.btn-primary", ".start-bot-button"]:
