@@ -1584,14 +1584,42 @@ async def main(force: bool = False):
             print(f"[!] Modifie la variable MASS_DM_SCRIPT dans warmup_v2.py")
 
 
+SUPABASE_URL = "https://pirlgavzihmnwmqlyeir.supabase.co"
+SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InBpcmxnYXZ6aWhtbndtcWx5ZWlyIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzk3MzQxMTAsImV4cCI6MjA5NTMxMDExMH0.0QdskD9IBsx1rUZ_7Sljb8DshovkQMJIhmnAM-Zc6Ps"
+SUPABASE_HEADERS = {
+    "apikey":        SUPABASE_KEY,
+    "Authorization": f"Bearer {SUPABASE_KEY}",
+    "Content-Type":  "application/json",
+}
+
 def check_warmup_trigger() -> bool:
-    """Appelle le dashboard pour savoir si le bouton 'Lancer' a été cliqué."""
+    """
+    Interroge Supabase DIRECTEMENT (pas via Render) — 100% fiable.
+    Cherche une ligne channels avec url='__warmup_trigger__' et status='triggered'.
+    Si trouvée → reset à 'done' et retourne True.
+    """
     try:
-        r = requests.get(f"{DASHBOARD_URL}/api/warmup/poll", timeout=8)
-        if r.status_code == 200:
-            return r.json().get("triggered", False)
-    except Exception:
-        pass
+        # Cherche le trigger
+        r = requests.get(
+            f"{SUPABASE_URL}/rest/v1/channels",
+            headers=SUPABASE_HEADERS,
+            params={"url": "eq.__warmup_trigger__", "select": "id,status"},
+            timeout=8,
+        )
+        rows = r.json() if r.status_code == 200 else []
+        triggered_rows = [row for row in rows if row.get("status") == "triggered"]
+        if triggered_rows:
+            # Reset le trigger
+            requests.patch(
+                f"{SUPABASE_URL}/rest/v1/channels",
+                headers=SUPABASE_HEADERS,
+                params={"url": "eq.__warmup_trigger__"},
+                json={"status": "done"},
+                timeout=8,
+            )
+            return True
+    except Exception as e:
+        log(f"[!] check_warmup_trigger erreur : {e}")
     return False
 
 

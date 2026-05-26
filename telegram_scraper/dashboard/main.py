@@ -1055,20 +1055,32 @@ async function launchWarmup() {{
   const btn = document.getElementById('btn-launch');
   btn.disabled = true;
   btn.textContent = '⏳ Envoi du signal...';
-  const r = await fetch('/api/warmup/trigger', {{
-    method: 'POST',
-    headers: {{'Content-Type': 'application/json'}},
-    body: JSON.stringify({{token: 'Compte.1'}})
-  }});
-  const d = await r.json();
-  if (d.ok) {{
-    btn.textContent = '✓ Signal envoyé';
-    btn.style.background = '#1e293b';
-    document.getElementById('launch-msg').style.display = 'inline';
-  }} else {{
+  // Ecrit DIRECTEMENT dans Supabase — bypasse Render (100% fiable)
+  const SUPA_URL = 'https://pirlgavzihmnwmqlyeir.supabase.co';
+  const SUPA_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InBpcmxnYXZ6aWhtbndtcWx5ZWlyIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzk3MzQxMTAsImV4cCI6MjA5NTMxMDExMH0.0QdskD9IBsx1rUZ_7Sljb8DshovkQMJIhmnAM-Zc6Ps';
+  try {{
+    const r = await fetch(`${{SUPA_URL}}/rest/v1/channels`, {{
+      method: 'POST',
+      headers: {{
+        'apikey': SUPA_KEY,
+        'Authorization': `Bearer ${{SUPA_KEY}}`,
+        'Content-Type': 'application/json',
+        'Prefer': 'resolution=merge-duplicates,return=minimal'
+      }},
+      body: JSON.stringify({{url:'__warmup_trigger__', status:'triggered', members_count:0}})
+    }});
+    if (r.ok || r.status === 201 || r.status === 200) {{
+      btn.textContent = '✓ Signal envoyé';
+      btn.style.background = '#1e293b';
+      document.getElementById('launch-msg').style.display = 'inline';
+    }} else {{
+      const err = await r.text();
+      throw new Error(err);
+    }}
+  }} catch(e) {{
     btn.disabled = false;
     btn.textContent = '▶ Lancer le Warm-Up maintenant';
-    alert('Erreur : ' + JSON.stringify(d));
+    alert('Erreur Supabase : ' + e.message);
   }}
 }}
 async function toggleMode(pid, mode) {{
