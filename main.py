@@ -3272,7 +3272,7 @@ async function addTpl() {{
   }}
   const d = await _post('/api/dm_template/add', body);
   if (d.ok) {{
-    showToast('Template ajouté ! Lien d\'invitation en cours de création...');
+    showToast("Template ajouté ! Lien d'invitation créé automatiquement...");
     setTimeout(() => location.reload(), 1500);
   }} else alert('Erreur : ' + (d.detail || JSON.stringify(d)));
 }}
