@@ -548,7 +548,8 @@ def save_profile(profile: dict):
 
 def _default_massdm(pid: str) -> dict:
     return {"id": pid, "dms_sent": 0, "dms_opened": 0, "dms_replied": 0,
-            "conversions": 0, "last_run": None, "status": "En attente", "history": []}
+            "conversions": 0, "last_run": None, "status": "En attente",
+            "last_error": "", "history": []}
 
 
 def load_massdm() -> dict:
@@ -560,7 +561,8 @@ def load_massdm() -> dict:
             data[pid] = {"id": row["id"], "dms_sent": row["dms_sent"],
                          "dms_opened": row["dms_opened"], "dms_replied": row["dms_replied"],
                          "conversions": row["conversions"], "last_run": row["last_run"],
-                         "status": row["status"], "history": row["history"] or []}
+                         "status": row["status"], "last_error": row.get("last_error", "") or "",
+                         "history": row["history"] or []}
         return data
     except Exception as e:
         print(f"[!] load_massdm error: {e}")
@@ -1287,6 +1289,7 @@ async def update_massdm_api(request: Request):
     profile["conversions"] = body.get("conversions", profile["conversions"])
     profile["last_run"]    = now_paris()
     profile["status"]      = body.get("status", "Actif")
+    profile["last_error"]  = body.get("last_error", "")
     profile["history"].append({"date": profile["last_run"],
         "sent": body.get("dms_sent_session", 0), "replied": body.get("dms_replied", 0)})
     profile["history"] = profile["history"][-30:]
@@ -1516,9 +1519,9 @@ def warmup_page():
             ddm_btn = f'<button class="btn-ddm btn-ddm-active" onclick="toggleMode(\'{pid}\',\'warmup\')" title="Basculer en mode Warm-Up">⚡ Direct DM<br><small style="font-size:.58rem">J{dm_day}</small></button>'
         else:
             ddm_btn = f'<button class="btn-ddm btn-ddm-warmup" onclick="toggleMode(\'{pid}\',\'direct_dm\')" title="Passer en mode Direct DM (sans chauffe)">WU→DM</button>'
-        rows += f"""<tr>
+        rows += f"""<tr data-pid="{pid}">
           <td class="num">{i}</td>
-          <td class="pid">{pid}</td>
+          <td class="pid"><span class="ads-num" id="adsnum-{pid}" style="display:inline-block;background:rgba(220,38,38,.15);color:#f87171;border:1px solid rgba(220,38,38,.3);border-radius:4px;font-size:.62rem;font-weight:800;padding:1px 5px;margin-right:5px;min-width:22px;text-align:center;">#{i}</span>{pid}</td>
           <td class="td-prog">
             <div class="progress-wrap">
               <div class="progress-bar" style="width:{pct}%;background:#dc2626"></div>
@@ -1811,6 +1814,30 @@ async function pollLive() {{
 }}
 pollLive();
 setInterval(pollLive, 5000);
+
+// ── Numéros AdsPower (chargés depuis l'API locale) ──────────────
+async function loadAdsPowerNumbers() {{
+  try {{
+    const ADS_KEY = '942d5c4fa00deedac520c3310912ee6100795935b355b33b';
+    const ctrl = new AbortController();
+    const tid  = setTimeout(() => ctrl.abort(), 3000);
+    const resp = await fetch(
+      `http://local.adspower.net:50325/api/v1/user/list?page=1&page_size=100&api_key=${{ADS_KEY}}`,
+      {{ signal: ctrl.signal }}
+    );
+    clearTimeout(tid);
+    const data = await resp.json();
+    if (data.code !== 0 || !data.data?.list) return;
+    data.data.list.forEach(profile => {{
+      const num = profile.serial_number;
+      const el  = document.getElementById('adsnum-' + profile.user_id);
+      if (el && num) el.textContent = '#' + num;
+    }});
+  }} catch(e) {{
+    console.log('[WU] AdsPower inaccessible — numéros par défaut conservés');
+  }}
+}}
+setTimeout(loadAdsPowerNumbers, 500);
 </script>
 <script>
 (function(){{
@@ -2901,7 +2928,7 @@ def dashboard_massdm():
           <td class="center">{mode_badge}</td>
           <td class="center">{launch_btn}</td>
           <td class="last" style="white-space:nowrap;">
-            {p['last_run'] or '—'}&nbsp;
+            {p['last_run'] or '—'}{_err_dot(p.get('last_error',''))}&nbsp;
             <button class="btn-bio" style="border-color:{bio_color};color:{bio_color};"
               onclick="openBioModal('{pid}','{bio_saved}')">{bio_label}</button>
           </td>
