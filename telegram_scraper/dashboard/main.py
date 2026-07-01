@@ -10,36 +10,60 @@ GET  /api/channels  → liste canaux (pour scraper.py)
 POST /api/profile/add / /api/channel/add
 """
 
-import base64
+import asyncio
 import json
 import os
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse, JSONResponse, Response
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from supabase import create_client, Client
 
 app = FastAPI()
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
+_keepalive_executor = ThreadPoolExecutor(max_workers=1)
+
+SELF_URL = os.environ.get("RENDER_EXTERNAL_URL", "https://warmup-tracker.onrender.com")
+
+
+async def _keepalive_task():
+    """
+    Ping self toutes les 8 minutes pour empêcher Render Free de tuer le processus.
+    Sans ça, Render endort le service après 15 min d'inactivité HTTP → batch perdu.
+    """
+    await asyncio.sleep(60)  # Attendre 1 min au démarrage
+    while True:
+        await asyncio.sleep(480)  # 8 minutes
+        if _mass_batch.get("running"):
+            def _do_ping():
+                try:
+                    from urllib.request import urlopen, Request as UReq
+                    req = UReq(f"{SELF_URL}/api/setup/batch-status",
+                               headers={"User-Agent": "keepalive"})
+                    urlopen(req, timeout=8)
+                except Exception:
+                    pass
+            try:
+                loop = asyncio.get_running_loop()
+                await loop.run_in_executor(_keepalive_executor, _do_ping)
+                print(f"[KEEPALIVE] Ping Render — batch toujours actif", flush=True)
+            except Exception:
+                pass
+
+
+@app.on_event("startup")
+async def on_startup():
+    asyncio.create_task(_keepalive_task())
+
 # Flag en mémoire — trigger warm-up sans table Supabase
 _warmup_trigger: bool = False
 
-# Profil actuellement en cours de warm-up (mis à jour par /api/update)
-_active_warmup: dict = {"pid": "", "since": ""}
-
-# ── Tracking conversion liens d'invitation ─────────────────────
-_dm_tracking: dict = {
-    "links":          [],   # [{title, link, joins}]
-    "total_joins":    0,
-    "dms_sent_total": 0,
-    "last_checked":   "",
-}
-# Liens d'invitation par numéro de message {"MESSAGE 1": "t.me/+...", ...}
-_invite_links: dict = {}
-# File d'attente : liens à créer automatiquement par scraper.py
-_pending_invite_links: list = []
+# ── Résultats d'application profil (profile_changer.py → dashboard) ──
+# {profile_id: {"ok": bool, "error": str, "at": str}}
+_apply_results: dict = {}
 
 # ── État du batch mass-upload (survit aux navigations client) ──
 _mass_batch: dict = {
@@ -51,7 +75,7 @@ _mass_batch: dict = {
     "current_idx":    -1,
     "next_at":        None,    # ISO timestamp — heure du prochain profil
     "total":          0,
-    "delay_s":        600,     # 10 min
+    "delay_s":        360,     # 6 min
 }
 
 PARIS_TZ = ZoneInfo("Europe/Paris")
@@ -411,6 +435,27 @@ BASE_CSS = """
   .btn-edit-setup { background:#1e3a5f; border:none; color:#93c5fd; border-radius:6px;
     padding:4px 10px; font-size:.7rem; font-weight:700; cursor:pointer; }
   .btn-edit-setup:hover { background:#1d4ed8; }
+  /* ── Dots indicateurs statut profil ── */
+  .status-dot { display:inline-block; width:11px; height:11px; border-radius:50%;
+    flex-shrink:0; cursor:default; }
+  .status-dot.dot-ok     { background:#22c55e; box-shadow:0 0 6px rgba(34,197,94,.6); }
+  .status-dot.dot-nc     { background:#ef4444;
+    box-shadow:0 0 0 0 rgba(239,68,68,.6);
+    animation:pulse-dot-r 1.8s ease-in-out infinite; }
+  .status-dot.dot-upload { background:#f97316;
+    box-shadow:0 0 0 0 rgba(249,115,22,.6);
+    animation:pulse-dot-o 1.8s ease-in-out infinite; }
+  .status-dot.dot-err    { background:#f97316;
+    animation:pulse-dot-o 1.8s ease-in-out infinite; }
+  .status-dot.dot-none   { background:#1e293b; border:1px solid #334155; }
+  @keyframes pulse-dot-r {
+    0%,100% { box-shadow:0 0 0 0 rgba(239,68,68,.6); }
+    50%     { box-shadow:0 0 0 5px rgba(239,68,68,0); } }
+  @keyframes pulse-dot-o {
+    0%,100% { box-shadow:0 0 0 0 rgba(249,115,22,.6); }
+    50%     { box-shadow:0 0 0 5px rgba(249,115,22,0); } }
+  .status-dot-wrap { display:flex; align-items:center; gap:7px; }
+  .status-dot-lbl  { font-size:.68rem; color:#555; white-space:nowrap; }
   /* ── Logo neon ── */
   .neon-logo { position: fixed; top: 20px; right: 24px; text-align: center; z-index: 200;
     pointer-events: none; }
@@ -548,8 +593,7 @@ def save_profile(profile: dict):
 
 def _default_massdm(pid: str) -> dict:
     return {"id": pid, "dms_sent": 0, "dms_opened": 0, "dms_replied": 0,
-            "conversions": 0, "last_run": None, "status": "En attente",
-            "last_error": "", "history": []}
+            "conversions": 0, "last_run": None, "status": "En attente", "history": []}
 
 
 def load_massdm() -> dict:
@@ -561,8 +605,7 @@ def load_massdm() -> dict:
             data[pid] = {"id": row["id"], "dms_sent": row["dms_sent"],
                          "dms_opened": row["dms_opened"], "dms_replied": row["dms_replied"],
                          "conversions": row["conversions"], "last_run": row["last_run"],
-                         "status": row["status"], "last_error": row.get("last_error", "") or "",
-                         "history": row["history"] or []}
+                         "status": row["status"], "history": row["history"] or []}
         return data
     except Exception as e:
         print(f"[!] load_massdm error: {e}")
@@ -617,9 +660,6 @@ async def api_add_dm_template(request: Request):
             "content3": content3, "content4": content4, "content5": content5,
             "active": True, "sends": 0, "replies": 0
         }).execute()
-        # Ajouter en file d'attente pour création automatique du lien d'invitation
-        if name not in _invite_links:
-            _pending_invite_links.append(name)
         return {"ok": True}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -798,31 +838,31 @@ async def api_delete_setup(request: Request):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.get("/api/setup/photo/{profile_id}")
-def api_setup_photo(profile_id: str):
-    """Sert la photo de profil depuis Supabase (évite l'inline base64 dans le HTML)."""
+def _check_adspower(profile_id: str) -> tuple:
+    """
+    Vérifie si un profil AdsPower existe SANS ouvrir le navigateur.
+    Retourne (existe: bool, message_erreur: str).
+    En cas d'erreur réseau → retourne (True, '') pour ne pas bloquer.
+    """
     try:
-        res = supabase.table("profile_setup") \
-            .select("photo_b64, photo_name") \
-            .eq("profile_id", profile_id) \
-            .single().execute()
-        data = res.data if res.data else {}
+        import requests as _req
+        r = _req.get(
+            "http://local.adspower.net:50325/api/v1/user/list",
+            params={
+                "api_key": "942d5c4fa00deedac520c3310912ee6100795935b355b33b",
+                "user_id": profile_id,
+            },
+            timeout=5,
+        )
+        data = r.json()
+        if data.get("code") == 0:
+            lst = data.get("data", {}).get("list", [])
+            if not lst:
+                return False, "Profil introuvable dans AdsPower"
+            return True, ""
+        return False, f"AdsPower: {data.get('msg', 'code=' + str(data.get('code')))}"
     except Exception:
-        raise HTTPException(status_code=404, detail="Profil introuvable")
-    pb64 = (data.get("photo_b64") or "").strip()
-    if not pb64:
-        raise HTTPException(status_code=404, detail="Pas de photo")
-    pname = (data.get("photo_name") or "").lower()
-    ct = "image/jpeg" if pname.endswith((".jpg", ".jpeg")) else "image/png"
-    try:
-        img_data = base64.b64decode(pb64)
-    except Exception:
-        raise HTTPException(status_code=500, detail="Erreur décodage photo")
-    return Response(
-        content=img_data,
-        media_type=ct,
-        headers={"Cache-Control": "max-age=3600, private"},
-    )
+        return True, ""  # Erreur réseau → ne pas bloquer le batch
 
 
 async def _run_mass_batch(items: list):
@@ -841,8 +881,18 @@ async def _run_mass_batch(items: list):
         for it in items
     ]
 
+    # ═══════════════════════════════════════════════════════════
+    # NOUVEAU FLOW : Render sauvegarde TOUT en quelques secondes,
+    # c'est warmup_v2.py LOCAL qui gère les délais entre profils.
+    # Fini le problème de Render qui s'endort !
+    # ═══════════════════════════════════════════════════════════
+
+    # ═══════════════════════════════════════════════════════════
+    # Render sauve TOUTES les photos + écrit TOUS les triggers
+    # en ~30 secondes. Pas de délais sur Render = pas de sleep.
+    # warmup_v2.py local traite ensuite les triggers UN PAR UN.
+    # ═══════════════════════════════════════════════════════════
     for i, it in enumerate(items):
-        # Vérif arrêt avant chaque profil
         if _mass_batch["stop_requested"]:
             for j in range(i, len(items)):
                 _mass_batch["profiles"][j]["status"] = "skipped"
@@ -850,42 +900,41 @@ async def _run_mass_batch(items: list):
 
         _mass_batch["current_idx"] = i
         _mass_batch["profiles"][i]["status"] = "running"
-        _mass_batch["next_at"] = None
+        pid = it["profile_id"]
+
+        # Vérifier AdsPower
         try:
-            # Sauvegarde dans Supabase
+            ads_ok, ads_err = await asyncio.to_thread(_check_adspower, pid)
+        except Exception:
+            ads_ok, ads_err = True, ""
+
+        if not ads_ok:
+            _mass_batch["profiles"][i]["status"] = "error"
+            _mass_batch["profiles"][i]["error"]  = ads_err or "Profil AdsPower introuvable"
+            print(f"[!] {pid} — {ads_err}", flush=True)
+            await asyncio.sleep(1)
+            continue
+
+        # Sauvegarder photo + écrire trigger immédiatement (pas de délai)
+        try:
             supabase.table("profile_setup").upsert({
-                "profile_id": it["profile_id"],
+                "profile_id": pid,
                 "photo_b64":  it.get("photo_b64", ""),
                 "photo_name": it.get("photo_name", ""),
                 "updated_at": now_paris(),
             }, on_conflict="profile_id").execute()
-            # Trigger daemon local
             supabase.table("channels").upsert({
-                "url":           f"__profile_apply__{it['profile_id']}__",
+                "url":           f"__profile_apply__{pid}__",
                 "status":        "triggered",
                 "members_count": 0,
             }, on_conflict="url").execute()
             _mass_batch["profiles"][i]["status"] = "done"
+            print(f"[OK] {pid} — photo + trigger OK", flush=True)
         except Exception as e:
             _mass_batch["profiles"][i]["status"] = "error"
             _mass_batch["profiles"][i]["error"]  = str(e)[:120]
 
-        # Pause interruptible entre profils (sauf le dernier)
-        if i < len(items) - 1:
-            delay = _mass_batch["delay_s"]
-            for sec in range(delay):
-                if _mass_batch["stop_requested"]:
-                    break
-                await asyncio.sleep(1)
-                remaining = delay - sec - 1
-                from datetime import datetime as _dt
-                _mass_batch["next_at"] = (
-                    _dt.now(PARIS_TZ) + timedelta(seconds=remaining)
-                ).isoformat()
-            if _mass_batch["stop_requested"]:
-                for j in range(i + 1, len(items)):
-                    _mass_batch["profiles"][j]["status"] = "skipped"
-                break
+        await asyncio.sleep(0.3)  # Respirer entre chaque save Supabase
 
     _mass_batch["running"]     = False
     _mass_batch["finished"]    = True
@@ -913,10 +962,73 @@ async def api_batch_start(request: Request):
     return JSONResponse({"ok": True, "total": len(items)})
 
 
+@app.post("/api/setup/apply-result")
+async def api_apply_result(request: Request):
+    """
+    Reçoit le résultat d'un profile_changer.py (succès ou erreur).
+    Appelé automatiquement à la fin de chaque exécution locale.
+    """
+    global _apply_results
+    body = await request.json()
+    if body.get("token") != SECRET_TOKEN:
+        raise HTTPException(status_code=401, detail="Token invalide")
+    pid   = body.get("profile_id", "").strip()
+    ok    = body.get("ok", False)
+    error = body.get("error", "").strip()
+    if pid:
+        _apply_results[pid] = {
+            "ok":         ok,
+            "error":      error,
+            "error_type": body.get("error_type", ""),
+            "at":         now_paris(),
+        }
+    return {"ok": True}
+
+
+@app.get("/api/setup/apply-results")
+def api_get_apply_results():
+    """Retourne tous les résultats d'application (pour le frontend Setup)."""
+    return JSONResponse(_apply_results)
+
+
+@app.get("/reset-batch")
+def reset_batch_get():
+    """Reset forcé du batch via URL — accessible directement depuis le navigateur."""
+    global _mass_batch
+    _mass_batch = {
+        "running": False, "finished": True, "stop_requested": False,
+        "stopped": True, "profiles": [], "current_idx": -1,
+        "next_at": None, "total": 0, "delay_s": 600,
+    }
+    return HTMLResponse("""
+    <html><body style="background:#0d0d0d;color:#22c55e;font-family:monospace;
+    display:flex;align-items:center;justify-content:center;height:100vh;flex-direction:column;gap:16px">
+    <div style="font-size:2rem">✅ Batch réinitialisé</div>
+    <div style="color:#666">Retourne sur le dashboard et recharge la page</div>
+    <a href="/setup" style="color:#22c55e;margin-top:8px">← Retour au dashboard</a>
+    </body></html>
+    """)
+
+
 @app.get("/api/setup/batch-status")
 def api_batch_status():
     """Retourne l'état courant du batch (pour polling frontend)."""
     return JSONResponse(_mass_batch)
+
+
+@app.post("/api/setup/batch-reset")
+async def api_batch_reset(request: Request):
+    """Force la réinitialisation complète du batch (déblocage en cas de gel)."""
+    global _mass_batch
+    body = await request.json()
+    if body.get("token") != SECRET_TOKEN:
+        raise HTTPException(status_code=401, detail="Token invalide")
+    _mass_batch = {
+        "running": False, "finished": True, "stop_requested": False,
+        "stopped": True, "profiles": [], "current_idx": -1,
+        "next_at": None, "total": 0, "delay_s": 600,
+    }
+    return JSONResponse({"ok": True})
 
 
 @app.post("/api/setup/batch-stop")
@@ -926,9 +1038,14 @@ async def api_batch_stop(request: Request):
     body = await request.json()
     if body.get("token") != SECRET_TOKEN:
         raise HTTPException(status_code=401, detail="Token invalide")
-    if not _mass_batch.get("running"):
-        return JSONResponse({"ok": False, "msg": "Aucun batch en cours"})
+    # Toujours mettre stop_requested AVANT de vérifier running
+    # (évite la race condition entre profils où running peut être vrai
+    #  mais la boucle est entre deux profils)
     _mass_batch["stop_requested"] = True
+    if not _mass_batch.get("running"):
+        # Batch pas en cours — retourner ok=True quand même pour que
+        # le JS n'essaie pas de re-activer le bouton
+        return JSONResponse({"ok": True, "msg": "Aucun batch actif, flag posé"})
     return JSONResponse({"ok": True})
 
 
@@ -1167,7 +1284,6 @@ def api_warmup_poll():
 
 @app.post("/api/update")
 async def update_profile(request: Request):
-    global _active_warmup
     body = await request.json()
     if body.get("token") != SECRET_TOKEN:
         raise HTTPException(status_code=401, detail="Token invalide")
@@ -1193,87 +1309,7 @@ async def update_profile(request: Request):
         "dm_rep": body.get("dm_responses", 0)})
     profile["history"] = profile["history"][-30:]
     save_profile(profile)
-    # ── Tracker le profil actif en temps réel ─────────────────
-    if not profile["done_today"] and profile["day"] <= 15:
-        _active_warmup = {"pid": pid, "since": now_paris("%H:%M")}
-    elif _active_warmup.get("pid") == pid:
-        _active_warmup = {"pid": "", "since": ""}
     return {"ok": True}
-
-
-@app.get("/api/warmup/live")
-def api_warmup_live():
-    """Retourne le profil actuellement en cours de warm-up."""
-    return JSONResponse(_active_warmup)
-
-
-@app.get("/api/warmup/test-live/{pid}")
-def api_test_live(pid: str):
-    """Test : force le badge LIVE sur un profil donné (debug seulement)."""
-    global _active_warmup
-    if pid == "off":
-        _active_warmup = {"pid": "", "since": ""}
-    else:
-        _active_warmup = {"pid": pid, "since": now_paris("%H:%M")}
-    return JSONResponse({"ok": True, "active": _active_warmup})
-
-
-@app.get("/api/massdm/tracking")
-def api_tracking_get():
-    """Retourne les stats des liens d'invitation."""
-    t    = _dm_tracking
-    dms  = t["dms_sent_total"] or 1
-    rate = round(t["total_joins"] / dms * 100, 2)
-    return JSONResponse({**t, "conv_rate": rate})
-
-
-@app.get("/api/massdm/invite-links")
-def api_invite_links_get():
-    """Retourne les liens d'invitation par numéro de message."""
-    return JSONResponse(_invite_links)
-
-
-@app.get("/api/massdm/pending-links")
-def api_pending_links():
-    """scraper.py poll cet endpoint pour créer les nouveaux liens d'invitation."""
-    return JSONResponse({"pending": _pending_invite_links})
-
-
-@app.post("/api/massdm/pending-links/clear")
-async def api_pending_links_clear(request: Request):
-    """scraper.py appelle cet endpoint après avoir créé les liens."""
-    global _pending_invite_links
-    body = await request.json()
-    if body.get("token") != SECRET_TOKEN:
-        raise HTTPException(status_code=401, detail="Token invalide")
-    names_done = body.get("done", [])
-    _pending_invite_links = [n for n in _pending_invite_links if n not in names_done]
-    return JSONResponse({"ok": True, "remaining": len(_pending_invite_links)})
-
-
-@app.post("/api/massdm/invite-links/set")
-async def api_invite_links_set(request: Request):
-    """Enregistre les liens d'invitation (appelé par create_invite_links.py)."""
-    global _invite_links
-    body = await request.json()
-    if body.get("token") != SECRET_TOKEN:
-        raise HTTPException(status_code=401, detail="Token invalide")
-    _invite_links = body.get("links", {})
-    return JSONResponse({"ok": True, "count": len(_invite_links)})
-
-
-@app.post("/api/massdm/tracking/update")
-async def api_tracking_update(request: Request):
-    """Reçoit les stats des liens d'invitation (appelé par scraper.py)."""
-    global _dm_tracking
-    body = await request.json()
-    if body.get("token") != SECRET_TOKEN:
-        raise HTTPException(status_code=401, detail="Token invalide")
-    _dm_tracking["links"]          = body.get("links", _dm_tracking["links"])
-    _dm_tracking["total_joins"]    = int(body.get("total_joins", _dm_tracking["total_joins"]))
-    _dm_tracking["dms_sent_total"] = int(body.get("dms_sent", _dm_tracking["dms_sent_total"]))
-    _dm_tracking["last_checked"]   = now_paris()
-    return JSONResponse({"ok": True})
 
 
 @app.post("/api/massdm")
@@ -1289,7 +1325,6 @@ async def update_massdm_api(request: Request):
     profile["conversions"] = body.get("conversions", profile["conversions"])
     profile["last_run"]    = now_paris()
     profile["status"]      = body.get("status", "Actif")
-    profile["last_error"]  = body.get("last_error", "")
     profile["history"].append({"date": profile["last_run"],
         "sent": body.get("dms_sent_session", 0), "replied": body.get("dms_replied", 0)})
     profile["history"] = profile["history"][-30:]
@@ -1519,9 +1554,9 @@ def warmup_page():
             ddm_btn = f'<button class="btn-ddm btn-ddm-active" onclick="toggleMode(\'{pid}\',\'warmup\')" title="Basculer en mode Warm-Up">⚡ Direct DM<br><small style="font-size:.58rem">J{dm_day}</small></button>'
         else:
             ddm_btn = f'<button class="btn-ddm btn-ddm-warmup" onclick="toggleMode(\'{pid}\',\'direct_dm\')" title="Passer en mode Direct DM (sans chauffe)">WU→DM</button>'
-        rows += f"""<tr data-pid="{pid}">
+        rows += f"""<tr>
           <td class="num">{i}</td>
-          <td class="pid"><span class="ads-num" id="adsnum-{pid}" style="display:inline-block;background:rgba(220,38,38,.15);color:#f87171;border:1px solid rgba(220,38,38,.3);border-radius:4px;font-size:.62rem;font-weight:800;padding:1px 5px;margin-right:5px;min-width:22px;text-align:center;">#{i}</span>{pid}</td>
+          <td class="pid">{pid}</td>
           <td class="td-prog">
             <div class="progress-wrap">
               <div class="progress-bar" style="width:{pct}%;background:#dc2626"></div>
@@ -1619,13 +1654,6 @@ def warmup_page():
 .err-ok{{background:#0a1a0a;color:#4ade80;border:1px solid #166534}}
 .err-warn{{background:#1a0a0a;color:#f87171;border:1.5px solid #dc2626;animation:pulse-err 2s ease-in-out infinite}}
 @keyframes pulse-err{{0%,100%{{box-shadow:0 0 0 0 rgba(220,38,38,.5)}}50%{{box-shadow:0 0 0 6px rgba(220,38,38,0)}}}}
-/* Badge LIVE */
-.badge-live{{display:inline-flex;align-items:center;gap:5px;background:rgba(220,38,38,.12);border:1px solid rgba(220,38,38,.4);color:#f87171;border-radius:99px;padding:2px 9px 2px 6px;font-size:.62rem;font-weight:800;letter-spacing:.07em;text-transform:uppercase;vertical-align:middle;margin-left:7px;animation:live-glow 2s ease-in-out infinite}}
-.badge-live::before{{content:'';display:inline-block;width:7px;height:7px;border-radius:50%;background:#f87171;animation:live-dot 1.2s ease-in-out infinite}}
-@keyframes live-dot{{0%,100%{{opacity:1;transform:scale(1)}}50%{{opacity:.35;transform:scale(.65)}}}}
-@keyframes live-glow{{0%,100%{{box-shadow:0 0 0 0 rgba(220,38,38,0)}}50%{{box-shadow:0 0 10px 2px rgba(220,38,38,.22)}}}}
-/* Ligne active surlignée */
-.wu-table-card tbody tr.row-live{{background:rgba(220,38,38,.06)!important;border-left:2px solid #dc2626}}
 .err-tooltip-wrap{{position:relative;display:inline-flex;align-items:center}}
 .err-tooltip-box{{display:none;width:280px;background:#141414;border:1px solid #dc2626;border-radius:12px;padding:14px 16px;z-index:9999;box-shadow:0 8px 32px rgba(220,38,38,.2),0 2px 8px rgba(0,0,0,.6);pointer-events:none;white-space:normal;word-wrap:break-word}}
 .err-tooltip-box::after{{content:'';position:absolute;bottom:-7px;right:8px;width:13px;height:13px;background:#141414;border-right:1px solid #dc2626;border-bottom:1px solid #dc2626;transform:rotate(45deg)}}
@@ -1780,64 +1808,6 @@ async function resetErrors() {{
     alert('Erreur : ' + e.message);
   }}
 }}
-
-// ── Badge LIVE : polling toutes les 5s ──────────────────────────
-let _livePid = '';
-async function pollLive() {{
-  try {{
-    const r = await fetch('/api/warmup/live');
-    if (!r.ok) return;
-    const d = await r.json();
-    const newPid = d.pid || '';
-    if (newPid === _livePid) return;   // rien changé
-    // Retirer le badge de l'ancienne ligne
-    if (_livePid) {{
-      document.querySelectorAll('tr.row-live').forEach(tr => tr.classList.remove('row-live'));
-      document.querySelectorAll('.badge-live').forEach(b => b.remove());
-    }}
-    _livePid = newPid;
-    if (!newPid) return;
-    // Trouver la ligne du profil actif
-    const rows = document.querySelectorAll('.wu-table-card tbody tr');
-    rows.forEach(tr => {{
-      const pidCell = tr.querySelector('td.pid');
-      if (!pidCell) return;
-      if (pidCell.textContent.trim() !== newPid) return;
-      tr.classList.add('row-live');
-      const badge = document.createElement('span');
-      badge.className = 'badge-live';
-      badge.title = 'En cours depuis ' + (d.since || '');
-      badge.textContent = 'LIVE';
-      pidCell.appendChild(badge);
-    }});
-  }} catch(_) {{}}
-}}
-pollLive();
-setInterval(pollLive, 5000);
-
-// ── Numéros AdsPower (chargés depuis l'API locale) ──────────────
-async function loadAdsPowerNumbers() {{
-  try {{
-    const ADS_KEY = '942d5c4fa00deedac520c3310912ee6100795935b355b33b';
-    const ctrl = new AbortController();
-    const tid  = setTimeout(() => ctrl.abort(), 3000);
-    const resp = await fetch(
-      `http://local.adspower.net:50325/api/v1/user/list?page=1&page_size=100&api_key=${{ADS_KEY}}`,
-      {{ signal: ctrl.signal }}
-    );
-    clearTimeout(tid);
-    const data = await resp.json();
-    if (data.code !== 0 || !data.data?.list) return;
-    data.data.list.forEach(profile => {{
-      const num = profile.serial_number;
-      const el  = document.getElementById('adsnum-' + profile.user_id);
-      if (el && num) el.textContent = '#' + num;
-    }});
-  }} catch(e) {{
-    console.log('[WU] AdsPower inaccessible — numéros par défaut conservés');
-  }}
-}}
-setTimeout(loadAdsPowerNumbers, 500);
 </script>
 <script>
 (function(){{
@@ -2674,17 +2644,17 @@ def dashboard_massdm():
             extra_previews_html += f'<pre class="tpl-preview tpl-preview2"><span style="color:#475569;font-size:.65rem;font-weight:700;">MSG {_ei}</span> {_ep}</pre>'
 
         tpl_cards_html += f"""
-<div class="{card_cls}" data-tname="{name_esc}">
+<div class="{card_cls}">
   <div class="tpl-name">
-    <span class="tpl-num" style="background:{color}22;color:{color};border:1px solid {color}55;">M{idx+1}</span>
+    <span class="tpl-num" style="background:{color}22;color:{color};border:1px solid {color}55;">T{idx+1}</span>
     {name_esc}{best_badge}{msg_count_badge}
   </div>
   <pre class="tpl-preview"><span style="color:#475569;font-size:.65rem;font-weight:700;">MSG 1</span> {preview}</pre>
   {extra_previews_html}
   <div class="tpl-stats">
     <div class="tstat"><div class="tstat-val blue">{sends}</div><div class="tstat-lab">Envoyés</div></div>
-    <div class="tstat"><div class="tstat-val green tstat-joins" data-tname="{name_esc}">—</div><div class="tstat-lab">Conversions</div></div>
-    <div class="tstat"><div class="tstat-val gold tstat-rate" data-tname="{name_esc}">—</div><div class="tstat-lab">Taux conv.</div></div>
+    <div class="tstat"><div class="tstat-val green">{replies}</div><div class="tstat-lab">Réponses</div></div>
+    <div class="tstat"><div class="tstat-val gold">{rate}%</div><div class="tstat-lab">Taux</div></div>
   </div>
   <div class="tpl-actions">
     <button class="{tog_cls}" onclick="toggleTpl({tid},{str(not active).lower()})">{tog_lbl}</button>
@@ -2928,87 +2898,15 @@ def dashboard_massdm():
           <td class="center">{mode_badge}</td>
           <td class="center">{launch_btn}</td>
           <td class="last" style="white-space:nowrap;">
-            {p['last_run'] or '—'}{_err_dot(p.get('last_error',''))}&nbsp;
+            {p['last_run'] or '—'}&nbsp;
             <button class="btn-bio" style="border-color:{bio_color};color:{bio_color};"
               onclick="openBioModal('{pid}','{bio_saved}')">{bio_label}</button>
           </td>
         </tr>"""
 
-    MASSDM_OVERRIDE_CSS = """
-/* ══ Override : alignement thème dark rouge du site ══ */
-body{background:#0d0d0d!important;color:#e0e0e0!important}
-.page-main{background:#0d0d0d!important}
-h1{color:#f0f0f0!important}
-.subtitle{color:#555!important}
-/* Nav */
-.nav a{border-color:#1f1f1f!important;color:#666!important}
-.nav a.active{background:#dc2626!important;border-color:#dc2626!important}
-.nav a:not(.active):hover{background:#1a1a1a!important;color:#e0e0e0!important}
-/* Stats */
-.stats{margin-bottom:24px!important}
-.stat{background:#141414!important;border-color:#1f1f1f!important;transition:border-color .2s,box-shadow .2s}
-.stat:hover{border-color:#dc2626!important;box-shadow:0 0 18px rgba(220,38,38,.12)!important}
-.stat-value{color:#f0f0f0!important}
-.stat-label{color:#555!important}
-/* Cards */
-.card{background:#141414!important;border-color:#1f1f1f!important}
-/* Add box */
-.add-box{background:#141414!important;border-color:#1f1f1f!important}
-.add-box input,.add-box textarea{background:#0d0d0d!important;border-color:#1f1f1f!important;color:#e0e0e0!important}
-.add-box input:focus,.add-box textarea:focus{border-color:#dc2626!important}
-.add-box button{background:#dc2626!important}
-.add-box button:hover{background:#b91c1c!important}
-/* Tableau */
-thead tr{background:#0d0d0d!important}
-thead th{color:#444!important;border-color:#1a1a1a!important}
-tbody tr{border-color:#1a1a1a!important}
-tbody tr:hover{background:rgba(220,38,38,.04)!important}
-/* Badges */
-.badge.active{background:rgba(220,38,38,.15)!important;color:#f87171!important}
-.badge.scrapped,.badge.done,.badge.today{background:rgba(34,197,94,.1)!important;color:#4ade80!important}
-.badge.pending,.badge.waiting{background:#1a1a1a!important;color:#555!important;border-color:#222!important}
-/* Boutons */
-.btn-launch-dm{background:linear-gradient(135deg,#dc2626,#b91c1c)!important;box-shadow:0 0 18px rgba(220,38,38,.3)!important}
-.btn-launch-dm:hover{box-shadow:0 0 28px rgba(220,38,38,.55)!important}
-/* Section titles */
-.section-title{color:#555!important}
-.section-title::before{background:#dc2626!important}
-/* Template cards */
-.tpl-card{background:#141414!important;border-color:#1f1f1f!important}
-.tpl-card:hover{border-color:#dc2626!important;box-shadow:0 0 18px rgba(220,38,38,.1)!important}
-.tpl-card.inactive{border-color:#1a1a1a!important;opacity:.45!important}
-.tpl-preview{background:#0d0d0d!important;border-color:#1a1a1a!important;color:#888!important}
-.btn-tpl{background:#1a1a1a!important;border-color:#222!important;color:#666!important}
-.btn-tpl-on{background:rgba(220,38,38,.15)!important;color:#f87171!important;border-color:rgba(220,38,38,.3)!important}
-.btn-tpl-off{background:#1a1a1a!important;color:#444!important}
-.btn-tpl-del{color:#dc2626!important}
-.winner-badge{background:rgba(220,38,38,.15)!important;color:#f87171!important;border-color:rgba(220,38,38,.3)!important}
-/* Tracking card */
-#conv-tracking-card,[style*="background:#0f172a"],[style*="background: #0f172a"]{background:#141414!important;border-color:#1f1f1f!important}
-[style*="color:#3b82f6"]{color:#dc2626!important}
-[style*="background:#0d1f3a"]{background:#0d0d0d!important}
-[style*="background:#1e293b"]{background:#1a1a1a!important}
-[style*="border:1px solid #1e3a5f"]{border-color:#1f1f1f!important}
-[style*="color:#3b5278"]{color:#444!important}
-[style*="background:linear-gradient(90deg,#3b82f6"]{background:linear-gradient(90deg,#dc2626,#22c55e)!important}
-/* Progress bars */
-.progress-bar{background:#dc2626!important}
-/* Toast */
-.toast{background:#141414!important;border:1px solid #dc2626!important;color:#f0f0f0!important}
-/* Chart */
-.chart-card{background:#141414!important}
-.chart-legend{background:#1a0a0a!important;border-color:#3d1212!important;color:#f87171!important}
-.chart-legend::before{background:#dc2626!important;box-shadow:0 0 6px rgba(220,38,38,.8)!important}
-/* Inputs */
-input[type=text],input[type=number],textarea,select{background:#0d0d0d!important;border-color:#1f1f1f!important;color:#e0e0e0!important}
-input:focus,textarea:focus{border-color:#dc2626!important;outline:none!important}
-/* Bio modal */
-.modal-box{background:#141414!important;border-color:#1f1f1f!important}
-"""
-
     html = f"""<!DOCTYPE html><html lang="fr"><head>
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Mass DM — A/B Testing</title><style>{BASE_CSS}{SIDEBAR_CSS}{MASSDM_OVERRIDE_CSS}</style>
+<title>Mass DM — A/B Testing</title><style>{BASE_CSS}{SIDEBAR_CSS}</style>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
 <meta http-equiv="refresh" content="60"></head><body>
 <div class="ov-layout">{_sidebar_html('massdm')}<div class="page-main">
@@ -3021,21 +2919,21 @@ input:focus,textarea:focus{border-color:#dc2626!important;outline:none!important
   {nav_html("massdm")}
 
   <div style="display:flex;align-items:center;gap:20px;flex-wrap:wrap;margin-bottom:20px;">
-    <button id="btn-launch-dm" onclick="launchMassDm()" style="background:linear-gradient(135deg,#dc2626,#b91c1c);color:#fff;border:none;border-radius:10px;padding:12px 28px;font-size:1rem;font-weight:800;cursor:pointer;box-shadow:0 0 18px rgba(220,38,38,.3);transition:all .2s;letter-spacing:.02em">
+    <button id="btn-launch-dm" onclick="launchMassDm()" style="background:linear-gradient(135deg,#3b82f6,#1d4ed8);color:#fff;border:none;border-radius:10px;padding:12px 28px;font-size:1rem;font-weight:700;cursor:pointer;box-shadow:0 0 18px rgba(59,130,246,.35);transition:all .2s">
       ⚡ Lancer le Mass DM maintenant
     </button>
-    <span id="launch-dm-msg" style="display:none;color:#4ade80;font-weight:700">✓ Signal envoyé — démarrage dans ~30s</span>
+    <span id="launch-dm-msg" style="display:none;color:#3b82f6;font-weight:600">✓ Signal envoyé — démarrage dans ~30s</span>
     <!-- Filtre genre -->
-    <div style="background:#141414;border:1px solid #1f1f1f;border-radius:10px;padding:10px 16px;display:flex;align-items:center;gap:14px;">
-      <span style="font-size:.72rem;font-weight:800;color:#444;text-transform:uppercase;letter-spacing:.1em;">Cibler</span>
-      <label style="display:flex;align-items:center;gap:5px;cursor:pointer;font-size:.82rem;color:#e0e0e0;">
+    <div style="background:#1e293b;border:1px solid #334155;border-radius:10px;padding:10px 16px;display:flex;align-items:center;gap:14px;">
+      <span style="font-size:.72rem;font-weight:800;color:#3b5278;text-transform:uppercase;letter-spacing:.1em;">Cibler</span>
+      <label style="display:flex;align-items:center;gap:5px;cursor:pointer;font-size:.82rem;color:#e2e8f0;">
         <input type="radio" name="genre" value="tous" {'checked' if genre_filter == 'tous' else ''} onchange="setGenreFilter(this.value)"> Tout le monde
       </label>
       <label style="display:flex;align-items:center;gap:5px;cursor:pointer;font-size:.82rem;color:#93c5fd;">
-        <input type="radio" name="genre" value="garcon" {'checked' if genre_filter == 'garcon' else ''} onchange="setGenreFilter(this.value)"> ♂ Garçons
+        <input type="radio" name="genre" value="garcon" {'checked' if genre_filter == 'garcon' else ''} onchange="setGenreFilter(this.value)"> ♂ Garçons uniquement
       </label>
       <label style="display:flex;align-items:center;gap:5px;cursor:pointer;font-size:.82rem;color:#f9a8d4;">
-        <input type="radio" name="genre" value="fille" {'checked' if genre_filter == 'fille' else ''} onchange="setGenreFilter(this.value)"> ♀ Filles
+        <input type="radio" name="genre" value="fille" {'checked' if genre_filter == 'fille' else ''} onchange="setGenreFilter(this.value)"> ♀ Filles uniquement
       </label>
       <span id="genre-saved" style="display:none;font-size:.72rem;color:#22c55e;font-weight:700;">✓ Sauvegardé</span>
     </div>
@@ -3044,42 +2942,9 @@ input:focus,textarea:focus{border-color:#dc2626!important;outline:none!important
   <div class="stats">
     <div class="stat"><div class="stat-value">{len(massdm_pids)}<span style="color:#334155;font-size:1.2rem">/{n}</span></div><div class="stat-label">Profils Mass DM</div></div>
     <div class="stat"><div class="stat-value">{total_sent}</div><div class="stat-label">DMs envoyés</div></div>
-    <div class="stat"><div class="stat-value" id="stat-conversions" style="color:#22c55e;">—</div><div class="stat-label">Conversions</div></div>
-    <div class="stat"><div class="stat-value" id="stat-conv-rate" style="color:#3b82f6;">—<span style="font-size:1.2rem">%</span></div><div class="stat-label">Taux conversion</div></div>
+    <div class="stat"><div class="stat-value">{total_replied}</div><div class="stat-label">Réponses</div></div>
+    <div class="stat"><div class="stat-value">{taux_rep}<span style="font-size:1.2rem">%</span></div><div class="stat-label">Taux global</div></div>
     <div class="stat"><div class="stat-value">{tpl_active_count}<span style="color:#334155;font-size:1.2rem">/{len(templates)}</span></div><div class="stat-label">Templates actifs</div></div>
-  </div>
-
-  <!-- ══ TRACKING CONVERSION LIENS ══ -->
-  <div style="background:#141414;border:1px solid #1f1f1f;border-radius:14px;padding:20px 24px;margin-bottom:20px;">
-    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;flex-wrap:wrap;gap:10px;">
-      <div style="display:flex;align-items:center;gap:8px;">
-        <div style="width:3px;height:14px;background:#dc2626;border-radius:99px;"></div>
-        <span style="font-size:.7rem;font-weight:800;color:#dc2626;text-transform:uppercase;letter-spacing:.12em;">📊 Conversion par lien d'invitation</span>
-      </div>
-      <div style="display:flex;align-items:center;gap:10px;">
-        <span id="conv-checked" style="font-size:.65rem;color:#444;"></span>
-        <button onclick="refreshTracking()" style="background:#1a0a0a;border:1px solid #3d1212;color:#f87171;border-radius:7px;padding:5px 14px;font-size:.72rem;font-weight:700;cursor:pointer;">🔄 Actualiser</button>
-      </div>
-    </div>
-    <!-- Résumé global -->
-    <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:16px;">
-      <div style="background:#0d0d0d;border:1px solid #1f1f1f;border-radius:10px;padding:12px;text-align:center;">
-        <div id="cv-total-joins" style="font-size:1.5rem;font-weight:900;color:#22c55e;">—</div>
-        <div style="font-size:.6rem;color:#444;font-weight:700;text-transform:uppercase;margin-top:3px;">Total joins</div>
-      </div>
-      <div style="background:#0d0d0d;border:1px solid #1f1f1f;border-radius:10px;padding:12px;text-align:center;">
-        <div id="cv-dms" style="font-size:1.5rem;font-weight:900;color:#e0e0e0;">—</div>
-        <div style="font-size:.6rem;color:#444;font-weight:700;text-transform:uppercase;margin-top:3px;">DMs envoyés</div>
-      </div>
-      <div style="background:#0d0d0d;border:1px solid #1f1f1f;border-radius:10px;padding:12px;text-align:center;">
-        <div id="cv-rate" style="font-size:1.5rem;font-weight:900;color:#dc2626;">—</div>
-        <div style="font-size:.6rem;color:#444;font-weight:700;text-transform:uppercase;margin-top:3px;">Taux global</div>
-      </div>
-    </div>
-    <!-- Tableau des liens -->
-    <div id="cv-links-table" style="display:flex;flex-direction:column;gap:6px;">
-      <div style="font-size:.65rem;color:#333;text-align:center;padding:16px;">En attente — scraper.py doit tourner (vérifie toutes les 1h)</div>
-    </div>
   </div>
 
   <!-- ══ TEMPLATES ══ -->
@@ -3087,7 +2952,7 @@ input:focus,textarea:focus{border-color:#dc2626!important;outline:none!important
   <div class="card" style="padding:20px 24px 22px;margin-bottom:16px;">
     <div class="add-box" style="border:none;padding:0;margin:0;flex-wrap:wrap;align-items:flex-start;">
       <div style="display:flex;flex-direction:column;flex:1;gap:8px;min-width:260px;">
-        <input id="tname" type="text" placeholder="MESSAGE 1" style="font-family:monospace;">
+        <input id="tname" type="text" placeholder="Nom du template  ex: Template A — Recrutement court">
         <textarea id="tcontent" class="add-textarea" placeholder="Message 1 (obligatoire)&#10;Utilise {{prenom}} pour personnaliser."></textarea>
         <div id="extra-msgs-container"></div>
         <button class="btn-add-msg2" onclick="addExtraMsg()" id="btnAddMsg">➕ Ajouter un message supplémentaire (max 5 — envoyé 5-18s après le précédent)</button>
@@ -3276,18 +3141,6 @@ function _resetTplForm() {{
   _extraMsgCount = 0;
   document.getElementById('btnAddMsg').style.display = 'block';
 }}
-// Auto-remplir le nom "MESSAGE X" au focus si le champ est vide
-(function() {{
-  const inp = document.getElementById('tname');
-  if (!inp) return;
-  inp.addEventListener('focus', function() {{
-    if (this.value.trim()) return;
-    const cards = document.querySelectorAll('.tpl-card[data-tname]');
-    const next  = cards.length + 1;
-    this.value  = 'MESSAGE ' + next;
-  }});
-}})();
-
 async function addTpl() {{
   const name    = document.getElementById('tname').value.trim();
   const content = document.getElementById('tcontent').value.trim();
@@ -3298,10 +3151,8 @@ async function addTpl() {{
     if (el) body['content' + i] = el.value.trim();
   }}
   const d = await _post('/api/dm_template/add', body);
-  if (d.ok) {{
-    showToast("Template ajouté ! Lien d'invitation créé automatiquement...");
-    setTimeout(() => location.reload(), 1500);
-  }} else alert('Erreur : ' + (d.detail || JSON.stringify(d)));
+  if (d.ok) {{ showToast('Template ajouté !'); setTimeout(() => location.reload(), 1200); }}
+  else alert('Erreur : ' + (d.detail || JSON.stringify(d)));
 }}
 async function delTpl(id) {{
   if (!confirm('Supprimer ce template définitivement ?')) return;
@@ -3392,84 +3243,6 @@ async function setGenreFilter(val) {{
     setTimeout(() => el.style.display = 'none', 2000);
   }}
 }}
-
-// ── Tracking conversion liens d'invitation ───────────────────
-async function refreshTracking() {{
-  try {{
-    const r = await fetch('/api/massdm/tracking');
-    if (!r.ok) return;
-    const d = await r.json();
-    const links      = d.links || [];
-    const totalJoins = d.total_joins || 0;
-    const dms        = d.dms_sent_total || 0;
-    const rate       = d.conv_rate || 0;
-
-    const cvTJ = document.getElementById('cv-total-joins');
-    const cvDM = document.getElementById('cv-dms');
-    const cvRT = document.getElementById('cv-rate');
-    if (cvTJ) cvTJ.textContent = totalJoins || '—';
-    if (cvDM) cvDM.textContent = dms || '—';
-    if (cvRT) cvRT.textContent = dms > 0 ? rate + '%' : '—';
-
-    const scEl = document.getElementById('stat-conversions');
-    const srEl = document.getElementById('stat-conv-rate');
-    if (scEl) scEl.textContent = totalJoins || '0';
-    if (srEl) srEl.innerHTML = (dms > 0 ? rate : '0') + '<span style="font-size:1.2rem">%</span>';
-
-    if (d.last_checked) {{
-      const el = document.getElementById('conv-checked');
-      if (el) el.textContent = 'vérifié ' + d.last_checked;
-    }}
-
-    const maxJoins = Math.max(...links.map(l => l.joins), 1);
-    const table    = document.getElementById('cv-links-table');
-    if (table) {{
-      if (!links.length) {{
-        table.innerHTML = '<div style="font-size:.65rem;color:#333;text-align:center;padding:16px;">En attente — scraper.py doit tourner (vérifie toutes les 1h)</div>';
-      }} else {{
-        const sorted = [...links].sort((a,b) => b.joins - a.joins);
-        table.innerHTML = `<div style="display:grid;grid-template-columns:1fr auto auto auto;gap:0;margin-bottom:4px;padding:0 14px;">
-          <span style="font-size:.6rem;color:#444;font-weight:700;text-transform:uppercase;">Template</span>
-          <span style="font-size:.6rem;color:#444;font-weight:700;text-transform:uppercase;text-align:right;min-width:70px;">DMs envoyés</span>
-          <span style="font-size:.6rem;color:#444;font-weight:700;text-transform:uppercase;text-align:right;min-width:60px;">Joins</span>
-          <span style="font-size:.6rem;color:#444;font-weight:700;text-transform:uppercase;text-align:right;min-width:50px;">Taux</span>
-        </div>` + sorted.map(lk => {{
-          const pct      = Math.round(lk.joins / maxJoins * 100);
-          const lkDms    = lk.dms_sent || 0;
-          const lkRate   = lk.conv_rate != null ? lk.conv_rate : (lkDms > 0 ? (lk.joins/lkDms*100).toFixed(1) : '0');
-          const jColor   = lk.joins > 0 ? '#22c55e' : '#555';
-          const rColor   = lkRate > 0 ? '#dc2626' : '#444';
-          return `<div style="background:#0d0d0d;border:1px solid #1f1f1f;border-radius:8px;padding:10px 14px;margin-bottom:4px;">
-            <div style="display:grid;grid-template-columns:1fr auto auto auto;align-items:center;gap:0;margin-bottom:6px;">
-              <span style="font-size:.8rem;font-weight:700;color:#e0e0e0;">${{lk.title}}</span>
-              <span style="font-size:.78rem;color:#555;text-align:right;min-width:70px;">${{lkDms > 0 ? lkDms+' DMs' : '—'}}</span>
-              <span style="font-size:.82rem;font-weight:900;color:${{jColor}};text-align:right;min-width:60px;">+${{lk.joins}}</span>
-              <span style="font-size:.82rem;font-weight:900;color:${{rColor}};text-align:right;min-width:50px;">${{lkRate}}%</span>
-            </div>
-            <div style="background:#1a1a1a;border-radius:99px;height:5px;overflow:hidden;">
-              <div style="height:100%;background:${{lk.joins > 0 ? 'linear-gradient(90deg,#dc2626,#22c55e)' : '#1a1a1a'}};border-radius:99px;width:${{pct}}%;transition:width .6s;"></div>
-            </div>
-          </div>`;
-        }}).join('');
-      }}
-    }}
-
-    // Injecter dans les template cards
-    links.forEach(lk => {{
-      document.querySelectorAll(`.tstat-joins[data-tname="${{lk.title}}"]`).forEach(el => {{
-        el.textContent = lk.joins || 0;
-        el.style.color = lk.joins > 0 ? '#22c55e' : '#555';
-      }});
-      document.querySelectorAll(`.tstat-rate[data-tname="${{lk.title}}"]`).forEach(el => {{
-        const r2 = lk.conv_rate || 0;
-        el.textContent = r2 + '%';
-        el.style.color = r2 > 0 ? '#dc2626' : '#555';
-      }});
-    }});
-  }} catch(e) {{}}
-}}
-refreshTracking();
-setInterval(refreshTracking, 60 * 60 * 1000);
 async function launchProfileDm(pid) {{
   const btn = event.currentTarget;
   btn.disabled = true;
@@ -3714,6 +3487,7 @@ def dashboard_setup():
     profile_ids = get_all_ids()
     nb_config   = len(configs)
     config_map  = {c["profile_id"]: c for c in configs}
+    apply_res   = _apply_results  # résultats profile_changer.py
 
     # JSON pour le JS — évite tout problème d'échappement dans les onclick
     setup_data_js: dict = {}
@@ -3737,22 +3511,55 @@ def dashboard_setup():
         bio   = bio.replace("&","&amp;").replace("<","&lt;") or "—"
         upd   = c.get("updated_at", "") or "—"
 
-        # Photo via endpoint (évite l'inline base64 qui alourdit la page)
-        has_photo = bool(c.get("photo_b64", ""))
-        if has_photo:
-            photo_html = (
-                f'<img src="/api/setup/photo/{pid}" class="profile-photo-thumb" alt="photo"'
-                f' style="width:46px;height:46px;border-radius:50%;object-fit:cover;"'
-                f' onerror="this.outerHTML=\'<div style=&quot;width:46px;height:46px;border-radius:50%;background:#1a1a1a;border:1px solid #1f1f1f;display:flex;align-items:center;justify-content:center;font-size:1.3rem;&quot;>👤</div>\'">'
-            )
+        # Photo
+        pb64  = c.get("photo_b64", "") or ""
+        pname = c.get("photo_name", "") or ""
+        if pb64:
+            ext = "jpeg" if pname.lower().endswith((".jpg",".jpeg")) else "png"
+            photo_html = f'<img src="data:image/{ext};base64,{pb64}" class="profile-photo-thumb" alt="photo" style="width:46px;height:46px;border-radius:50%;object-fit:cover;">'
         else:
             photo_html = '<div style="width:46px;height:46px;border-radius:50%;background:#1a1a1a;border:1px solid #1f1f1f;display:flex;align-items:center;justify-content:center;font-size:1.3rem;">👤</div>'
+
+        # ── Dot indicateur statut ──────────────────────────────
+        res   = apply_res.get(pid, {})
+        etype = res.get("error_type", "")
+        err   = (res.get("error") or "")[:60]
+        at    = res.get("at", "")
+
+        if res.get("ok") is True:
+            dot_cls  = "dot-ok"
+            dot_tip  = f"✅ Upload réussi · {at}"
+            dot_lbl  = f'<span class="status-dot-lbl" style="color:#22c55e;">✅ {at}</span>'
+        elif etype == "not_connected":
+            dot_cls  = "dot-nc"
+            dot_tip  = "⛔ Telegram non connecté"
+            dot_lbl  = '<span class="status-dot-lbl" style="color:#ef4444;">Telegram non connecté</span>'
+        elif etype in ("upload_failed",):
+            dot_cls  = "dot-upload"
+            dot_tip  = f"⚠ Upload échoué · {err}"
+            dot_lbl  = '<span class="status-dot-lbl" style="color:#f97316;">Upload échoué</span>'
+        elif res.get("ok") is False:
+            dot_cls  = "dot-err"
+            dot_tip  = f"⚠ Erreur · {err}"
+            dot_lbl  = f'<span class="status-dot-lbl" style="color:#f97316;">{err[:40]}</span>'
+        else:
+            dot_cls  = "dot-none"
+            dot_tip  = "En attente"
+            dot_lbl  = ""
+
+        status_html = (
+            f'<div class="status-dot-wrap">'
+            f'<span class="status-dot {dot_cls}" title="{dot_tip}"></span>'
+            f'{dot_lbl}'
+            f'</div>'
+        )
 
         rows += f"""<tr>
           <td style="padding:10px 16px;">{photo_html}</td>
           <td style="font-family:monospace;font-size:.78rem;color:#888;">{pid}</td>
           <td style="font-family:monospace;font-size:.82rem;color:#dc2626;">{"@"+uname if uname else "<span style='color:#2a2a2a'>—</span>"}</td>
-          <td style="font-size:.75rem;color:#555;max-width:220px;">{bio}</td>
+          <td style="font-size:.75rem;color:#555;max-width:180px;">{bio}</td>
+          <td style="font-size:.7rem;max-width:200px;">{status_html}</td>
           <td style="font-size:.7rem;color:#333;">{upd[:16]}</td>
           <td style="white-space:nowrap;text-align:center;">
             <button class="btn-edit-setup" onclick="openEditModal('{pid}')">✏ Modifier</button>
@@ -3775,9 +3582,10 @@ def dashboard_setup():
         pb64_val   = cfg.get("photo_b64", "") or ""
         pname_val  = cfg.get("photo_name", "") or ""
 
-        # Photo via endpoint (évite l'inline base64)
+        # Photo : image complète si dispo, sinon placeholder
         if pb64_val:
-            photo_el = f'<img src="/api/setup/photo/{p}" style="width:100%;height:100%;object-fit:cover;" alt="" onerror="this.parentElement.innerHTML=\'👤\'">'
+            ext      = "jpeg" if pname_val.lower().endswith((".jpg", ".jpeg")) else "png"
+            photo_el = f'<img src="data:image/{ext};base64,{pb64_val}" style="width:100%;height:100%;object-fit:cover;" alt="">'
         else:
             photo_el = "👤"
 
@@ -3806,7 +3614,7 @@ def dashboard_setup():
       <div class="pmc-icon">📤</div>
       <div class="pmc-title">Upload en masse</div>
       <div class="pmc-sub">Jusqu'à 25 photos<br>1 par profil sélectionné</div>
-      <div class="pmc-delay">⏱ 10 min entre chaque profil</div>
+      <div class="pmc-delay">⏱ 6 min entre chaque profil</div>
     </div>"""
 
     # JSON profils pour JS
@@ -4091,11 +3899,8 @@ const SETUP_DATA = {setup_json};
 let _pid = '';
 let _photoB64 = '';
 let _photoName = '';
-let _reloadTimer = null;  // timer après sauvegarde — annulable si on ouvre un autre profil
 
 function openEditModal(pid) {{
-  // Annuler tout reload en attente (déclenché après une sauvegarde précédente)
-  if (_reloadTimer) {{ clearTimeout(_reloadTimer); _reloadTimer = null; }}
   const d = SETUP_DATA[pid] || {{}};
   _pid = pid;
   _photoB64 = '';
@@ -4186,7 +3991,7 @@ async function saveAndApply() {{
     status.className = 'apply-status ok';
     status.innerHTML = '✅ Config enregistrée.<br><span style="font-size:.7rem;color:#64748b;">Le daemon appliquera les changements dans ~30 s (LANCER_TOUT.vbs doit tourner).</span>';
     status.style.display = 'block';
-    _reloadTimer = setTimeout(() => {{ _reloadTimer = null; closeModal(); location.reload(); }}, 3000);
+    setTimeout(() => {{ closeModal(); location.reload(); }}, 3000);
 
   }} catch(e) {{
     btn.disabled    = false;
@@ -4269,7 +4074,7 @@ document.getElementById('setupModal').addEventListener('click', function(e) {{
       <div class="mass-photo-grid" id="massPhotoGrid"></div>
       <div class="mass-warn" id="massWarn" style="display:none"></div>
       <button type="button" class="mass-btn mass-btn-primary" id="msBtnLaunch"
-        onclick="massLaunch()" disabled>🚀 Lancer — 10 min/profil</button>
+        onclick="massLaunch()" disabled>🚀 Lancer — 6 min/profil</button>
       <button type="button" class="mass-btn mass-btn-sec" onclick="massGoStep1()" style="margin-top:6px">← Retour</button>
     </div>
 
@@ -4288,6 +4093,16 @@ document.getElementById('setupModal').addEventListener('click', function(e) {{
           </svg>
           <span class="mass-stop-icon">⏹</span>
           <span class="mass-stop-lbl" id="massStopLbl">Arrêter</span>
+        </button>
+      </div>
+      <!-- Bouton forcer fermeture — visible si batch bloqué -->
+      <div style="display:flex;justify-content:center;margin-top:12px;" id="massForceZone">
+        <button type="button" id="massForceBtn" onclick="batchForceReset()"
+          style="background:transparent;border:1px solid #333;border-radius:8px;color:#555;
+                 font-size:.75rem;padding:7px 18px;cursor:pointer;transition:all .15s;"
+          onmouseover="this.style.borderColor='#dc2626';this.style.color='#dc2626'"
+          onmouseout="this.style.borderColor='#333';this.style.color='#555'">
+          ✕ Forcer la fermeture
         </button>
       </div>
     </div>
@@ -4370,6 +4185,25 @@ async function batchStop() {{
     if (btn) btn.disabled = false;
     if (lbl) lbl.textContent = 'Arrêter';
   }}
+}}
+
+async function batchForceReset() {{
+  if (!confirm('Forcer la fermeture va réinitialiser le batch côté serveur.\nContinuer ?')) return;
+  try {{
+    await fetch('/api/setup/batch-reset', {{
+      method: 'POST',
+      headers: {{'Content-Type':'application/json'}},
+      body: JSON.stringify({{token: '{SECRET_TOKEN}'}})
+    }});
+  }} catch(e) {{ /* ignore */ }}
+  // Stopper le polling
+  if (_pollInterval) {{ clearInterval(_pollInterval); _pollInterval = null; }}
+  _mRunning = false;
+  // Fermer l'overlay
+  document.getElementById('massOverlay').classList.remove('open');
+  _mSel = []; _mPhotos = [];
+  // Recharger la page pour état propre
+  location.reload();
 }}
 
 function openMassUpload() {{
@@ -4530,7 +4364,7 @@ async function massLaunch() {{
     _startPolling();
   }} catch(e) {{
     btn.disabled = false;
-    btn.textContent = '🚀 Lancer — 10 min/profil';
+    btn.textContent = '🚀 Lancer — 6 min/profil';
     alert('Erreur : ' + e.message);
   }}
 }}
@@ -4559,11 +4393,19 @@ async function _pollBatch() {{
 }}
 
 function _applyBatchState(s) {{
-  if (!s.profiles || !s.profiles.length) return;
+  const overlay = document.getElementById('massOverlay');
+  // Si le serveur répond "aucun batch" (après redémarrage), fermer la modal automatiquement
+  if (!s.profiles || !s.profiles.length) {{
+    if (overlay && overlay.classList.contains('open') && !_mRunning) {{
+      overlay.classList.remove('open');
+      if (_pollInterval) {{ clearInterval(_pollInterval); _pollInterval = null; }}
+    }}
+    return;
+  }}
 
   // Auto-ouvrir le panel si batch en cours et overlay fermé
-  if (s.running && !document.getElementById('massOverlay').classList.contains('open')) {{
-    document.getElementById('massOverlay').classList.add('open');
+  if (s.running && overlay && !overlay.classList.contains('open')) {{
+    overlay.classList.add('open');
     _setStep(3);
     _buildProgressList(s.profiles.map(p => p.id));
   }}
@@ -4572,11 +4414,14 @@ function _applyBatchState(s) {{
   const gDot = document.querySelector('.mgs-dot');
 
   // Bouton stop : visible si en cours, caché si terminé/arrêté
-  const stopZone = document.getElementById('massStopZone');
-  const stopBtn  = document.getElementById('massStopBtn');
-  const stopLbl  = document.getElementById('massStopLbl');
+  const stopZone  = document.getElementById('massStopZone');
+  const stopBtn   = document.getElementById('massStopBtn');
+  const stopLbl   = document.getElementById('massStopLbl');
+  const forceZone = document.getElementById('massForceZone');
   if (stopZone) stopZone.style.display = s.running ? 'flex' : 'none';
-  // Si stop_requested, désactiver le bouton et mettre le label
+  // Bouton "Forcer la fermeture" : toujours visible dans step 3
+  if (forceZone) forceZone.style.display = 'flex';
+  // Si stop_requested, désactiver le bouton stop et montrer "Arrêt..."
   if (s.stop_requested && stopBtn && !stopBtn.disabled) {{
     stopBtn.disabled = true;
     if (stopLbl) stopLbl.textContent = 'Arrêt...';

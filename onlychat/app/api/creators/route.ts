@@ -70,7 +70,9 @@ export async function POST(req: NextRequest) {
     if (body.action === "set-webhook") {
       const c = creators[idx];
       if (!body.appUrl) return NextResponse.json({ error: "appUrl manquant" }, { status: 400 });
-      const webhookUrl = `${body.appUrl}/api/telegram/bot/${c.id}`;
+      // Force HTTPS — Telegram refuse tout ce qui n'est pas HTTPS
+      const secureBase = body.appUrl.replace(/^http:\/\//i, "https://");
+      const webhookUrl = `${secureBase}/api/telegram/bot/${c.id}`;
       console.log("[set-webhook] URL:", webhookUrl);
       const result = await telegramAPI(c.botToken, "setWebhook", {
         url: webhookUrl,
@@ -103,8 +105,9 @@ export async function POST(req: NextRequest) {
       if (!me.ok) return NextResponse.json({ error: "Token invalide" }, { status: 400 });
       creators[idx].botToken = newToken;
       creators[idx].botUsername = `@${me.result.username}`;
-      // Reconnecte le webhook
-      const webhookUrl = `${body.appUrl}/api/telegram/bot/${creators[idx].id}`;
+      // Reconnecte le webhook (force HTTPS)
+      const secureBase2 = (body.appUrl ?? "").replace(/^http:\/\//i, "https://");
+      const webhookUrl = `${secureBase2}/api/telegram/bot/${creators[idx].id}`;
       const wh = await telegramAPI(newToken, "setWebhook", {
         url: webhookUrl,
         allowed_updates: ["message", "business_message", "business_connection"],

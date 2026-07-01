@@ -1,9 +1,18 @@
 services:
   - type: web
-    name: warmup-tracker
+    name: agency-os
     runtime: python
+    rootDir: telegram_scraper
     buildCommand: pip install -r requirements.txt
-    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    startCommand: uvicorn story_scheduler:app --host 0.0.0.0 --port $PORT
+    disk:
+      name: agency-os-data
+      mountPath: /data
+      sizeGB: 1
     envVars:
-      - key: DASHBOARD_TOKEN
-        generateValue: true
+      - key: TG_API_ID
+        sync: false
+      - key: TG_API_HASH
+        sync: false
+      - key: DATA_DIR
+        value: /data

@@ -22,6 +22,9 @@ import requests
 from datetime import date
 from playwright.async_api import async_playwright
 
+# Chemin absolu du dossier du script (stable peu importe le répertoire de lancement)
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
 # ============================================================
 # Profils : chargés depuis le dashboard Supabase en priorité, sinon profiles.txt
 DASHBOARD_URL   = "https://warmup-tracker.onrender.com"
@@ -55,7 +58,7 @@ ADSPOWER_PROFILES = _load_profiles()
 
 ADSPOWER_API = "http://local.adspower.net:50325"
 ADSPOWER_KEY = "942d5c4fa00deedac520c3310912ee6100795935b355b33b"
-DM_CSV       = "output/membres.csv"
+DM_CSV       = os.path.join(BASE_DIR, "output", "membres.csv")
 
 # ── Groupes à rejoindre (J1:4 aléat., J2:3 aléat., J3+:2 tous les 2j) ──
 GROUPS_TO_JOIN = [
@@ -75,14 +78,36 @@ GROUPS_TO_JOIN = [
     ("https://t.me/cupidbotg",             False, None),
     ("https://t.me/roroivx",               False, None),
     ("https://t.me/TheValere",             False, None),
+    # ── Canaux pour poster les annonces ─────────────────────
+    ("https://t.me/+45MKai9c7jU1ZGI8",    True,  None),
+    ("https://t.me/chattersventure",       False, None),
+    ("https://t.me/jobonlinevas",          False, None),
+    ("https://t.me/OFMnetworkfrance",      False, None),
+    ("https://t.me/StoneServiceBoard",     False, None),
+    ("https://t.me/+WVdLZnUpgtpkNDM6",    True,  None),
+    # ── Canaux à rejoindre + lire (sans poster) ──────────────
+    ("https://t.me/+oQuSGKfMVB00YTQ0",    True,  None),
+    ("https://t.me/enzo200k",              False, None),
+    ("https://link.me/cassandrabq",        False, None),
+    ("https://t.me/rickyvouch",            False, None),
+    ("https://t.me/ferrettiofm",           False, None),
+    ("https://t.me/evoempire",             False, None),
+    ("https://t.me/promotiononlyfans",     False, None),
 ]
 
-# Groupes publics pour la phase de lecture
+# Groupes publics pour POSTER les annonces
 PUBLIC_GROUPS = [
     "ofmva_fr", "fraofm", "OFstarters", "noahofmfr",
     "ofmanagementgroupe", "OFMNetworkgroup", "richclubofm",
     "ofmglobalnetworkgroup", "shaftofmjobs", "parismodels_ofm",
     "elisaflamex", "cupidbotg", "roroivx", "TheValere",
+    "chattersventure", "jobonlinevas", "OFMnetworkfrance", "StoneServiceBoard",
+]
+
+# Groupes publics pour la LECTURE UNIQUEMENT (pas de post d'annonces)
+READ_ONLY_GROUPS = [
+    "enzo200k", "cassandrabq", "rickyvouch",
+    "ferrettiofm", "evoempire", "promotiononlyfans",
 ]
 
 
@@ -99,46 +124,81 @@ def get_join_count(day: int) -> int:
 
 GROUP_MESSAGES = [
     (
-        "Nous recherchons des assistants virtuels pour gérer des comptes Instagram.\n\n"
-        "✅Ce que nous offrons :\n"
-        "– Formation incluse\n"
-        "– Process clairs\n"
-        "– Paiement en crypto\n"
-        "– 100€/mois + prime💸\n\n"
-        "🕐2h/jour, flexibles\n"
-        "🎯Profils recherchés : disciplinés, fiables et réactifs"
+        "🚨 NOUS RECRUTONS DES VA X (Twitter) 🚨\n\n"
+        "Débutants motivés ou profils expérimentés bienvenus\n"
+        "(Africains et Malgaches 🇲🇬 de préférence)\n\n"
+        "AVANTAGES :\n"
+        "💵 Salaire fixe évolutif\n"
+        "▶️ Formation complète + accompagnement\n"
+        "⭐️ Possibilité d'évolution rapide vers un poste de manager\n"
+        "📈 Collaboration sérieuse sur le long terme\n\n"
+        "PROFIL RECHERCHÉ :\n"
+        "✔️ Smartphone récent obligatoire (iPhone fortement recommandé)\n"
+        "📶 Bonne connexion internet\n"
+        "⌛ Disponible plusieurs heures par jour\n"
+        "🔥 Motivé, discipliné et capable de suivre des consignes précises\n\n"
+        "👉🏻 Si tu es débutant mais sérieux et capable d'appliquer exactement les recommandations, tu peux postuler.\n\n"
+        "👉🏻 Si tu as déjà de l'expérience, merci d'envoyer uniquement des résultats ou preuves concrètes de ton travail.\n"
+        "Ne perds pas ton temps ni le nôtre sans ça.\n\n"
+        "🎤 Envoie un vocal obligatoire avec :\n"
+        "— le modèle de ton téléphone\n"
+        "— ta présentation\n"
+        "— tes expériences éventuelles"
     ),
     (
-        "🚀 On recrute des gestionnaires de comptes Instagram !\n\n"
-        "Tu veux un complément de revenu sérieux ?\n\n"
-        "✅ Formation complète offerte\n"
-        "✅ Méthodes claires et éprouvées\n"
-        "✅ Rémunération en crypto\n"
-        "✅ 100€/mois + primes💸\n\n"
-        "⏰ Seulement 2h/jour — horaires flexibles\n"
-        "👤 Profils motivés, fiables et réactifs\n\n"
-        "Intéressé(e) ? Envoie un message privé 👇"
+        "🚀 NOUS RECRUTONS DES CHATTER FRANCOPHONES 🇲🇬🇫🇷\n\n"
+        "Nous recherchons des personnes sérieuses, motivées et disponibles pour rejoindre notre équipe de chatters.\n\n"
+        "✅ Expérience obligatoire\n"
+        "✅ Rémunération attractive : jusqu'à 15% selon les performances + primes de performance\n"
+        "✅ Possibilité d'évolution rapide (Team Leader, Manager, etc.)\n"
+        "✅ Travail sur Grindr et Fanvue\n\n"
+        "📅 Activité 7j/7 — 24h/24\n\n"
+        "🕒 Créneaux disponibles :\n"
+        "• 02h → 08h\n"
+        "• 08h → 14h\n"
+        "• 14h → 20h\n"
+        "• 20h → 02h\n\n"
+        "⚠️ Conditions requises :\n"
+        "• Malgache uniquement\n"
+        "• Bonne connexion internet\n"
+        "• Sérieux et assiduité\n"
+        "• Français irréprochable\n"
+        "• Disponibilité minimum 6 jours par semaine\n\n"
+        "📩 Si tu es intéressé(e), merci de m'envoyer une présentation en vocal."
     ),
     (
-        "💼 Opportunité : Assistant(e) virtuel(le) Instagram\n\n"
-        "On agrandit notre équipe !\n\n"
-        "• Formation incluse dès le départ\n"
-        "• Processus simples et structurés\n"
-        "• Paiement en crypto\n"
-        "• 100€/mois + bonus💸\n\n"
-        "🕐 2h par jour suffisent\n"
-        "🎯 Profil : discipliné(e), fiable, réactif(ve)\n\n"
-        "MP pour plus d'infos !"
+        "Recrutement chatter\n\n"
+        "Nous recherchons des chatteurs pour discuter avec nos modèles françaises.\n"
+        "💻 Job : Chatteur\n"
+        "💰 Rémunération : 12% sur toutes les ventes + primes\n"
+        "💵 Salaire : Toutes les 2 semaines en crypto\n\n"
+        "⏰ Shift (Heure France) :\n\n"
+        "• 10h-18h\n"
+        "• 18h-02h\n"
+        "• 02h-10h\n\n"
+        "Conditions ✅ :\n"
+        "- Maîtrise de la langue française (oral et écrit)\n"
+        "- Expérience préalable en chatting\n"
+        "- Vitesse de frappe au clavier rapide\n"
+        "- À l'aise avec l'utilisation d'un ordinateur\n"
+        "- Ponctuel(le) et sérieux"
     ),
     (
-        "📢 Offre d'emploi en ligne — Gestionnaire Instagram\n\n"
-        "Tu cherches un revenu complémentaire depuis chez toi ?\n\n"
-        "✅ Formation fournie\n"
-        "✅ Process clairs\n"
-        "✅ Payé en crypto\n"
-        "✅ 100€/mois + prime💸\n\n"
-        "⏱️ 2h/jour, horaires flexibles\n"
-        "✔️ Discipliné(e) et réactif(ve) ? C'est toi qu'on cherche !"
+        "🚨 HIRING ONLYFANS CHATTERS 🚨\n\n"
+        "💰 High earning opportunity\n"
+        "🔥 Serious sellers ONLY\n\n"
+        "✅ 1–2+ years OF chatting experience\n"
+        "✅ Proven sales/results\n"
+        "✅ Fluent English\n"
+        "✅ Reliable & consistent\n"
+        "✅ Able to work fast-paced shifts\n\n"
+        "🧪 ALL applicants will be tested before joining.\n\n"
+        "🚫 Don't apply if you only have a few months experience or can't commit consistently.\n\n"
+        "📩 DM with your experience + sales proof."
+    ),
+    (
+        "Bonjour, il y a des agences mym avec des modèles payants qui recherchent un chatteur ici ? "
+        "Je suis dispo pour un shift matin 8h-13h"
     ),
     (
         "👀 Tu veux bosser en ligne 2h/jour et être payé(e) ?\n\n"
@@ -149,6 +209,26 @@ GROUP_MESSAGES = [
         "– 100€/mois + primes💸\n\n"
         "🎯 Personnes disciplinées, fiables et réactives\n\n"
         "Dis-moi en MP si ça t'intéresse 🙌"
+    ),
+    (
+        "📱 RECRUTEMENT VA INSTAGRAM 📱\n\n"
+        "💎 OUVERT À TOUS ! 💎\n\n"
+        "Nous recrutons des Assistants pour gérer et développer des comptes Instagram sur le marché Français 🇫🇷.\n\n"
+        "📌 Missions\n"
+        "• Gérer 2 comptes Instagram\n"
+        "• Poster des Réels et stories CTA tous les jours\n\n"
+        "⚙️ Conditions\n"
+        "• ⏱ Environ 15-20 minutes / jour\n"
+        "• 📆 Disponible TOUS les jours\n"
+        "• 📲 Avoir un téléphone\n\n"
+        "🎯 Profil\n"
+        "• Sérieux, régulier, autonome\n"
+        "• À l'aise avec Instagram\n\n"
+        "💰 Rémunération\n"
+        "• Payé au résultat selon les performances du compte :\n"
+        "clics / performances / subs des comptes\n"
+        "(jusqu'à 1000€ / mois / compte)\n\n"
+        "• 📈 Évolution rapide en manager selon performances."
     ),
 ]
 
@@ -162,16 +242,17 @@ DM_RESPONSES = [
 
 PLAN = {
     # (lectures, posts_canal, dms) — groupes gérés par get_join_count()
-    1:  (3, 0, 0),   2:  (3, 0, 0),   3:  (3, 1, 0),
-    4:  (3, 1, 0),   5:  (4, 1, 0),   6:  (3, 1, 0),
-    7:  (4, 1, 0),   8:  (3, 1, 1),   9:  (4, 1, 2),
-    10: (3, 1, 3),   11: (4, 1, 4),   12: (3, 1, 5),
-    13: (4, 1, 6),   14: (3, 1, 8),   15: (4, 1, 10),
+    1:  (3, 0, 0),   2:  (3, 0, 0),   3:  (3, 3, 0),
+    4:  (3, 3, 0),   5:  (4, 3, 0),   6:  (3, 3, 0),
+    7:  (4, 3, 0),   8:  (3, 3, 1),   9:  (4, 3, 2),
+    10: (3, 3, 3),   11: (4, 3, 4),   12: (3, 3, 5),
+    13: (4, 3, 6),   14: (3, 3, 8),   15: (4, 3, 10),
 }
 
 # ── Plan Direct DM (sans chauffe — progression du J1 au J7+) ──
 DIRECT_DM_LIMITS = {1: 5, 2: 8, 3: 12, 4: 15, 5: 20, 6: 25}
 # Jour 7+ → random 28-33
+
 
 def get_direct_dm_limit(dm_day: int) -> int:
     if dm_day in DIRECT_DM_LIMITS:
@@ -190,6 +271,48 @@ def load_direct_dm_templates() -> list:
     except Exception as e:
         print(f"[!] Impossible de charger les templates DM : {e}")
     return []
+
+
+# ── Détection de genre par prénom (gender-guesser) ────────────
+# pip install gender-guesser
+try:
+    import gender_guesser.detector as _gg
+    _gd = _gg.Detector(case_sensitive=False)
+    _GENDER_LIB = True
+except ImportError:
+    _GENDER_LIB = False
+    print("[!] gender-guesser non installé — lance : pip install gender-guesser")
+
+def detecter_genre(prenom: str) -> str:
+    """
+    Retourne 'M' (masculin), 'F' (féminin), ou '?' (inconnu/ambigu).
+    Utilise gender-guesser (~48 000 prénoms mondiaux dont français/arabes).
+    """
+    if not prenom or not prenom.strip():
+        return "?"
+    if _GENDER_LIB:
+        r = _gd.get_gender(prenom.strip())
+        # male / mostly_male → M
+        if r in ("male", "mostly_male"):
+            return "M"
+        # female / mostly_female → F
+        if r in ("female", "mostly_female"):
+            return "F"
+        # andy (ambigu) ou unknown → ?
+        return "?"
+    # Fallback minimal si lib absente
+    return "?"
+
+
+def load_massdm_settings() -> dict:
+    """Charge les paramètres Mass DM depuis le dashboard (filtre genre, etc.)."""
+    try:
+        r = requests.get(f"{DASHBOARD_URL}/api/massdm/settings", timeout=8)
+        if r.status_code == 200:
+            return r.json()
+    except Exception:
+        pass
+    return {"genre_filter": "tous"}
 
 
 def pick_dm_template(templates: list, session_counts: dict) -> dict | None:
@@ -221,10 +344,13 @@ MASS_DM_SCRIPT = r"C:\Users\MAEL\Downloads\AGENCY\AUTOMATION\telegram_scraper\dm
 # ── Chemins de fichiers par profil ───────────────────────────
 
 def progress_file(profile_id: str) -> str:
-    return f"output/warmup_progress_{profile_id}.json"
+    return os.path.join(BASE_DIR, "output", f"warmup_progress_{profile_id}.json")
 
 def dm_log_file(profile_id: str) -> str:
-    return f"output/dm_log_{profile_id}.csv"
+    return os.path.join(BASE_DIR, "output", f"dm_log_{profile_id}.csv")
+
+# Log partagé entre tous les profils — garantit qu'un membre ne reçoit qu'1 seul DM
+DM_LOG_SHARED = os.path.join(BASE_DIR, "output", "dm_log_shared.csv")
 
 
 # ── Gestion de la progression ─────────────────────────────────
@@ -235,9 +361,14 @@ def load_progress(profile_id: str) -> dict:
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
         last = data.get("last_run_date")
-        if last and last != str(date.today()) and data.get("done_today"):
+        # Avance au jour suivant dès qu'une nouvelle date est détectée,
+        # même si la session précédente a été interrompue (done_today ignoré).
+        # On met à jour last_run_date ICI pour éviter d'incrémenter plusieurs
+        # fois le même jour si la session crashe avant la fin.
+        if last and last != str(date.today()):
             data["day"] += 1
             data["done_today"] = False
+            data["last_run_date"] = str(date.today())
             save_progress(profile_id, data)
         return data
     return {
@@ -254,36 +385,57 @@ def load_progress(profile_id: str) -> dict:
 
 
 def save_progress(profile_id: str, data: dict):
-    os.makedirs("output", exist_ok=True)
+    os.makedirs(os.path.join(BASE_DIR, "output"), exist_ok=True)
     with open(progress_file(profile_id), "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
 
 
 def load_already_dmed(profile_id: str) -> set:
+    """Retourne les usernames déjà contactés — log individuel ET log partagé.
+    Un membre présent dans l'un OU l'autre est considéré déjà traité.
+    → Garantit qu'aucun membre ne reçoit plus d'1 DM au total."""
     sent = set()
+    # 1. Log individuel du profil
     path = dm_log_file(profile_id)
     if os.path.exists(path):
         with open(path, newline="", encoding="utf-8-sig") as f:
             for row in csv.DictReader(f):
                 if row.get("statut") == "envoye":
                     sent.add(row.get("username", ""))
+    # 2. Log partagé (tous profils confondus)
+    if os.path.exists(DM_LOG_SHARED):
+        with open(DM_LOG_SHARED, newline="", encoding="utf-8-sig") as f:
+            for row in csv.DictReader(f):
+                if row.get("statut") == "envoye":
+                    sent.add(row.get("username", ""))
     return sent
 
 
-def log_dm(profile_id: str, username: str, prenom: str):
+def log_dm(profile_id: str, username: str, prenom: str, template_name: str = ""):
+    """Enregistre le DM dans le log individuel ET dans le log partagé.
+    template_name : nom du template utilisé (ex: 'MESSAGE 1') pour le tracking A/B."""
     from datetime import datetime
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    os.makedirs("output", exist_ok=True)
+
+    # 1. Log individuel du profil
     path = dm_log_file(profile_id)
     file_exists = os.path.exists(path)
-    os.makedirs("output", exist_ok=True)
     with open(path, "a", newline="", encoding="utf-8-sig") as f:
-        writer = csv.DictWriter(f, fieldnames=["username", "prenom", "statut", "heure"])
+        writer = csv.DictWriter(f, fieldnames=["username", "prenom", "statut", "template", "heure"])
         if not file_exists:
             writer.writeheader()
-        writer.writerow({
-            "username": username, "prenom": prenom,
-            "statut":   "envoye",
-            "heure":    datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        })
+        writer.writerow({"username": username, "prenom": prenom,
+                         "statut": "envoye", "template": template_name, "heure": now_str})
+
+    # 2. Log partagé — inclut profile_id + template pour traçabilité A/B
+    shared_exists = os.path.exists(DM_LOG_SHARED)
+    with open(DM_LOG_SHARED, "a", newline="", encoding="utf-8-sig") as f:
+        writer = csv.DictWriter(f, fieldnames=["profile_id", "username", "prenom", "statut", "template", "heure"])
+        if not shared_exists:
+            writer.writeheader()
+        writer.writerow({"profile_id": profile_id, "username": username, "prenom": prenom,
+                         "statut": "envoye", "template": template_name, "heure": now_str})
 
 
 # ── Affichage du status ───────────────────────────────────────
@@ -440,8 +592,92 @@ async def type_message(page, inp, text: str):
     await page.keyboard.press("Enter")
     await page.wait_for_timeout(2500)
 
+    # ── Vérifier si le message a échoué (icône rouge Telegram) ──
+    failed = await page.evaluate("""
+        () => {
+            // Sélecteurs connus pour les messages échoués dans Telegram Web K
+            const FAIL_SELS = [
+                '.message.failed',
+                '.message.is-failed',
+                '[class*="message"][class*="failed"]',
+                '.tgico-msg-failed',
+                '.icon-msg-failed',
+                '.message-status-error',
+                'i.tgico-msgfailed',
+            ];
+            for (const sel of FAIL_SELS) {
+                if (document.querySelector(sel)) return sel;
+            }
+            // Chercher le dernier message avec statut d'erreur
+            const msgs = document.querySelectorAll('.bubble.is-out, .message.is-out');
+            if (msgs.length > 0) {
+                const last = msgs[msgs.length - 1];
+                if (last.classList.contains('failed') || last.classList.contains('is-failed')) {
+                    return 'last-message-failed';
+                }
+            }
+            return null;
+        }
+    """)
+    if failed:
+        raise Exception(f"Message non envoyé (Telegram: {failed})")
+
 
 # ── Actions Telegram ──────────────────────────────────────────
+
+async def _click_request_to_join(page) -> bool:
+    """
+    Détecte et clique le bouton 'REQUEST TO JOIN' / 'Send Request' si un popup
+    de canal privé (approbation admin requise) est visible.
+    Retourne True si le bouton a été cliqué.
+    """
+    # Textes exacts possibles (Telegram peut varier selon la langue/version)
+    request_texts = [
+        "REQUEST TO JOIN", "Request to Join", "request to join",
+        "SEND REQUEST", "Send Request", "Send request",
+        "Demander à rejoindre", "Envoyer une demande", "DEMANDER",
+        "Apply to Join", "APPLY TO JOIN",
+    ]
+    for txt in request_texts:
+        try:
+            btn = page.get_by_text(txt, exact=True).first
+            if await btn.is_visible(timeout=600):
+                await btn.click(force=True)
+                await page.wait_for_timeout(2500)
+                print(f"    [OK] Demande d'adhésion envoyée ('{txt}')", flush=True)
+                return True
+        except Exception:
+            continue
+    # Scan JS large : cherche les boutons/liens dont le texte contient "request" ou "join"
+    # mais qui sont dans un popup/dialog (élément flottant au-dessus de la page)
+    clicked = await page.evaluate("""
+        () => {
+            const popupSels = [
+                '.popup', '.dialog', '.alert', '.confirm-dialog',
+                '.popup-confirmation', '[class*="popup"]', '[class*="dialog"]',
+            ];
+            const words = ['request', 'request to join', 'send request', 'apply'];
+            for (const sel of popupSels) {
+                const popup = document.querySelector(sel);
+                if (!popup || popup.offsetParent === null) continue;
+                const btns = popup.querySelectorAll('button, .btn, .btn-primary, a.btn');
+                for (const btn of btns) {
+                    const txt = (btn.innerText || btn.textContent || '').toLowerCase().trim();
+                    if (words.some(w => txt.includes(w))) {
+                        btn.click();
+                        return txt;
+                    }
+                }
+            }
+            return null;
+        }
+    """)
+    if clicked:
+        await page.wait_for_timeout(2500)
+        print(f"    [OK] Popup 'Request to Join' cliqué via JS : '{clicked}'", flush=True)
+        return True
+    return False
+
 
 async def rejoindre_groupe(page, invite_url: str, is_private: bool) -> str | None:
     print(f"    [->] Rejoindre : {invite_url[:55]}...")
@@ -449,84 +685,133 @@ async def rejoindre_groupe(page, invite_url: str, is_private: bool) -> str | Non
         # Amène la fenêtre au premier plan pour que l'action soit visible
         await page.bring_to_front()
         # Délai humain avant de naviguer
-        await page.wait_for_timeout(random.randint(1500, 3500))
+        await page.wait_for_timeout(random.randint(800, 1800))
 
-        if is_private:
-            hash_part = invite_url.split("+")[-1].rstrip("/")
-            tg_link   = f"tg://join?invite={hash_part}"
-            encoded   = urllib.parse.quote(tg_link, safe="")
-            web_url   = f"https://web.telegram.org/k/#?tgaddr={encoded}"
-        else:
-            # Extraire le username depuis l'URL t.me
+        # ── Extraction username (canaux publics) ─────────────────
+        username = ""
+        if not is_private:
             if "t.me/" in invite_url:
                 username = invite_url.split("t.me/")[-1].rstrip("/").split("/")[0]
             elif invite_url.startswith("@"):
                 username = invite_url[1:]
             else:
                 username = invite_url
-            web_url = f"https://web.telegram.org/k/#@{username}"
 
-        # ── Navigation en 2 étapes ──────────────────────────────
-        # Étape 1 : charge Telegram sans hash pour initialiser le SPA
-        try:
-            await page.goto("https://web.telegram.org/k/",
-                            wait_until="domcontentloaded", timeout=20000)
-        except Exception:
-            pass
-        await page.wait_for_timeout(2500)   # laisse Telegram charger son état interne
+        if is_private:
+            # ── Canal privé : tg:// link via Telegram Web K ───────
+            hash_part = invite_url.split("+")[-1].rstrip("/")
+            tg_link   = f"tg://join?invite={hash_part}"
+            encoded   = urllib.parse.quote(tg_link, safe="")
+            web_url   = f"https://web.telegram.org/k/#?tgaddr={encoded}"
+            try:
+                await page.goto("https://web.telegram.org/k/",
+                                wait_until="domcontentloaded", timeout=20000)
+            except Exception:
+                pass
+            await page.wait_for_timeout(1200)
+            try:
+                await page.goto(web_url, wait_until="domcontentloaded", timeout=15000)
+            except Exception:
+                pass
+            await page.wait_for_timeout(random.randint(1500, 2500))
 
-        # Étape 2 : navigue vers la cible (SPA initialisé = hash géré)
-        try:
-            await page.goto(web_url, wait_until="domcontentloaded", timeout=15000)
-        except Exception:
-            pass
-        await page.wait_for_timeout(random.randint(3000, 5000))
+        else:
+            # ── Canal public : page preview t.me → bouton "A K Web" ──
+            # Étape 1 : ouvrir la page preview sur t.me
+            print(f"    [->] Chargement page preview : {invite_url}")
+            try:
+                await page.goto(invite_url, wait_until="domcontentloaded", timeout=20000)
+            except Exception:
+                pass
+            await page.wait_for_timeout(random.randint(1200, 2200))
 
-        # ── Détection redirection t.me → popup "Ouvrir Telegram Desktop" ──────
-        # Si le browser a quitté web.telegram.org, on force le retour
-        for _attempt in range(3):
             cur = page.url
-            if "web.telegram.org" not in cur:
-                print(f"    [!] Redirection detectee ({cur[:50]}) — retour Telegram Web K...")
+
+            # Étape 2 : sur la page t.me, cliquer le lien "A K Web"
+            # (c'est le bouton qui redirige vers web.telegram.org/k/#@username)
+            web_k_clicked = False
+
+            if "t.me" in cur or "telegram.me" in cur:
+                print(f"    [->] Page preview chargée — recherche bouton Web K...")
+
+                # Méthode 1 : lien direct vers web.telegram.org/k
                 try:
-                    await page.goto("about:blank", wait_until="domcontentloaded", timeout=5000)
+                    web_link = page.locator("a[href*='web.telegram.org/k']").first
+                    if await web_link.is_visible(timeout=3000):
+                        href = await web_link.get_attribute("href") or ""
+                        print(f"    [->] Bouton Web K trouvé, clic...")
+                        await page.goto(href, wait_until="domcontentloaded", timeout=20000)
+                        await page.wait_for_timeout(random.randint(1500, 2500))
+                        web_k_clicked = True
                 except Exception:
                     pass
-                await page.wait_for_timeout(1500)
+
+                # Méthode 2 : tous les <a> dont href pointe vers web.telegram.org
+                if not web_k_clicked:
+                    try:
+                        all_links = page.locator("a")
+                        cnt = await all_links.count()
+                        for i in range(cnt):
+                            lnk = all_links.nth(i)
+                            try:
+                                href = (await lnk.get_attribute("href") or "")
+                                if "web.telegram.org" in href:
+                                    print(f"    [->] Lien Web Telegram trouvé : {href[:60]}")
+                                    await page.goto(href, wait_until="domcontentloaded", timeout=20000)
+                                    await page.wait_for_timeout(random.randint(3000, 5000))
+                                    web_k_clicked = True
+                                    break
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
+
+                if not web_k_clicked:
+                    print(f"    [!] Bouton Web K non trouvé sur page preview — fallback direct")
+
+            # Étape 3 (fallback) : navigation directe web.telegram.org/k/#@username
+            if not web_k_clicked:
+                web_url = f"https://web.telegram.org/k/#@{username}"
                 try:
                     await page.goto("https://web.telegram.org/k/",
                                     wait_until="domcontentloaded", timeout=20000)
                 except Exception:
                     pass
-                await page.wait_for_timeout(2500)
+                await page.wait_for_timeout(1200)
                 try:
                     await page.goto(web_url, wait_until="domcontentloaded", timeout=15000)
                 except Exception:
                     pass
-                await page.wait_for_timeout(random.randint(3000, 5000))
-            else:
-                break
-        # ────────────────────────────────────────────────────────────────────────
+                await page.wait_for_timeout(random.randint(1500, 2500))
 
-        # Vérification URL — si on n'est pas sur la bonne page, force un 2ème essai
-        if not is_private:
-            current = page.url
-            if username.lower() not in current.lower():
-                print(f"    [!] Mauvaise page ({current.split('#')[-1]}) — retry...")
-                try:
-                    await page.goto(web_url, wait_until="domcontentloaded", timeout=15000)
-                except Exception:
-                    pass
-                await page.wait_for_timeout(random.randint(3000, 5000))
-                if username.lower() not in page.url.lower():
-                    print(f"    [X] Impossible de charger {username} — page incorrecte")
-                    return None
-        # ───────────────────────────────────────────────────────
+            # Vérification que Telegram Web K est bien chargé
+            for _att in range(3):
+                if "web.telegram.org" not in page.url:
+                    print(f"    [!] Pas sur web.telegram.org — retry...")
+                    web_url = f"https://web.telegram.org/k/#@{username}"
+                    try:
+                        await page.goto(web_url,
+                                        wait_until="domcontentloaded", timeout=15000)
+                    except Exception:
+                        pass
+                    await page.wait_for_timeout(1500)
+                else:
+                    break
+
+            if "web.telegram.org" not in page.url:
+                print(f"    [X] Impossible d'atteindre Telegram Web K pour {username}")
+                return None
 
         joined = False
 
+        # ── Vérification anticipée : popup "Request to Join" ─────
+        # Ce popup peut apparaître immédiatement après la navigation vers
+        # un canal qui requiert l'approbation d'un admin.
+        if await _click_request_to_join(page):
+            joined = True
+
         # Attente supplementaire pour que la page finisse de rendre
-        await page.wait_for_timeout(2500)
+        await page.wait_for_timeout(1200)
 
         # Sélecteurs étendus pour Telegram Web K (toutes versions)
         SELECTORS = [
@@ -560,7 +845,7 @@ async def rejoindre_groupe(page, invite_url: str, is_private: bool) -> str | Non
                     txt = (await btn.inner_text()).strip().lower()
                     if not txt or any(w in txt for w in MOTS_JOIN):
                         await btn.click(force=True)
-                        await page.wait_for_timeout(3000)
+                        await page.wait_for_timeout(1500)
                         joined = True
                         break
             except Exception:
@@ -581,7 +866,7 @@ async def rejoindre_groupe(page, invite_url: str, is_private: bool) -> str | Non
                         txt = (await btn.inner_text()).strip().lower()
                         if any(w in txt for w in MOTS_JOIN):
                             await btn.click(force=True)
-                            await page.wait_for_timeout(3000)
+                            await page.wait_for_timeout(1500)
                             joined = True
                             print(f"    [OK] Bouton trouve via fallback : '{txt}'")
                             break
@@ -612,11 +897,19 @@ async def rejoindre_groupe(page, invite_url: str, is_private: bool) -> str | Non
                     }
                 """)
                 if clicked:
-                    await page.wait_for_timeout(3000)
+                    await page.wait_for_timeout(1500)
                     joined = True
                     print(f"    [OK] Bouton clique via JS : '{clicked}'")
             except Exception:
                 pass
+
+        # Fallback 3 : retry tardif — le popup "Request to Join" peut apparaître
+        # avec retard (ex: après chargement du profil du canal)
+        if not joined:
+            print(f"    [i] Aucun bouton trouvé — attente 3s pour popup tardif...", flush=True)
+            await page.wait_for_timeout(3000)
+            if await _click_request_to_join(page):
+                joined = True
 
         final_url = page.url
 
@@ -664,27 +957,127 @@ async def rejoindre_groupe(page, invite_url: str, is_private: bool) -> str | Non
         return None
 
 
+def _username_from_url(url: str) -> str:
+    """Extrait le @username depuis une URL Telegram (t.me/x ou web.telegram.org/k/#@x)."""
+    if "#@" in url:
+        return url.split("#@")[-1].rstrip("/").split("/")[0]
+    if "t.me/" in url:
+        return url.split("t.me/")[-1].lstrip("+").rstrip("/").split("/")[0]
+    if url.startswith("@"):
+        return url[1:]
+    return url.split("#")[-1].lstrip("@").rstrip("/")
+
+
+async def _ouvrir_via_tme(page, username: str) -> bool:
+    """
+    Ouvre un canal Telegram en collant l'URL t.me/username dans la barre d'adresse
+    (comme si on tapait le lien directement dans Google/Chrome).
+    Trouve le bouton 'A K Web' (lien web.telegram.org/k) et navigue dessus.
+    Retourne True si Telegram Web K est bien ouvert.
+    """
+    tme_url = f"https://t.me/{username}"
+    print(f"    [->] Navigation directe : {tme_url}")
+    try:
+        await page.goto(tme_url, wait_until="domcontentloaded", timeout=20000)
+    except Exception:
+        pass
+    await page.wait_for_timeout(random.randint(2500, 4000))
+
+    web_k_clicked = False
+    cur = page.url
+
+    # ── Si on est déjà retombé sur web.telegram.org (redirection auto) ──────
+    if "web.telegram.org" in cur:
+        print(f"    [->] Redirigé automatiquement vers Telegram Web K")
+        return True
+
+    if "t.me" in cur or "telegram.me" in cur:
+        # Méthode 1 : attribut href exact vers web.telegram.org/k
+        try:
+            web_link = page.locator("a[href*='web.telegram.org/k']").first
+            if await web_link.is_visible(timeout=3000):
+                href = await web_link.get_attribute("href") or ""
+                if href:
+                    print(f"    [->] Bouton Web K trouvé — clic...")
+                    await page.goto(href, wait_until="domcontentloaded", timeout=20000)
+                    await page.wait_for_timeout(random.randint(2500, 4000))
+                    web_k_clicked = True
+        except Exception:
+            pass
+
+        # Méthode 2 : scan tous les <a> dont le href contient web.telegram.org
+        if not web_k_clicked:
+            try:
+                all_links = page.locator("a")
+                cnt = await all_links.count()
+                for i in range(cnt):
+                    try:
+                        href = (await all_links.nth(i).get_attribute("href") or "")
+                        if "web.telegram.org" in href:
+                            print(f"    [->] Lien Web Telegram trouvé : {href[:60]}")
+                            await page.goto(href, wait_until="domcontentloaded", timeout=20000)
+                            await page.wait_for_timeout(random.randint(2500, 4000))
+                            web_k_clicked = True
+                            break
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+        # Méthode 3 : clic JS sur n'importe quel lien pointant vers web.telegram.org
+        if not web_k_clicked:
+            try:
+                href_js = await page.evaluate("""
+                    () => {
+                        for (const a of document.querySelectorAll('a')) {
+                            if ((a.href || '').includes('web.telegram.org')) return a.href;
+                        }
+                        return null;
+                    }
+                """)
+                if href_js:
+                    await page.goto(href_js, wait_until="domcontentloaded", timeout=20000)
+                    await page.wait_for_timeout(random.randint(2500, 4000))
+                    web_k_clicked = True
+            except Exception:
+                pass
+
+    # ── Fallback : navigation directe #@username si t.me n'a pas fonctionné ──
+    if not web_k_clicked or "web.telegram.org" not in page.url:
+        print(f"    [!] t.me/{username} : bouton Web K non trouvé — fallback direct")
+        try:
+            await page.goto(f"https://web.telegram.org/k/#@{username}",
+                            wait_until="domcontentloaded", timeout=15000)
+            await page.wait_for_timeout(random.randint(2000, 4000))
+        except Exception:
+            pass
+
+    if "web.telegram.org" not in page.url:
+        print(f"    [X] @{username} : impossible d'atteindre Telegram Web K")
+        return False
+
+    await page.wait_for_timeout(1000)
+    return True
+
+
 async def lire_chat(page, url: str):
-    label = url.split("#")[-1] or url
-    print(f"    [->] Lecture de {label}...")
+    username = _username_from_url(url)
+    print(f"    [->] Lecture de @{username}...")
     try:
         await page.bring_to_front()
         await page.wait_for_timeout(random.randint(1200, 2800))
-        # Navigation 2 étapes pour forcer le routeur SPA
-        try:
-            await page.goto("https://web.telegram.org/k/",
-                            wait_until="domcontentloaded", timeout=15000)
-        except Exception:
-            pass
-        await page.wait_for_timeout(2000)
-        try:
-            await page.goto(url, wait_until="domcontentloaded", timeout=20000)
-        except Exception:
-            pass
-        await page.wait_for_timeout(random.randint(2000, 4000))
+
+        # Ouvre via t.me (colle le lien directement dans la barre d'adresse)
+        if not await _ouvrir_via_tme(page, username):
+            print(f"    [!] Impossible d'ouvrir @{username}")
+            return
+
+        await page.wait_for_timeout(random.randint(1500, 3000))
+
+        # Scroll pour simuler la lecture
         for _ in range(random.randint(3, 7)):
             await page.mouse.wheel(0, random.randint(-220, -70))
-            await page.wait_for_timeout(random.randint(1000, 2800))
+            await page.wait_for_timeout(random.randint(1000, 2500))
         await page.mouse.wheel(0, random.randint(80, 200))
         await page.wait_for_timeout(random.randint(800, 1600))
         print(f"    [OK] Lu")
@@ -693,47 +1086,156 @@ async def lire_chat(page, url: str):
 
 
 async def poster_dans_groupe(page, group_url: str, message: str, topic: str = None) -> bool:
-    label = group_url.split("#")[-1]
-    print(f"    [->] Post dans {label}" + (f" / topic '{topic}'" if topic else "") + "...")
+    username = _username_from_url(group_url)
+    print(f"    [->] Post dans @{username}" + (f" / topic '{topic}'" if topic else "") + "...")
     try:
         await page.bring_to_front()
-        # Délai humain avant d'arriver dans le canal
-        await page.wait_for_timeout(random.randint(2000, 4500))
-        await page.goto(group_url, wait_until="domcontentloaded", timeout=20000)
         await page.wait_for_timeout(random.randint(2000, 4000))
 
+        # Ouvre via t.me (colle le lien dans la barre d'adresse — même méthode que pour rejoindre)
+        if not await _ouvrir_via_tme(page, username):
+            print(f"    [--] Impossible d'ouvrir @{username}")
+            return False
+
+        await page.wait_for_timeout(random.randint(2000, 4000))
+
+        # ── Détection automatique des topics/sous-sections forum ──────────────
+        # Mots-clés à chercher dans les noms de topics (priorité ordre)
         if topic:
-            found = False
-            for sel in [".topic-item", ".forum-topic", ".chat-topic", ".list-item", ".chatlist-chat"]:
-                try:
-                    items = page.locator(sel)
-                    count = await items.count()
-                    for i in range(count):
-                        el  = items.nth(i)
-                        txt = (await el.inner_text()).lower()
-                        if topic.lower() in txt:
+            topic_keywords = [topic.lower()]
+        else:
+            topic_keywords = ["job", "offre", "emploi", "recrutement",
+                              "annonce", "travail", "mission", "poste", "boulot"]
+
+        # Sélecteurs Telegram Web K pour les éléments de topic forum
+        TOPIC_SELECTORS = [
+            ".forum-topic",
+            ".topic-item",
+            ".chat-topic",
+            "[class*='forum-topic']",
+            "[class*='topic-item']",
+            ".bubbles-inner .list-item",
+            ".forum-topics .list-item",
+            ".chatlist .list-item",
+        ]
+
+        forum_found = False
+
+        for sel in TOPIC_SELECTORS:
+            try:
+                items = page.locator(sel)
+                count = await items.count()
+                if count == 0:
+                    continue
+
+                # Des topics sont visibles — c'est un groupe forum
+                print(f"    [->] {count} topic(s) détectés [{sel}] — recherche '{topic_keywords[0]}'...")
+
+                # 1re passe : cherche un topic contenant un mot-clé
+                for i in range(count):
+                    el = items.nth(i)
+                    try:
+                        if not await el.is_visible(timeout=800):
+                            continue
+                        txt = (await el.inner_text()).lower().strip()
+                        if any(kw in txt for kw in topic_keywords):
+                            print(f"    [->] Topic cible trouvé : '{txt[:50]}' — clic...")
                             await el.click()
                             await page.wait_for_timeout(2500)
-                            found = True
+                            forum_found = True
                             break
-                    if found:
-                        break
-                except Exception:
-                    pass
-            if not found:
-                print(f"    [!] Topic '{topic}' non trouvé, post dans le chat principal")
+                    except Exception:
+                        continue
 
-        await page.wait_for_timeout(random.randint(4000, 9000))
+                # 2e passe : aucun mot-clé trouvé → clic sur le 1er topic visible
+                if not forum_found:
+                    for i in range(count):
+                        el = items.nth(i)
+                        try:
+                            if not await el.is_visible(timeout=800):
+                                continue
+                            txt = (await el.inner_text()).strip()
+                            if txt:
+                                print(f"    [->] Aucun topic '{topic_keywords[0]}' — clic sur '{txt[:40]}'")
+                                await el.click()
+                                await page.wait_for_timeout(2500)
+                                forum_found = True
+                                break
+                        except Exception:
+                            continue
+
+                if forum_found:
+                    break
+
+            except Exception:
+                continue
+
+        # ── Fallback JS si les sélecteurs CSS n'ont rien trouvé ───────────────
+        if not forum_found:
+            try:
+                import json as _json
+                kw_json = _json.dumps(topic_keywords)
+                clicked_js = await page.evaluate(f"""
+                    () => {{
+                        const keywords = {kw_json};
+                        const selectors = [
+                            '.forum-topic', '.topic-item', '.chat-topic',
+                            '[class*="forum-topic"]', '[class*="topic-item"]',
+                            '.bubbles-inner .list-item', '.forum-topics .list-item'
+                        ];
+                        // 1re passe : mot-clé
+                        for (const sel of selectors) {{
+                            const els = document.querySelectorAll(sel);
+                            for (const el of els) {{
+                                const txt = (el.innerText || el.textContent || '').toLowerCase().trim();
+                                if (txt && keywords.some(kw => txt.includes(kw))) {{
+                                    el.click();
+                                    return txt.substring(0, 60);
+                                }}
+                            }}
+                        }}
+                        // 2e passe : premier topic visible
+                        for (const sel of selectors) {{
+                            const els = document.querySelectorAll(sel);
+                            for (const el of els) {{
+                                const txt = (el.innerText || el.textContent || '').trim();
+                                if (txt && el.offsetParent !== null) {{
+                                    el.click();
+                                    return '(premier) ' + txt.substring(0, 50);
+                                }}
+                            }}
+                        }}
+                        return null;
+                    }}
+                """)
+                if clicked_js:
+                    print(f"    [->] Topic cliqué via JS : '{clicked_js}'")
+                    await page.wait_for_timeout(2500)
+                    forum_found = True
+            except Exception:
+                pass
+
+        if forum_found:
+            # Laisser le temps à la vue du topic de charger
+            await page.wait_for_timeout(random.randint(2000, 4000))
+        else:
+            # Pas de topics détectés → groupe normal, on poste directement
+            await page.wait_for_timeout(random.randint(3000, 5000))
+
         inp = await get_real_input(page)
         if not inp:
-            print(f"    [--] Champ message indisponible (canal broadcast ?)")
+            print(f"    [--] Champ message indisponible (canal broadcast / pas membre ?)")
             return False
 
         await type_message(page, inp, message)
-        print(f"    [OK] Message posté")
+        print(f"    [OK] Message posté dans @{username}" + (" (topic)" if forum_found else ""))
         return True
 
     except Exception as e:
+        err_str = str(e)
+        # Si le browser est fermé → re-raise pour stopper la boucle de posts
+        if "closed" in err_str.lower() or "target page" in err_str.lower():
+            raise
         print(f"    [X] Erreur post : {e}")
         return False
 
@@ -988,7 +1490,7 @@ async def envoyer_dm_template(page, username: str, prenom: str, messages: list) 
     print(f"    [->] DM template à @{username} ({len(messages)} msg)...")
     try:
         await page.bring_to_front()
-        await page.wait_for_timeout(random.randint(800, 1500))
+        await page.wait_for_timeout(random.randint(2500, 4000))
 
         # ── Ouvrir la conversation via la recherche ───────────────
         if not await _ouvrir_via_recherche(page, username):
@@ -1048,11 +1550,12 @@ async def envoyer_dm_template(page, username: str, prenom: str, messages: list) 
                     await type_message(page, inp_next, msg)
 
         print(f"    [OK] DM template envoyé à {prenom} (@{username}) — {len(messages)} msg")
-        return True
+        return True, None
 
     except Exception as e:
-        print(f"    [X] Erreur DM template @{username} : {e}")
-        return False
+        err_msg = str(e)
+        print(f"    [X] Erreur DM template @{username} : {err_msg}")
+        return False, err_msg
 
 
 async def envoyer_dm(page, username: str, prenom: str) -> bool:
@@ -1114,11 +1617,11 @@ async def envoyer_dm(page, username: str, prenom: str) -> bool:
                 pass
 
         print(f"    [OK] DM envoyé à {prenom} (@{username})")
-        return True
+        return True, None
 
     except Exception as e:
         print(f"    [X] Erreur DM @{username} : {e}")
-        return False
+        return False, str(e)
 
 
 # ── Session warm-up pour UN profil ───────────────────────────
@@ -1161,6 +1664,21 @@ async def run_direct_dm_for_profile(profile_id: str, profile_num: int, total: in
     candidates = [m for m in members
                   if m.get("username") and m.get("bot") != "Oui"
                   and m["username"] not in already]
+
+    # ── Filtre genre ──────────────────────────────────────────
+    dm_settings   = load_massdm_settings()
+    genre_filter  = dm_settings.get("genre_filter", "tous")
+    if genre_filter == "garcon":
+        avant = len(candidates)
+        candidates = [m for m in candidates
+                      if detecter_genre(m.get("prenom", "") or "") in ("M", "?")]
+        print(f"  [♂] Filtre garçons : {avant} → {len(candidates)} cibles")
+    elif genre_filter == "fille":
+        avant = len(candidates)
+        candidates = [m for m in candidates
+                      if detecter_genre(m.get("prenom", "") or "") in ("F", "?")]
+        print(f"  [♀] Filtre filles : {avant} → {len(candidates)} cibles")
+    # ─────────────────────────────────────────────────────────
 
     if not candidates:
         print(f"  [OK] Plus personne à contacter pour ce profil.")
@@ -1232,14 +1750,18 @@ async def run_direct_dm_for_profile(profile_id: str, profile_num: int, total: in
                         if _v:
                             msgs.append(_v)
 
-                    ok = await envoyer_dm_template(page, username, prenom, msgs)
+                    ok, dm_err = await envoyer_dm_template(page, username, prenom, msgs)
                     if ok:
                         progress["dms_sent"].append(username)
-                        log_dm(profile_id, username, prenom)
+                        log_dm(profile_id, username, prenom, tmpl.get("name", ""))
                         session_counts[tmpl["id"]] = session_counts.get(tmpl["id"], 0) + 1
                         report_dm_send(tmpl["id"])
                         dms_ok += 1
                         save_progress(profile_id, progress)
+                    elif dm_err:
+                        err_detail = f"DM échoué @{username} : {dm_err}"
+                        session_errors.append(err_detail)
+                        print(f"    [!] {err_detail}", flush=True)
 
                     if i < len(dm_targets):
                         pause = random.uniform(10, 22)
@@ -1253,8 +1775,13 @@ async def run_direct_dm_for_profile(profile_id: str, profile_num: int, total: in
             await asyncio.sleep(2)
             try:
                 await browser.disconnect()
-            except Exception as e:
-                session_errors.append(f"Deconnexion Playwright echouee : {e}")
+            except AttributeError:
+                try:
+                    await browser.close()
+                except Exception:
+                    pass
+            except Exception:
+                pass  # non-critique, ne pas polluer last_error
             await asyncio.sleep(4)
 
     except Exception as e:
@@ -1293,9 +1820,10 @@ async def run_direct_dm_for_profile(profile_id: str, profile_num: int, total: in
             "profile_id":       profile_id,
             "dms_sent":         len(progress.get("dms_sent", [])),
             "dms_sent_session": dms_ok,
-            "dms_replied":      0,   # mis à jour manuellement via le dashboard
+            "dms_replied":      0,
             "conversions":      0,
             "status":           "Actif" if dms_ok > 0 else "En attente",
+            "last_error":       " | ".join(session_errors) if session_errors else "",
         }, timeout=30)
         print(f"[->] Stats Mass DM envoyées : {dms_ok} DM(s) cette session")
     except Exception as e:
@@ -1313,9 +1841,25 @@ async def run_direct_dm_for_profile(profile_id: str, profile_num: int, total: in
 """, flush=True)
 
     if profile_num < total:
-        pause = random.uniform(90, 130)
+        pause = random.uniform(120, 180)
         print(f"[->] Pause {pause:.0f}s avant le profil suivant...\n")
         await asyncio.sleep(pause)
+
+
+def _auto_switch_to_massdm(profile_id: str):
+    """Bascule automatiquement un profil en mode Mass DM sur le dashboard."""
+    try:
+        r = requests.post(
+            f"{DASHBOARD_URL}/api/profile/mode",
+            json={"token": DASHBOARD_TOKEN, "profile_id": profile_id, "mode": "direct_dm"},
+            timeout=10,
+        )
+        if r.status_code == 200 and r.json().get("ok"):
+            print(f"  [⚡] {profile_id} basculé automatiquement en Mass DM !")
+        else:
+            print(f"  [!] Switch Mass DM échoué pour {profile_id}: {r.text}")
+    except Exception as e:
+        print(f"  [!] Impossible de basculer {profile_id} en Mass DM: {e}")
 
 
 async def run_warmup_for_profile(profile_id: str, profile_num: int, total: int,
@@ -1361,6 +1905,9 @@ async def run_warmup_for_profile(profile_id: str, profile_num: int, total: int,
 
     if day > 15:
         print(f"  [OK] Chauffe déjà terminée pour ce profil — passage au suivant.\n")
+        # Bascule automatiquement en Mass DM si le profil est encore en mode warmup
+        if dm_mode == "warmup":
+            _auto_switch_to_massdm(profile_id)
         return
 
     if progress.get("done_today"):
@@ -1373,6 +1920,18 @@ async def run_warmup_for_profile(profile_id: str, profile_num: int, total: int,
     print(f"  • {n_posts} post(s) dans les groupes")
     print(f"  • Réponses aux DMs reçus : OUI")
     print(f"  • {n_dms} DM(s) à envoyer à des non-contacts\n")
+
+
+    # ── Signal LIVE au dashboard (badge rouge) ────────────────
+    try:
+        requests.post(f"{DASHBOARD_URL}/api/update", json={
+            "token":      DASHBOARD_TOKEN,
+            "profile_id": profile_id,
+            "day":        day,
+            "done_today": False,
+        }, timeout=5)
+    except Exception:
+        pass
 
     # Prépare les cibles DM
     dm_targets = []
@@ -1460,6 +2019,11 @@ async def run_warmup_for_profile(profile_id: str, profile_num: int, total: int,
                 # Fermeture immediate sans executer les phases
                 try:
                     await browser.disconnect()
+                except AttributeError:
+                    try:
+                        await browser.close()
+                    except Exception:
+                        pass
                 except Exception:
                     pass
                 return   # finally appellera stop_browser automatiquement
@@ -1487,20 +2051,30 @@ async def run_warmup_for_profile(profile_id: str, profile_num: int, total: int,
                         save_progress(profile_id, progress)
                         if n_posts > 0:
                             msg = random.choice(GROUP_MESSAGES)
-                            await page.wait_for_timeout(random.randint(5000, 10000))
+                            # ── Lecture simulée 26-35s avant de poster ──────────
+                            lecture_dur = random.uniform(26, 35)
+                            print(f"    [->] Lecture simulée {lecture_dur:.0f}s avant de poster...", flush=True)
+                            elapsed = 0.0
+                            while elapsed < lecture_dur:
+                                scroll_y = random.randint(-280, -60)
+                                await page.mouse.wheel(0, scroll_y)
+                                delay = random.uniform(1.2, 3.5)
+                                await asyncio.sleep(delay)
+                                elapsed += delay
+                            # ── Post ────────────────────────────────────────────
                             inp = await get_real_input(page)
                             if inp:
-                                print(f"    [->] Post immediat dans le groupe rejoint...")
+                                print(f"    [->] Post dans le groupe rejoint...")
                                 await type_message(page, inp, msg)
                                 print(f"    [OK] Poste !")
-                    pause = random.uniform(30, 70)
+                    pause = random.uniform(14, 26)
                     print(f"    [->] Pause {pause:.0f}s...\n", flush=True)
                     await asyncio.sleep(pause)
 
             # ── PHASE 2 : Lecture des chats ───────────────────────
             if n_lect > 0:
                 print(f"[->] Phase 2 : Lecture ({n_lect} chats)\n", flush=True)
-                read_urls = [f"https://web.telegram.org/k/#@{g}" for g in PUBLIC_GROUPS]
+                read_urls = [f"https://web.telegram.org/k/#@{g}" for g in PUBLIC_GROUPS + READ_ONLY_GROUPS]
                 read_urls.append("https://web.telegram.org/k/#@sfs_france")
                 for url in progress.get("private_chat_urls", {}).values():
                     if "web.telegram.org" in url:
@@ -1509,7 +2083,7 @@ async def run_warmup_for_profile(profile_id: str, profile_num: int, total: int,
                 for i in range(n_lect):
                     await lire_chat(page, read_urls[i % len(read_urls)])
                     if i < n_lect - 1:
-                        pause = random.uniform(20, 55)
+                        pause = random.uniform(6, 15)
                         print(f"    [->] Pause {pause:.0f}s...\n", flush=True)
                         await asyncio.sleep(pause)
 
@@ -1519,16 +2093,24 @@ async def run_warmup_for_profile(profile_id: str, profile_num: int, total: int,
                 pool = PUBLIC_GROUPS.copy()
                 random.shuffle(pool)
                 posted = 0
-                for i, group in enumerate(pool * 3):
+                browser_dead = False
+                for group in pool:
                     if posted >= n_posts:
                         break
                     url = f"https://web.telegram.org/k/#@{group}"
                     msg = random.choice(GROUP_MESSAGES)
-                    ok  = await poster_dans_groupe(page, url, msg, None)
+                    try:
+                        ok = await poster_dans_groupe(page, url, msg, None)
+                    except Exception as _e:
+                        # Browser fermé — arrêt immédiat de la phase posts
+                        print(f"    [X] Browser fermé — arrêt des posts : {_e}")
+                        browser_dead = True
+                        session_errors.append(f"Browser fermé pendant posts: {_e}")
+                        break
                     if ok:
                         posted += 1
-                    if posted < n_posts:
-                        pause = random.uniform(120, 250)
+                    if posted < n_posts and not browser_dead:
+                        pause = random.uniform(14, 26)
                         print(f"    [->] Pause {pause:.0f}s...\n", flush=True)
                         await asyncio.sleep(pause)
 
@@ -1538,12 +2120,14 @@ async def run_warmup_for_profile(profile_id: str, profile_num: int, total: int,
                 for i, membre in enumerate(dm_targets):
                     username = membre["username"]
                     prenom   = membre.get("prenom") or "toi"
-                    ok = await envoyer_dm(page, username, prenom)
+                    ok, dm_err = await envoyer_dm(page, username, prenom)
                     if ok:
                         progress["dms_sent"].append(username)
                         log_dm(profile_id, username, prenom)
                         dms_ok += 1
                         save_progress(profile_id, progress)
+                    elif dm_err:
+                        session_errors.append(f"DM échoué @{username} : {dm_err}")
                     if i < len(dm_targets) - 1:
                         pause = random.uniform(90, 160)
                         print(f"    [->] Pause {pause:.0f}s...\n", flush=True)
@@ -1561,10 +2145,16 @@ async def run_warmup_for_profile(profile_id: str, profile_num: int, total: int,
             try:
                 await browser.disconnect()
                 print(f"[->] Playwright deconnecte du navigateur")
+            except AttributeError:
+                # Certaines versions Playwright n'ont pas disconnect() → close() à la place
+                try:
+                    await browser.close()
+                    print(f"[->] Playwright : navigateur ferme (close)")
+                except Exception:
+                    pass
             except Exception as e:
-                err = f"Deconnexion Playwright echouee : {e}"
-                print(f"[!] {err}")
-                session_errors.append(err)
+                print(f"[!] Fermeture navigateur (non bloquant) : {e}")
+                # Non-critique : ne pas ajouter à session_errors
             # Delai important : laisser AdsPower detecter la fin de session CDP
             await asyncio.sleep(4)
 
@@ -1594,10 +2184,14 @@ async def run_warmup_for_profile(profile_id: str, profile_num: int, total: int,
         "last_error":    " | ".join(session_errors) if session_errors else "",
     })
 
+    # ── Bascule automatique en Mass DM si Jour 15 terminé ────
+    if day >= 15:
+        _auto_switch_to_massdm(profile_id)
+
     next_msg = (
         f"→ Reviens demain pour le Jour {day + 1} !"
         if day < 15 else
-        "CHAUFFE TERMINÉE pour ce profil !"
+        "CHAUFFE TERMINÉE — basculé en Mass DM automatiquement !"
     )
 
     print(f"""
@@ -1614,9 +2208,9 @@ async def run_warmup_for_profile(profile_id: str, profile_num: int, total: int,
 {'='*60}
 """, flush=True)
 
-    # Pause entre deux profils (2 minutes)
+    # Pause entre deux profils (1 minute)
     if profile_num < total:
-        pause = random.uniform(120, 140)
+        pause = random.uniform(120, 180)
         print(f"[->] Pause {pause:.0f}s avant le profil suivant...\n")
         await asyncio.sleep(pause)
 
@@ -1640,6 +2234,54 @@ async def main(force: bool = False, warmup_only: bool = False, massdm_only: bool
     # ── --status ──────────────────────────────────────────────
     if "--status" in args:
         print_all_status()
+        return
+
+    # ── --reset-all ───────────────────────────────────────────
+    if "--reset-all" in args:
+        count = 0
+        for pid in ADSPOWER_PROFILES:
+            path = progress_file(pid)
+            if os.path.exists(path):
+                os.remove(path)
+                count += 1
+        print(f"\n[OK] {count} fichiers de progression supprimés.")
+        print(f"[OK] Tous les profils remis à Jour 1 — relance le warm-up normalement.\n")
+        return
+
+    # ── --fix-days ────────────────────────────────────────────
+    # Recalcule le jour réel depuis start_date + last_run_date.
+    # Utile quand le compteur a déraillé (bug sessions multiples).
+    if "--fix-days" in args:
+        from datetime import datetime as _dt
+        print(f"\n{'='*62}")
+        print(f"  CORRECTION DES JOURS — basée sur start_date + last_run_date")
+        print(f"{'='*62}")
+        for pid in ADSPOWER_PROFILES:
+            path = progress_file(pid)
+            if not os.path.exists(path):
+                print(f"  {pid:<14}  pas de fichier → ignoré")
+                continue
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            start_str    = data.get("start_date")
+            last_str     = data.get("last_run_date")
+            old_day      = data.get("day", 1)
+            if not start_str:
+                print(f"  {pid:<14}  pas de start_date → ignoré")
+                continue
+            start_d = _dt.strptime(start_str, "%Y-%m-%d").date()
+            if last_str:
+                last_d      = _dt.strptime(last_str, "%Y-%m-%d").date()
+                correct_day = (last_d - start_d).days + 1
+            else:
+                correct_day = 1
+            correct_day = max(1, correct_day)  # jamais < 1
+            data["day"]       = correct_day
+            data["done_today"] = False          # relancer demain
+            save_progress(pid, data)
+            status = "DONE" if correct_day > 15 else f"J{correct_day}/15"
+            print(f"  {pid:<14}  J{old_day:>3} → {status}  (last_run={last_str or 'jamais'})")
+        print(f"\n[OK] Correction terminée. Lance maintenant : python warmup_v2.py\n")
         return
 
     # ── --reset N ─────────────────────────────────────────────
@@ -1971,6 +2613,19 @@ async def daemon():
             log(f"[!] Erreur poll warmup : {e}")
             triggered = False
 
+        # ── Trigger mass DM ───────────────────────────────────
+        try:
+            massdm_triggered = _check_trigger("__massdm_trigger__")
+        except Exception as e:
+            log(f"[!] Erreur poll massdm : {e}")
+            massdm_triggered = False
+
+        # ── Exclusion mutuelle : si les deux tirent en même temps ────
+        # (trigger warmup stale + nouveau trigger massdm → priorité massdm)
+        if triggered and massdm_triggered:
+            log("[!] Warmup ET Mass DM déclenchés simultanément — priorité Mass DM, warmup ignoré")
+            triggered = False
+
         if triggered:
             log("[▶] Signal warm-up reçu ! Ouverture d'un terminal visible...")
             try:
@@ -1981,13 +2636,6 @@ async def daemon():
                 log("[OK] Terminal warm-up ouvert (--warmup-only).")
             except Exception as e:
                 log(f"[!] Erreur lancement warm-up : {e}")
-
-        # ── Trigger mass DM ───────────────────────────────────
-        try:
-            massdm_triggered = _check_trigger("__massdm_trigger__")
-        except Exception as e:
-            log(f"[!] Erreur poll massdm : {e}")
-            massdm_triggered = False
 
         if massdm_triggered:
             log("[⚡] Signal Mass DM reçu ! Ouverture d'un terminal visible...")
@@ -2007,19 +2655,37 @@ async def daemon():
             log(f"[!] Erreur poll profil : {e}")
             profile_pids = []
 
+        # Traitement UN PAR UN — attendre la fin avant de lancer le suivant
         for pid in profile_pids:
             log(f"[✏] Changement profil détecté pour {pid} — lancement profile_changer.py...")
             try:
                 changer_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "profile_changer.py")
-                subprocess.Popen(
-                    [sys.executable, changer_path, pid, "--silent"],
-                    creationflags=0x08000000,  # CREATE_NO_WINDOW — silencieux, sans terminal
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
+                # asyncio.create_subprocess_exec = non-bloquant, compatible async
+                proc = await asyncio.create_subprocess_exec(
+                    sys.executable, changer_path, pid, "--silent",
+                    creationflags=subprocess.CREATE_NEW_CONSOLE,
                 )
-                log(f"[OK] profile_changer.py lancé silencieusement pour {pid}")
+                log(f"[OK] profile_changer.py lancé pour {pid} (PID {proc.pid})")
+                # Attendre la fin proprement (async, n'bloque pas l'event loop)
+                try:
+                    await asyncio.wait_for(proc.wait(), timeout=600)
+                    log(f"[OK] profile_changer.py terminé pour {pid}")
+                except asyncio.TimeoutError:
+                    log(f"[!] profile_changer.py timeout pour {pid} — on passe")
+                    proc.kill()
+                # Pause 5s entre deux profils
+                await asyncio.sleep(5)
             except Exception as e:
                 log(f"[!] Erreur lancement profile_changer.py : {e}")
+                # Fallback : méthode classique
+                try:
+                    subprocess.Popen(
+                        [sys.executable, changer_path, pid],
+                        creationflags=subprocess.CREATE_NEW_CONSOLE,
+                    )
+                    await asyncio.sleep(420)  # 7 min d'attente fixe en fallback
+                except Exception as e2:
+                    log(f"[!] Fallback aussi échoué : {e2}")
 
         # ── Trigger Mass DM par profil individuel ─────────────
         try:
@@ -2053,11 +2719,19 @@ if __name__ == "__main__":
         asyncio.run(main(force=True, warmup_only=True))
     elif "--massdm-only" in sys.argv:
         # Lancé par le daemon via bouton "Lancer Mass DM" (tous les profils direct_dm)
-        asyncio.run(main(massdm_only=True))
+        try:
+            asyncio.run(main(massdm_only=True))
+        except Exception as _e:
+            print(f"\n[X] ERREUR CRITIQUE : {_e}")
+        input("\nAppuie sur Entrée pour fermer...")
     elif "--massdm-profile" in sys.argv:
         # Lancé par le daemon via bouton ▶ Lancer d'un profil individuel
         _idx = sys.argv.index("--massdm-profile")
         _pid = sys.argv[_idx + 1] if _idx + 1 < len(sys.argv) else None
-        asyncio.run(main(massdm_only=True, target_profile=_pid))
+        try:
+            asyncio.run(main(massdm_only=True, target_profile=_pid))
+        except Exception as _e:
+            print(f"\n[X] ERREUR CRITIQUE : {_e}")
+        input("\nAppuie sur Entrée pour fermer...")
     else:
         asyncio.run(main())

@@ -148,6 +148,9 @@ def _sidebar_html(active="dashboard"):
         f'<a href="/setup" class="{_c("setup")}">'
         '<span class="snav-ico"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="8" cy="8" r="2.5"/><path d="M8 1v1.5M8 13.5V15M1 8h1.5M13.5 8H15M3.2 3.2l1.1 1.1M11.7 11.7l1.1 1.1M3.2 12.8l1.1-1.1M11.7 4.3l1.1-1.1"/></svg></span>'
         '<span class="snav-lbl">Setup</span></a>'
+        f'<a href="/btc" class="{_c("btc")}">'
+        '<span class="snav-ico"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M10.5 6.5c0-1.1-.9-2-2-2H6v4h2.5c1.1 0 2-.9 2-2zM6 8.5v3.5"/><path d="M9 4.5c.8 0 1.5.7 1.5 1.5M9 8.5c1.1 0 2 .9 2 2s-.9 2-2 2H6"/><line x1="7.5" y1="2" x2="7.5" y2="4.5"/><line x1="9.5" y1="2" x2="9.5" y2="4.5"/><line x1="7.5" y1="12" x2="7.5" y2="14"/><line x1="9.5" y1="12" x2="9.5" y2="14"/></svg></span>'
+        '<span class="snav-lbl">BTC Tracker</span></a>'
         '</nav>'
         '<button class="side-toggle" id="side-toggle" onclick="togglePanel()">&#9776;</button>'
         '</div>'
@@ -4717,3 +4720,307 @@ document.getElementById('massOverlay').addEventListener('click', function(e) {{
 </div></div>{SIDEBAR_JS}
 </body></html>"""
     return html
+
+
+# ═══════════════════════════════════════════════════════════
+#  PAGE BTC TRACKER
+# ═══════════════════════════════════════════════════════════
+
+@app.get("/btc", response_class=HTMLResponse)
+def btc_tracker():
+    sidebar = _sidebar_html("btc")
+    return f"""<!DOCTYPE html><html lang="fr"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>BTC Tracker</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
+<style>
+{SIDEBAR_CSS}
+*,*::before,*::after{{box-sizing:border-box;margin:0;padding:0}}
+body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;color:#e2e8f0}}
+.btc-page{{padding:28px 32px;max-width:900px}}
+.page-title{{font-size:1.4rem;font-weight:800;color:#f8fafc;margin-bottom:4px}}
+.page-sub{{color:#475569;font-size:.8rem;margin-bottom:28px}}
+.btc-badge{{display:inline-flex;align-items:center;gap:6px;background:#1c0f00;color:#f59e0b;border-radius:99px;padding:4px 14px;font-size:.72rem;font-weight:700;border:1px solid #78350f;letter-spacing:.04em;text-transform:uppercase}}
+.btc-dot{{width:8px;height:8px;border-radius:50%;background:#F7931A;box-shadow:0 0 6px rgba(247,147,26,.7)}}
+.hero{{background:#0a0a0a;border:1px solid #1e1e1e;border-radius:16px;padding:32px 28px;margin-bottom:24px;text-align:center}}
+.hero-label{{font-size:.68rem;font-weight:700;color:#475569;letter-spacing:.14em;text-transform:uppercase;margin-bottom:12px}}
+.hero-amount-wrap{{display:flex;align-items:center;justify-content:center;gap:8px}}
+.hero-currency{{font-size:32px;font-weight:800;color:#475569}}
+.hero-input{{font-size:56px;font-weight:900;color:#f8fafc;background:transparent;border:none;border-bottom:2.5px solid #1e293b;outline:none;width:340px;text-align:center;padding:4px 0;transition:border-color .2s}}
+.hero-input:focus{{border-bottom-color:#F7931A}}
+.hero-sub{{font-size:.75rem;color:#334155;margin-top:12px}}
+.stats-grid{{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin-bottom:24px}}
+.stat-card{{background:#0a0a0a;border:1px solid #1a1a1a;border-radius:14px;padding:20px 18px}}
+.stat-label{{font-size:.62rem;font-weight:700;color:#3b5278;text-transform:uppercase;letter-spacing:.1em;margin-bottom:10px}}
+.stat-value{{font-size:1.6rem;font-weight:800;color:#f8fafc}}
+.stat-value.pos{{color:#22c55e}}
+.stat-value.neg{{color:#ef4444}}
+.stat-value.btc{{color:#F7931A}}
+.bar-card{{background:#0a0a0a;border:1px solid #1a1a1a;border-radius:14px;padding:18px 20px;margin-bottom:24px}}
+.bar-labels{{display:flex;justify-content:space-between;font-size:.72rem;color:#475569;margin-bottom:8px}}
+.bar-track{{background:#111;border-radius:99px;height:14px;overflow:hidden}}
+.bar-fill{{height:100%;border-radius:99px;background:#F7931A;transition:width .5s ease;min-width:6px}}
+.bar-fill.loss{{background:#ef4444}}
+.bar-vals{{display:flex;justify-content:space-between;font-size:.72rem;color:#64748b;margin-top:6px}}
+.chart-card{{background:#0a0a0a;border:1px solid #1a1a1a;border-radius:14px;padding:22px 20px;margin-bottom:24px}}
+.chart-header{{display:flex;align-items:center;justify-content:space-between;margin-bottom:18px;flex-wrap:wrap;gap:10px}}
+.chart-title{{font-size:.85rem;font-weight:700;color:#f8fafc}}
+.chart-legend{{display:flex;gap:16px}}
+.leg-item{{display:flex;align-items:center;gap:6px;font-size:.72rem;color:#64748b}}
+.leg-dot{{width:10px;height:10px;border-radius:2px;flex-shrink:0}}
+.table-card{{background:#0a0a0a;border:1px solid #1a1a1a;border-radius:14px;overflow:hidden;margin-bottom:20px}}
+.table-card table{{width:100%;border-collapse:collapse;table-layout:fixed}}
+.table-card thead th{{background:#060c18;color:#3b5278;font-weight:800;padding:12px 16px;text-align:left;font-size:.62rem;text-transform:uppercase;letter-spacing:.12em;border-bottom:1px solid #1e3a5f}}
+.table-card tbody tr{{border-bottom:1px solid #111;transition:background .15s}}
+.table-card tbody tr:last-child{{border-bottom:none}}
+.table-card tbody tr:hover{{background:#0f172a55}}
+.table-card td{{padding:12px 16px;font-size:.875rem;color:#e2e8f0}}
+.table-card td input{{background:transparent;border:none;outline:none;font-size:.875rem;color:#e2e8f0;width:100%;font-family:inherit}}
+.table-card td input::placeholder{{color:#334155}}
+.table-card td input:focus{{background:#0f172a;border-radius:6px;padding:3px 8px;margin:-3px -8px}}
+.del-btn{{background:none;border:none;color:#334155;cursor:pointer;font-size:1rem;padding:3px 7px;border-radius:6px;transition:all .15s}}
+.del-btn:hover{{color:#ef4444;background:#450a0a}}
+.add-btn{{display:flex;align-items:center;justify-content:center;gap:8px;width:100%;background:none;border:1px dashed #1e293b;border-radius:12px;padding:13px;font-size:.85rem;color:#475569;cursor:pointer;font-family:inherit;transition:all .15s;margin-bottom:28px}}
+.add-btn:hover{{border-color:#F7931A;color:#F7931A;background:#1c0f00}}
+.col-date{{width:32%}}.col-amt{{width:34%}}.col-note{{width:26%}}.col-del{{width:8%;text-align:center}}
+.section-hd{{font-size:.68rem;font-weight:800;color:#3b5278;text-transform:uppercase;letter-spacing:.14em;display:flex;align-items:center;gap:8px;margin-bottom:14px}}
+.section-hd::before{{content:'';width:3px;height:13px;background:#F7931A;border-radius:99px;flex-shrink:0}}
+</style>
+</head><body>
+<div class="ov-layout">
+{sidebar}
+<div class="page-main">
+<div class="btc-page">
+  <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">
+    <h1 class="page-title">BTC Tracker</h1>
+    <span class="btc-badge"><span class="btc-dot"></span>Bitcoin</span>
+  </div>
+  <p class="page-sub">Suivi de tes investissements et gains en Bitcoin</p>
+
+  <div class="hero">
+    <p class="hero-label">Valeur actuelle / Montant gagné</p>
+    <div class="hero-amount-wrap">
+      <span class="hero-currency">€</span>
+      <input class="hero-input" id="earned" type="number" placeholder="0" min="0" step="0.01">
+    </div>
+    <p class="hero-sub">Saisis la valeur actuelle de tes BTC ou le montant récupéré</p>
+  </div>
+
+  <div class="stats-grid">
+    <div class="stat-card">
+      <p class="stat-label">Total investi</p>
+      <p class="stat-value btc" id="s-invested">€0</p>
+    </div>
+    <div class="stat-card">
+      <p class="stat-label">Gain / Perte</p>
+      <p class="stat-value" id="s-pnl">€0</p>
+    </div>
+    <div class="stat-card">
+      <p class="stat-label">Performance</p>
+      <p class="stat-value" id="s-perf">—</p>
+    </div>
+  </div>
+
+  <div class="bar-card">
+    <div class="bar-labels"><span>Capital investi</span><span>Valeur actuelle</span></div>
+    <div class="bar-track"><div class="bar-fill" id="bar" style="width:0%"></div></div>
+    <div class="bar-vals"><span id="bv-left">€0</span><span id="bv-right">€0</span></div>
+  </div>
+
+  <div class="section-hd">Evolution</div>
+  <div class="chart-card">
+    <div class="chart-header">
+      <span class="chart-title">Capital investi vs valeur actuelle</span>
+      <div class="chart-legend">
+        <span class="leg-item"><span class="leg-dot" style="background:#F7931A"></span>Investi cumulé</span>
+        <span class="leg-item"><span class="leg-dot" style="background:#22c55e"></span>Valeur actuelle</span>
+      </div>
+    </div>
+    <div style="position:relative;height:280px">
+      <canvas id="evoChart" role="img" aria-label="Graphique evolution investissement BTC">Données BTC.</canvas>
+    </div>
+  </div>
+
+  <div class="section-hd">Mes investissements</div>
+  <div class="table-card">
+    <table>
+      <thead><tr>
+        <th class="col-date">Date</th>
+        <th class="col-amt">Montant (€)</th>
+        <th class="col-note">Note</th>
+        <th class="col-del"></th>
+      </tr></thead>
+      <tbody id="rows"></tbody>
+    </table>
+  </div>
+  <button class="add-btn" onclick="addRow()">+ Ajouter un investissement</button>
+</div>
+</div>
+</div>
+
+<script>
+let data = JSON.parse(localStorage.getItem('btc_rows2') || '[]');
+let earned = parseFloat(localStorage.getItem('btc_earned2') || '0');
+let chartInst = null;
+
+function fmt(n) {{
+  return '€' + n.toLocaleString('fr-FR', {{minimumFractionDigits:0,maximumFractionDigits:2}});
+}}
+function save() {{
+  localStorage.setItem('btc_rows2', JSON.stringify(data));
+  localStorage.setItem('btc_earned2', earned.toString());
+}}
+
+function updateChart() {{
+  const sorted = [...data].filter(r => r.date && (parseFloat(r.amount)||0) > 0)
+    .sort((a,b) => a.date.localeCompare(b.date));
+  if (!sorted.length) return;
+  const labels = [], cumArr = [];
+  let cum = 0;
+  sorted.forEach(r => {{
+    cum += parseFloat(r.amount)||0;
+    const d = new Date(r.date);
+    labels.push(d.toLocaleDateString('fr-FR',{{day:'2-digit',month:'short',year:'2-digit'}}));
+    cumArr.push(parseFloat(cum.toFixed(2)));
+  }});
+  const earnedLine = labels.map(() => earned > 0 ? parseFloat(earned.toFixed(2)) : null);
+  const isGain = earned >= (cumArr[cumArr.length-1]||0);
+  const gainColor = isGain ? '#22c55e' : '#ef4444';
+  const ctx = document.getElementById('evoChart').getContext('2d');
+  if (chartInst) {{ chartInst.destroy(); chartInst = null; }}
+  chartInst = new Chart(ctx, {{
+    type: 'line',
+    data: {{
+      labels,
+      datasets: [
+        {{
+          label: 'Capital investi cumulé',
+          data: cumArr,
+          borderColor: '#F7931A',
+          backgroundColor: 'rgba(247,147,26,0.12)',
+          borderWidth: 2.5,
+          pointRadius: 5,
+          pointHoverRadius: 9,
+          pointBackgroundColor: '#F7931A',
+          pointBorderColor: '#0a0a0a',
+          pointBorderWidth: 2,
+          pointHoverBackgroundColor: '#F7931A',
+          pointHoverBorderColor: '#fff',
+          pointHoverBorderWidth: 2,
+          fill: true,
+          tension: 0.35
+        }},
+        {{
+          label: 'Valeur actuelle',
+          data: earnedLine,
+          borderColor: gainColor,
+          backgroundColor: isGain ? 'rgba(34,197,94,0.07)' : 'rgba(239,68,68,0.07)',
+          borderWidth: 2.5,
+          borderDash: [7,4],
+          pointRadius: labels.map((_,i) => i===labels.length-1?8:0),
+          pointHoverRadius: labels.map((_,i) => i===labels.length-1?12:0),
+          pointBackgroundColor: gainColor,
+          pointBorderColor: '#0a0a0a',
+          pointBorderWidth: 2,
+          pointHoverBorderColor: '#fff',
+          pointHoverBorderWidth: 2,
+          fill: false,
+          tension: 0
+        }}
+      ]
+    }},
+    options: {{
+      responsive: true,
+      maintainAspectRatio: false,
+      interaction: {{mode:'index',intersect:false}},
+      plugins: {{
+        legend: {{display:false}},
+        tooltip: {{
+          backgroundColor: '#0f172a',
+          borderColor: '#1e3a5f',
+          borderWidth: 1,
+          titleColor: '#f8fafc',
+          bodyColor: '#94a3b8',
+          padding: 14,
+          cornerRadius: 10,
+          callbacks: {{
+            label: ctx => {{
+              if (ctx.parsed.y === null) return null;
+              return ' ' + ctx.dataset.label + ' : €' + ctx.parsed.y.toLocaleString('fr-FR',{{minimumFractionDigits:2,maximumFractionDigits:2}});
+            }}
+          }}
+        }}
+      }},
+      scales: {{
+        x: {{
+          ticks: {{color:'#475569',font:{{size:11}},maxRotation:30,autoSkip:true}},
+          grid: {{color:'rgba(255,255,255,0.04)'}},
+          border: {{color:'rgba(255,255,255,0.04)'}}
+        }},
+        y: {{
+          ticks: {{color:'#475569',font:{{size:11}},callback:v=>'€'+v.toLocaleString('fr-FR',{{maximumFractionDigits:0}})}},
+          grid: {{color:'rgba(255,255,255,0.04)'}},
+          border: {{color:'rgba(255,255,255,0.04)'}},
+          beginAtZero: true
+        }}
+      }}
+    }}
+  }});
+}}
+
+function update() {{
+  const total = data.reduce((s,r) => s+(parseFloat(r.amount)||0), 0);
+  const pnl = earned - total;
+  const perf = total > 0 ? (pnl/total)*100 : null;
+  document.getElementById('s-invested').textContent = fmt(total);
+  const pe = document.getElementById('s-pnl');
+  pe.textContent = (pnl>=0?'+':'') + fmt(pnl);
+  pe.className = 'stat-value ' + (pnl>0?'pos':pnl<0?'neg':'');
+  const pf = document.getElementById('s-perf');
+  if (perf !== null) {{
+    pf.textContent = (perf>=0?'+':'') + perf.toFixed(1) + '%';
+    pf.className = 'stat-value ' + (perf>0?'pos':perf<0?'neg':'');
+  }} else {{ pf.textContent = '—'; pf.className = 'stat-value'; }}
+  const maxV = Math.max(total,earned,1);
+  const bar = document.getElementById('bar');
+  bar.style.width = Math.min(100,(Math.max(total,earned)/maxV)*100).toFixed(1)+'%';
+  bar.className = 'bar-fill' + (earned < total ? ' loss' : '');
+  document.getElementById('bv-left').textContent = fmt(total);
+  document.getElementById('bv-right').textContent = fmt(earned);
+  updateChart();
+}}
+
+function renderRows() {{
+  const tbody = document.getElementById('rows');
+  tbody.innerHTML = '';
+  data.forEach((row,i) => {{
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td class="col-date"><input type="date" value="${{row.date}}" onchange="data[${{i}}].date=this.value;save();update()"></td>
+      <td class="col-amt"><input type="number" placeholder="ex: 500" value="${{row.amount||''}}" min="0" step="0.01" oninput="data[${{i}}].amount=parseFloat(this.value)||0;save();update()"></td>
+      <td class="col-note"><input type="text" placeholder="DCA mars..." value="${{row.note||''}}" onchange="data[${{i}}].note=this.value;save()"></td>
+      <td class="col-del"><button class="del-btn" onclick="delRow(${{i}})">&#128465;</button></td>
+    `;
+    tbody.appendChild(tr);
+  }});
+  update();
+}}
+
+function addRow() {{
+  const today = new Date().toISOString().split('T')[0];
+  data.push({{date:today,amount:0,note:''}});
+  save(); renderRows();
+  const inputs = document.querySelectorAll('#rows tr:last-child input[type="number"]');
+  if (inputs[0]) inputs[0].focus();
+}}
+
+function delRow(i) {{ data.splice(i,1); save(); renderRows(); }}
+
+const ei = document.getElementById('earned');
+if (earned) ei.value = earned;
+ei.addEventListener('input', () => {{ earned = parseFloat(ei.value)||0; save(); update(); }});
+if (!data.length) data.push({{date:new Date().toISOString().split('T')[0],amount:0,note:''}});
+renderRows();
+</script>
+{SIDEBAR_JS}
+</body></html>"""
