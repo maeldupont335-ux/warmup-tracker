@@ -45,6 +45,21 @@ export async function GET() {
   return NextResponse.json({ creators: load() });
 }
 
+function getAppUrl(req: NextRequest, bodyAppUrl?: string): string {
+  // Priorité : variable d'env > header Host de la requête > appUrl du body
+  if (process.env.NEXT_PUBLIC_APP_URL) return process.env.NEXT_PUBLIC_APP_URL.replace(/\/$/, "");
+  const host = req.headers.get("x-forwarded-host") || req.headers.get("host") || "";
+  const proto = req.headers.get("x-forwarded-proto") || "https";
+  if (host && !host.includes("localhost") && !host.includes("127.0.0.1")) {
+    return `${proto}://${host}`;
+  }
+  // Fallback sur le body mais en forçant https et sans port parasite
+  const raw = (bodyAppUrl ?? "")
+    .replace(/^http:\/\//i, "https://")
+    .replace(/:(\d+)$/, (_, p) => ["80","88","443","8443"].includes(p) ? `:${p}` : "");
+  return raw;
+}
+
 // POST — ajouter un créateur ou action sur un créateur existant
 export async function POST(req: NextRequest) {
   const body = await req.json();
@@ -70,10 +85,7 @@ export async function POST(req: NextRequest) {
     if (body.action === "set-webhook") {
       const c = creators[idx];
       if (!body.appUrl) return NextResponse.json({ error: "appUrl manquant" }, { status: 400 });
-      // Force HTTPS + supprime le port (Telegram n'accepte que 80/88/443/8443)
-      const secureBase = body.appUrl
-        .replace(/^http:\/\//i, "https://")
-        .replace(/:(\d+)$/, (_, p) => ["80","88","443","8443"].includes(p) ? `:${p}` : "");
+      const secureBase = getAppUrl(req, body.appUrl);
       const webhookUrl = `${secureBase}/api/telegram/bot/${c.id}`;
       console.log("[set-webhook] URL:", webhookUrl);
       const result = await telegramAPI(c.botToken, "setWebhook", {
@@ -108,9 +120,7 @@ export async function POST(req: NextRequest) {
       creators[idx].botToken = newToken;
       creators[idx].botUsername = `@${me.result.username}`;
       // Reconnecte le webhook (force HTTPS)
-      const secureBase2 = (body.appUrl ?? "")
-        .replace(/^http:\/\//i, "https://")
-        .replace(/:(\d+)$/, (_, p) => ["80","88","443","8443"].includes(p) ? `:${p}` : "");
+      const secureBase2 = getAppUrl(req, body.appUrl);
       const webhookUrl = `${secureBase2}/api/telegram/bot/${creators[idx].id}`;
       const wh = await telegramAPI(newToken, "setWebhook", {
         url: webhookUrl,
