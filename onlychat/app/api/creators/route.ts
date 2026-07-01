@@ -46,18 +46,23 @@ export async function GET() {
 }
 
 function getAppUrl(req: NextRequest, bodyAppUrl?: string): string {
-  // Priorité : variable d'env > header Host de la requête > appUrl du body
+  // 1. Render injecte automatiquement RENDER_EXTERNAL_URL — toujours HTTPS, toujours correct
+  if (process.env.RENDER_EXTERNAL_URL) return process.env.RENDER_EXTERNAL_URL.replace(/\/$/, "");
+  // 2. Variable manuelle
   if (process.env.NEXT_PUBLIC_APP_URL) return process.env.NEXT_PUBLIC_APP_URL.replace(/\/$/, "");
-  const host = req.headers.get("x-forwarded-host") || req.headers.get("host") || "";
-  const proto = req.headers.get("x-forwarded-proto") || "https";
+  // 3. Header x-forwarded-host (proxy Render/Vercel)
+  const fwdHost = req.headers.get("x-forwarded-host");
+  if (fwdHost && !fwdHost.includes("localhost")) return `https://${fwdHost}`;
+  // 4. Header host standard
+  const host = req.headers.get("host") || "";
   if (host && !host.includes("localhost") && !host.includes("127.0.0.1")) {
+    const proto = req.headers.get("x-forwarded-proto") || "https";
     return `${proto}://${host}`;
   }
-  // Fallback sur le body mais en forçant https et sans port parasite
-  const raw = (bodyAppUrl ?? "")
+  // 5. Dernier recours : body (force https, vire le port parasite)
+  return (bodyAppUrl ?? "")
     .replace(/^http:\/\//i, "https://")
-    .replace(/:(\d+)$/, (_, p) => ["80","88","443","8443"].includes(p) ? `:${p}` : "");
-  return raw;
+    .replace(/:(\d+)(?=\/|$)/, (_, p) => ["80","88","443","8443"].includes(p) ? `:${p}` : "");
 }
 
 // POST — ajouter un créateur ou action sur un créateur existant
@@ -93,7 +98,7 @@ export async function POST(req: NextRequest) {
         allowed_updates: ["message", "business_message", "business_connection"],
       });
       console.log("[set-webhook] Telegram response:", JSON.stringify(result));
-      if (!result.ok) return NextResponse.json({ error: result.description ?? "Telegram a refusé le webhook" }, { status: 400 });
+      if (!result.ok) return NextResponse.json({ error: `${result.description ?? "Erreur"} (URL: ${webhookUrl})` }, { status: 400 });
       creators[idx].webhookSet = true;
       creators[idx].syncStatus = "active";
       save(creators);
