@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import fs from "fs";
 import path from "path";
+import { getWebhookBase } from "@/lib/app-config";
 
 const FILE = path.join(process.cwd(), "data", "creators.json");
 
@@ -45,24 +46,10 @@ export async function GET() {
   return NextResponse.json({ creators: load() });
 }
 
-function getAppUrl(req: NextRequest, bodyAppUrl?: string): string {
-  // 1. Render injecte automatiquement RENDER_EXTERNAL_URL — toujours HTTPS, toujours correct
-  if (process.env.RENDER_EXTERNAL_URL) return process.env.RENDER_EXTERNAL_URL.replace(/\/$/, "");
-  // 2. Variable manuelle
-  if (process.env.NEXT_PUBLIC_APP_URL) return process.env.NEXT_PUBLIC_APP_URL.replace(/\/$/, "");
-  // 3. Header x-forwarded-host (proxy Render/Vercel)
-  const fwdHost = req.headers.get("x-forwarded-host");
-  if (fwdHost && !fwdHost.includes("localhost")) return `https://${fwdHost}`;
-  // 4. Header host standard
-  const host = req.headers.get("host") || "";
-  if (host && !host.includes("localhost") && !host.includes("127.0.0.1")) {
-    const proto = req.headers.get("x-forwarded-proto") || "https";
-    return `${proto}://${host}`;
-  }
-  // 5. Dernier recours : body (force https, vire le port parasite)
-  return (bodyAppUrl ?? "")
-    .replace(/^http:\/\//i, "https://")
-    .replace(/:(\d+)(?=\/|$)/, (_, p) => ["80","88","443","8443"].includes(p) ? `:${p}` : "");
+function getAppUrl(_req: NextRequest): string {
+  const base = getWebhookBase();
+  if (!base) throw new Error("URL de production non configurée. Va dans Paramètres → App URL et entre ton URL Render.");
+  return base;
 }
 
 // POST — ajouter un créateur ou action sur un créateur existant
@@ -90,7 +77,8 @@ export async function POST(req: NextRequest) {
     if (body.action === "set-webhook") {
       const c = creators[idx];
       if (!body.appUrl) return NextResponse.json({ error: "appUrl manquant" }, { status: 400 });
-      const secureBase = getAppUrl(req, body.appUrl);
+      let secureBase: string;
+      try { secureBase = getAppUrl(req); } catch (e) { return NextResponse.json({ error: String(e) }, { status: 400 }); }
       const webhookUrl = `${secureBase}/api/telegram/bot/${c.id}`;
       console.log("[set-webhook] URL:", webhookUrl);
       const result = await telegramAPI(c.botToken, "setWebhook", {
@@ -125,7 +113,8 @@ export async function POST(req: NextRequest) {
       creators[idx].botToken = newToken;
       creators[idx].botUsername = `@${me.result.username}`;
       // Reconnecte le webhook (force HTTPS)
-      const secureBase2 = getAppUrl(req, body.appUrl);
+      let secureBase2: string;
+      try { secureBase2 = getAppUrl(req); } catch (e) { return NextResponse.json({ error: String(e) }, { status: 400 }); }
       const webhookUrl = `${secureBase2}/api/telegram/bot/${creators[idx].id}`;
       const wh = await telegramAPI(newToken, "setWebhook", {
         url: webhookUrl,
