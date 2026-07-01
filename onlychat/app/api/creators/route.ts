@@ -70,8 +70,10 @@ export async function POST(req: NextRequest) {
     if (body.action === "set-webhook") {
       const c = creators[idx];
       if (!body.appUrl) return NextResponse.json({ error: "appUrl manquant" }, { status: 400 });
-      // Force HTTPS — Telegram refuse tout ce qui n'est pas HTTPS
-      const secureBase = body.appUrl.replace(/^http:\/\//i, "https://");
+      // Force HTTPS + supprime le port (Telegram n'accepte que 80/88/443/8443)
+      const secureBase = body.appUrl
+        .replace(/^http:\/\//i, "https://")
+        .replace(/:(\d+)$/, (_, p) => ["80","88","443","8443"].includes(p) ? `:${p}` : "");
       const webhookUrl = `${secureBase}/api/telegram/bot/${c.id}`;
       console.log("[set-webhook] URL:", webhookUrl);
       const result = await telegramAPI(c.botToken, "setWebhook", {
@@ -106,7 +108,9 @@ export async function POST(req: NextRequest) {
       creators[idx].botToken = newToken;
       creators[idx].botUsername = `@${me.result.username}`;
       // Reconnecte le webhook (force HTTPS)
-      const secureBase2 = (body.appUrl ?? "").replace(/^http:\/\//i, "https://");
+      const secureBase2 = (body.appUrl ?? "")
+        .replace(/^http:\/\//i, "https://")
+        .replace(/:(\d+)$/, (_, p) => ["80","88","443","8443"].includes(p) ? `:${p}` : "");
       const webhookUrl = `${secureBase2}/api/telegram/bot/${creators[idx].id}`;
       const wh = await telegramAPI(newToken, "setWebhook", {
         url: webhookUrl,
