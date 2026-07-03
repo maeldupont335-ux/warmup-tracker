@@ -1,0 +1,175 @@
+[2026-05-25 22:32:19] ==================================================
+[2026-05-25 22:32:19]   LAUNCHER DEMARRE — 2026-05-25
+[2026-05-25 22:32:19] ==================================================
+[2026-05-25 22:32:19] [->] Attente 30s pour laisser Windows démarrer complètement...
+[2026-05-25 22:32:49] [->] Lancement : Repost Telegram  (C:\Users\MAEL\Downloads\AGENCY\TELEGRAM IA\venv\Scripts\python.exe)
+[2026-05-25 22:32:54] [->] Lancement : Warm-up Telegram  (C:\Users\MAEL\AppData\Local\Programs\Python\Python312\python.exe)
+[2026-05-25 22:32:57] [OK] Tous les scripts lancés.
+[2026-05-26 13:34:57] ==================================================
+[2026-05-26 13:34:57]   LAUNCHER DEMARRE — 2026-05-26
+[2026-05-26 13:34:57] ==================================================
+[2026-05-26 13:34:57] [->] Attente 60s pour laisser Windows demarrer completement...
+[2026-05-26 13:35:57] [->] Lancement : Repost Telegram  (C:\Users\MAEL\Downloads\AGENCY\TELEGRAM IA\venv\Scripts\python.exe)
+[2026-05-26 13:36:02] [OK] Warm-up : tous les profils deja traites aujourd'hui — skip
+[2026-05-26 13:36:02] [OK] Tous les scripts lancés.
+[2026-05-26 18:10:54] ==================================================
+[2026-05-26 18:10:54]   LAUNCHER DEMARRE — 2026-05-26
+[2026-05-26 18:10:54] ==================================================
+[2026-05-26 18:10:54] [->] Attente 60s pour laisser Windows demarrer completement...
+[2026-05-26 18:11:55] [->] Lancement : Repost Telegram  (C:\Users\MAEL\Downloads\AGENCY\TELEGRAM IA\venv\Scripts\python.exe)
+[2026-05-26 18:12:25] [OK] Warm-up : tous les profils deja traites aujourd'hui — skip
+[2026-05-26 18:12:25] [OK] Tous les scripts lancés.
+[2026-05-26 23:44:15] ==================================================
+[2026-05-26 23:44:15]   LAUNCHER DEMARRE — 2026-05-26
+[2026-05-26 23:44:15] ==================================================
+[2026-05-26 23:44:15] [->] Attente 60s pour laisser Windows demarrer completement...
+[2026-05-26 23:45:15] [->] Lancement : Repost Telegram  (C:\Users\MAEL\Downloads\AGENCY\TELEGRAM IA\venv\Scripts\python.exe)
+[2026-05-26 23:45:21] [OK] Warm-up : tous les profils deja traites aujourd'hui — skip
+[2026-05-26 23:45:21] [OK] Tous les scripts lancés.
+[2026-05-27 16:54:55] ==================================================
+[2026-05-27 16:54:55]   LAUNCHER DEMARRE — 2026-05-27
+[2026-05-27 16:54:55] ==================================================
+[2026-05-27 16:54:55] [->] Attente 60s pour laisser Windows demarrer completement...
+[2026-05-27 16:55:55] [->] Lancement : Repost Telegram  (C:\Users\MAEL\Downloads\AGENCY\TELEGRAM IA\venv\Scripts\python.exe)
+[2026-05-27 16:56:00] [->] Lancement : Warm-up Telegram  (C:\Users\MAEL\AppData\Local\Programs\Python\Python312\python.exe)
+[2026-05-27 16:56:03] [OK] Tous les scripts lancés.
+[2026-05-28 05:04:41] ==================================================
+[2026-05-28 05:04:41]   LAUNCHER DEMARRE — 2026-05-28
+[2026-05-28 05:04:41] ==================================================
+[2026-05-28 05:04:41] [->] Attente 60s pour laisser Windows demarrer completement...
+[2026-05-28 05:05:41] [->] Lancement : Repost Telegram  (C:\Users\MAEL\Downloads\AGENCY\TELEGRAM IA\venv\Scripts\python.exe)
+[2026-05-28 05:05:46] [->] Lancement : Warm-up Telegram  (C:\Users\MAEL\AppData\Local\Programs\Python\Python312\python.exe)
+[2026-05-28 05:05:49] [OK] Tous les scripts lancés.
+[2026-05-28 15:24:05] ==================================================
+[2026-05-28 15:24:05]   LAUNCHER DEMARRE — 2026-05-28
+[2026-05-28 15:24:05] ==================================================
+[2026-05-28 15:24:05] [->] Attente 60s pour laisser Windows demarrer completement...
+[2026-05-28 15:25:05] [->] Lancement : Repost Telegram  (C:\Users\MAEL\Downloads\AGENCY\TELEGRAM IA\venv\Scripts\python.exe)
+[2026-05-28 15:25:10] [->] Lancement : Warm-up Telegram  (C:\Users\MAEL\AppData\Local\Programs\Python\Python312\python.exe)
+[2026-05-28 15:25:13] [OK] Tous les scripts lancés.
+[2026-05-29 18:25:19] ==================================================
+[2026-05-29 18:25:19]   LAUNCHER DEMARRE — 2026-05-29
+[2026-05-29 18:25:19] ==================================================
+[2026-05-29 18:25:19] [->] Attente 60s pour laisser Windows demarrer completement...
+[2026-05-29 18:26:19] [->] Lancement : Repost Telegram  (C:\Users\MAEL\Downloads\AGENCY\TELEGRAM IA\venv\Scripts\python.exe)
+[2026-05-29 18:26:35] [->] Lancement : Warm-up Telegram  (C:\Users\MAEL\AppData\Local\Programs\Python\Python312\python.exe)
+[2026-05-29 18:26:38] [OK] Tous les scripts lancés.
+[2026-05-30 18:52:24] ==================================================
+[2026-05-30 18:52:24]   LAUNCHER DEMARRE — 2026-05-30
+[2026-05-30 18:52:24] ==================================================
+[2026-05-30 18:52:24] [->] Attente 60s pour laisser Windows demarrer completement...
+[2026-05-30 18:53:24] [->] Lancement : Repost Telegram  (C:\Users\MAEL\Downloads\AGENCY\TELEGRAM IA\venv\Scripts\python.exe)
+[2026-05-30 18:53:29] [->] Lancement : Warm-up Telegram  (C:\Users\MAEL\AppData\Local\Programs\Python\Python312\python.exe)
+[2026-05-30 18:53:32] [OK] Tous les scripts lancés.
+[2026-05-31 19:15:52] ==================================================
+[2026-05-31 19:15:52]   LAUNCHER DEMARRE — 2026-05-31
+[2026-05-31 19:15:52] ==================================================
+[2026-05-31 19:15:52] [->] Attente 60s pour laisser Windows demarrer completement...
+[2026-05-31 19:16:53] [->] Lancement : Repost Telegram  (C:\Users\MAEL\Downloads\AGENCY\TELEGRAM IA\venv\Scripts\python.exe)
+[2026-05-31 19:17:07] [->] Lancement : Warm-up Telegram  (C:\Users\MAEL\AppData\Local\Programs\Python\Python312\python.exe)
+[2026-05-31 19:17:10] [OK] Tous les scripts lancés.
+[2026-06-01 13:13:56] ==================================================
+[2026-06-01 13:13:56]   LAUNCHER DEMARRE — 2026-06-01
+[2026-06-01 13:13:56] ==================================================
+[2026-06-01 13:13:56] [->] Attente 60s pour laisser Windows demarrer completement...
+[2026-06-01 13:14:57] [->] Lancement : Repost Telegram  (C:\Users\MAEL\Downloads\AGENCY\TELEGRAM IA\venv\Scripts\python.exe)
+[2026-06-01 13:15:03] [->] Lancement : Warm-up Telegram  (C:\Users\MAEL\AppData\Local\Programs\Python\Python312\python.exe)
+[2026-06-01 13:15:06] [OK] Tous les scripts lancés.
+[2026-06-02 15:52:33] ==================================================
+[2026-06-02 15:52:34]   LAUNCHER DEMARRE — 2026-06-02
+[2026-06-02 15:52:34] ==================================================
+[2026-06-02 15:52:34] [->] Attente 60s pour laisser Windows demarrer completement...
+[2026-06-02 15:53:35] [->] Lancement : Repost Telegram  (C:\Users\MAEL\Downloads\AGENCY\TELEGRAM IA\venv\Scripts\python.exe)
+[2026-06-02 15:53:47] [->] Lancement : Warm-up Telegram  (C:\Users\MAEL\AppData\Local\Programs\Python\Python312\python.exe)
+[2026-06-02 15:53:50] [OK] Tous les scripts lancés.
+[2026-06-02 20:59:43] ==================================================
+[2026-06-02 20:59:43]   LAUNCHER DEMARRE — 2026-06-02
+[2026-06-02 20:59:43] ==================================================
+[2026-06-02 20:59:43] [->] Attente 60s pour laisser Windows demarrer completement...
+[2026-06-02 21:00:43] [->] Lancement : Repost Telegram  (C:\Users\MAEL\Downloads\AGENCY\TELEGRAM IA\venv\Scripts\python.exe)
+[2026-06-02 21:00:48] [->] Lancement : Warm-up Telegram  (C:\Users\MAEL\AppData\Local\Programs\Python\Python312\python.exe)
+[2026-06-02 21:00:51] [OK] Tous les scripts lancés.
+[2026-06-03 16:04:34] ==================================================
+[2026-06-03 16:04:34]   LAUNCHER DEMARRE — 2026-06-03
+[2026-06-03 16:04:34] ==================================================
+[2026-06-03 16:04:34] [->] Attente 60s pour laisser Windows demarrer completement...
+[2026-06-03 16:05:34] [->] Lancement : Repost Telegram  (C:\Users\MAEL\Downloads\AGENCY\TELEGRAM IA\venv\Scripts\python.exe)
+[2026-06-03 16:05:39] [->] Lancement : Warm-up Telegram  (C:\Users\MAEL\AppData\Local\Programs\Python\Python312\python.exe)
+[2026-06-03 16:05:42] [OK] Tous les scripts lancés.
+[2026-06-10 01:23:00] ==================================================
+[2026-06-10 01:23:00]   LAUNCHER DEMARRE — 2026-06-10
+[2026-06-10 01:23:00] ==================================================
+[2026-06-10 01:23:00] [->] Attente 60s pour laisser Windows demarrer completement...
+[2026-06-10 01:24:00] [->] Lancement : Repost Telegram  (C:\Users\MAEL\Downloads\AGENCY\TELEGRAM IA\venv\Scripts\python.exe)
+[2026-06-10 01:24:05] [->] Lancement : Warm-up Telegram  (C:\Users\MAEL\AppData\Local\Programs\Python\Python312\python.exe)
+[2026-06-10 01:24:09] [OK] Tous les scripts lancés.
+[2026-06-10 14:29:25] ==================================================
+[2026-06-10 14:29:25]   LAUNCHER DEMARRE — 2026-06-10
+[2026-06-10 14:29:25] ==================================================
+[2026-06-10 14:29:25] [->] Attente 60s pour laisser Windows demarrer completement...
+[2026-06-10 14:30:25] [->] Lancement : Repost Telegram  (C:\Users\MAEL\Downloads\AGENCY\TELEGRAM IA\venv\Scripts\python.exe)
+[2026-06-10 14:30:30] [->] Lancement : Warm-up Telegram  (C:\Users\MAEL\AppData\Local\Programs\Python\Python312\python.exe)
+[2026-06-10 14:30:33] [OK] Tous les scripts lancés.
+[2026-06-15 18:31:41] ==================================================
+[2026-06-15 18:31:41]   LAUNCHER DEMARRE — 2026-06-15
+[2026-06-15 18:31:41] ==================================================
+[2026-06-15 18:31:41] [->] Attente 60s pour laisser Windows demarrer completement...
+[2026-06-15 18:32:41] [->] Lancement : Repost Telegram  (C:\Users\MAEL\Downloads\AGENCY\TELEGRAM IA\venv\Scripts\python.exe)
+[2026-06-15 18:32:46] [->] Lancement : Warm-up Telegram  (C:\Users\MAEL\AppData\Local\Programs\Python\Python312\python.exe)
+[2026-06-15 18:32:49] [OK] Tous les scripts lancés.
+[2026-06-17 15:42:17] ==================================================
+[2026-06-17 15:42:17]   LAUNCHER DEMARRE — 2026-06-17
+[2026-06-17 15:42:17] ==================================================
+[2026-06-17 15:42:17] [->] Attente 60s pour laisser Windows demarrer completement...
+[2026-06-17 15:43:17] [->] Lancement : Repost Telegram  (C:\Users\MAEL\Downloads\AGENCY\TELEGRAM IA\venv\Scripts\python.exe)
+[2026-06-17 15:43:22] [->] Lancement : Warm-up Telegram  (C:\Users\MAEL\AppData\Local\Programs\Python\Python312\python.exe)
+[2026-06-17 15:43:25] [OK] Tous les scripts lancés.
+[2026-06-19 20:42:28] ==================================================
+[2026-06-19 20:42:30]   LAUNCHER DEMARRE — 2026-06-19
+[2026-06-19 20:42:30] ==================================================
+[2026-06-19 20:42:30] [->] Attente 60s pour laisser Windows demarrer completement...
+[2026-06-19 20:43:30] [->] Lancement : Repost Telegram  (C:\Users\MAEL\Downloads\AGENCY\TELEGRAM IA\venv\Scripts\python.exe)
+[2026-06-19 20:43:35] [->] Lancement : Warm-up Telegram  (C:\Users\MAEL\AppData\Local\Programs\Python\Python312\python.exe)
+[2026-06-19 20:43:38] [OK] Tous les scripts lancés.
+[2026-06-20 07:28:18] ==================================================
+[2026-06-20 07:28:18]   LAUNCHER DEMARRE — 2026-06-20
+[2026-06-20 07:28:18] ==================================================
+[2026-06-20 07:28:18] [->] Attente 60s pour laisser Windows demarrer completement...
+[2026-06-20 07:29:18] [->] Lancement : Repost Telegram  (C:\Users\MAEL\Downloads\AGENCY\TELEGRAM IA\venv\Scripts\python.exe)
+[2026-06-20 07:29:23] [->] Lancement : Warm-up Telegram  (C:\Users\MAEL\AppData\Local\Programs\Python\Python312\python.exe)
+[2026-06-20 07:29:26] [OK] Tous les scripts lancés.
+[2026-06-20 21:34:32] ==================================================
+[2026-06-20 21:34:32]   LAUNCHER DEMARRE — 2026-06-20
+[2026-06-20 21:34:32] ==================================================
+[2026-06-20 21:34:32] [->] Attente 60s pour laisser Windows demarrer completement...
+[2026-06-20 21:35:32] [->] Lancement : Repost Telegram  (C:\Users\MAEL\Downloads\AGENCY\TELEGRAM IA\venv\Scripts\python.exe)
+[2026-06-20 21:35:37] [->] Lancement : Warm-up Telegram  (C:\Users\MAEL\AppData\Local\Programs\Python\Python312\python.exe)
+[2026-06-20 21:35:40] [OK] Tous les scripts lancés.
+[2026-06-23 08:30:20] ==================================================
+[2026-06-23 08:30:21]   LAUNCHER DEMARRE — 2026-06-23
+[2026-06-23 08:30:21] ==================================================
+[2026-06-23 08:30:21] [->] Attente 60s pour laisser Windows demarrer completement...
+[2026-06-23 08:31:22] [->] Lancement : Repost Telegram  (C:\Users\MAEL\Downloads\AGENCY\TELEGRAM IA\venv\Scripts\python.exe)
+[2026-06-23 08:31:27] [->] Lancement : Warm-up Telegram  (C:\Users\MAEL\AppData\Local\Programs\Python\Python312\python.exe)
+[2026-06-23 08:31:30] [OK] Tous les scripts lancés.
+[2026-06-24 15:21:19] ==================================================
+[2026-06-24 15:21:19]   LAUNCHER DEMARRE — 2026-06-24
+[2026-06-24 15:21:20] ==================================================
+[2026-06-24 15:21:20] [->] Attente 60s pour laisser Windows demarrer completement...
+[2026-06-24 15:22:20] [->] Lancement : Repost Telegram  (C:\Users\MAEL\Downloads\AGENCY\TELEGRAM IA\venv\Scripts\python.exe)
+[2026-06-24 15:22:25] [->] Lancement : Warm-up Telegram  (C:\Users\MAEL\AppData\Local\Programs\Python\Python312\python.exe)
+[2026-06-24 15:22:28] [OK] Tous les scripts lancés.
+[2026-06-27 21:09:33] ==================================================
+[2026-06-27 21:09:35]   LAUNCHER DEMARRE — 2026-06-27
+[2026-06-27 21:09:36] ==================================================
+[2026-06-27 21:09:36] [->] Attente 60s pour laisser Windows demarrer completement...
+[2026-06-27 21:10:36] [->] Lancement : Repost Telegram  (C:\Users\MAEL\Downloads\AGENCY\TELEGRAM IA\venv\Scripts\python.exe)
+[2026-06-27 21:10:41] [->] Lancement : Warm-up Telegram  (C:\Users\MAEL\AppData\Local\Programs\Python\Python312\python.exe)
+[2026-06-27 21:10:44] [OK] Tous les scripts lancés.
+[2026-07-01 23:33:40] ==================================================
+[2026-07-01 23:33:40]   LAUNCHER DEMARRE — 2026-07-01
+[2026-07-01 23:33:41] ==================================================
+[2026-07-01 23:33:41] [->] Attente 60s pour laisser Windows demarrer completement...
+[2026-07-01 23:34:41] [->] Lancement : Repost Telegram  (C:\Users\MAEL\Downloads\AGENCY\TELEGRAM IA\venv\Scripts\python.exe)
+[2026-07-01 23:34:46] [->] Lancement : Warm-up Telegram  (C:\Users\MAEL\AppData\Local\Programs\Python\Python312\python.exe)
+[2026-07-01 23:34:49] [OK] Tous les scripts lancés.

@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__985a689e-9857-40a0-b2c7-2441a34fc917__job_display",
+      "mcp__985a689e-9857-40a0-b2c7-2441a34fc917__balance",
+      "mcp__985a689e-9857-40a0-b2c7-2441a34fc917__models_explore",
+      "mcp__985a689e-9857-40a0-b2c7-2441a34fc917__show_generations",
+      "mcp__985a689e-9857-40a0-b2c7-2441a34fc917__show_medias",
+      "mcp__985a689e-9857-40a0-b2c7-2441a34fc917__show_characters",
+      "mcp__985a689e-9857-40a0-b2c7-2441a34fc917__show_plans_and_credits",
+      "mcp__985a689e-9857-40a0-b2c7-2441a34fc917__list_workspaces",
+      "mcp__Claude_in_Chrome__list_connected_browsers",
+      "Bash(pip show *)"
+    ]
+  }
+}

@@ -1,250 +1,261 @@
 "use client";
 import { useState, useEffect, useRef } from "react";
 import { useParams, useRouter } from "next/navigation";
-import {
-  ChevronLeft, Plus, Trash2, GripVertical, Upload, X,
-  ChevronDown, ChevronUp, Save, RefreshCw, Star, Image as ImageIcon
-} from "lucide-react";
+import { ArrowLeft, Plus, Trash2, GripVertical, ChevronUp, ChevronDown, RefreshCw, X } from "lucide-react";
 import type { Script, ScriptStep, PostMediaMessage } from "@/lib/scripts-store";
 
-/* ── helpers ── */
-function Toggle({ value, onChange, label }: { value: boolean; onChange: (v: boolean) => void; label?: string }) {
+function Toggle({ value, onChange }: { value: boolean; onChange: (v: boolean) => void }) {
   return (
-    <label className="flex items-center gap-2 cursor-pointer select-none">
-      <button onClick={() => onChange(!value)}
-        className="relative w-10 h-5 rounded-full transition-all flex-shrink-0"
-        style={{ background: value ? "#e11d48" : "#374151" }}>
-        <div className="absolute top-0.5 w-4 h-4 rounded-full bg-white transition-all shadow"
-          style={{ left: value ? "calc(100% - 18px)" : "2px" }} />
-      </button>
-      {label && <span className="text-sm" style={{ color: "#9ca3af" }}>{label}</span>}
-    </label>
+    <button type="button" onClick={() => onChange(!value)}
+      className="relative w-11 h-6 rounded-full transition-all flex-shrink-0"
+      style={{ background: value ? "#e11d48" : "#374151" }}>
+      <div className="absolute top-0.5 w-5 h-5 rounded-full bg-white transition-all shadow"
+        style={{ left: value ? "calc(100% - 22px)" : "2px" }} />
+    </button>
   );
 }
 
-function Field({ label, children }: { label: string; children: React.ReactNode }) {
+function MediaUpload({ urls, onAdd, onRemove, folder }: {
+  urls: string[]; onAdd: (url: string) => void; onRemove: (url: string) => void; folder: string;
+}) {
+  const { id } = useParams<{ id: string }>();
+  const ref = useRef<HTMLInputElement>(null);
+  const [uploading, setUploading] = useState(false);
+  const [uploadError, setUploadError] = useState("");
+
+  const upload = async (files: FileList) => {
+    setUploading(true);
+    setUploadError("");
+    for (const file of Array.from(files)) {
+      try {
+        const form = new FormData();
+        form.append("file", file);
+        const res = await fetch(`/api/creators/${id}/media?folder=${encodeURIComponent(folder)}`, { method: "POST", body: form });
+        const d = await res.json();
+        if (d.url) onAdd(d.url);
+        else setUploadError(d.error ?? `Erreur upload (${res.status})`);
+      } catch (e) {
+        setUploadError("Erreur réseau lors de l'upload");
+      }
+    }
+    setUploading(false);
+  };
+
   return (
-    <div className="space-y-1.5">
-      <label className="block text-xs font-medium" style={{ color: "#6b7280" }}>{label}</label>
-      {children}
+    <div className="flex flex-col gap-2 w-full">
+      <div className="flex flex-wrap gap-2">
+        {urls.map(url => (
+          <div key={url} className="relative group w-20 h-20 rounded-lg overflow-hidden border flex-shrink-0"
+            style={{ borderColor: "#1e1e2e" }}>
+            {/\.(mp4|mov|webm)/i.test(url)
+              ? <video src={url} className="w-full h-full object-cover" />
+              : <img src={url} alt="" className="w-full h-full object-cover" onError={e => { (e.target as HTMLImageElement).src = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='80' height='80'%3E%3Crect fill='%231e1e2e' width='80' height='80'/%3E%3Ctext x='50%25' y='50%25' dominant-baseline='middle' text-anchor='middle' fill='%236b7280' font-size='10'%3E?%3C/text%3E%3C/svg%3E"; }} />}
+            <button type="button" onClick={() => onRemove(url)}
+              className="absolute top-0.5 right-0.5 w-5 h-5 rounded-full flex items-center justify-center opacity-0 group-hover:opacity-100"
+              style={{ background: "#e11d48" }}>
+              <X size={10} color="#fff" />
+            </button>
+          </div>
+        ))}
+        <button type="button" onClick={() => ref.current?.click()} disabled={uploading}
+          className="w-20 h-20 rounded-lg border-2 border-dashed flex flex-col items-center justify-center gap-1 hover:border-red-500/40 transition-all disabled:opacity-50"
+          style={{ borderColor: "#374151" }}>
+          {uploading
+            ? <RefreshCw size={14} className="animate-spin" style={{ color: "#6b7280" }} />
+            : <><Plus size={18} style={{ color: "#6b7280" }} /><span className="text-xs" style={{ color: "#4b5563" }}>Upload</span></>}
+        </button>
+      </div>
+      {uploadError && <p className="text-xs" style={{ color: "#f87171" }}>{uploadError}</p>}
+      <input ref={ref} type="file" accept="image/*,video/*" multiple className="hidden"
+        onChange={e => e.target.files && upload(e.target.files)} />
     </div>
   );
 }
 
-function StepCard({
-  step, index, total, onChange, onDelete, onMoveUp, onMoveDown
-}: {
-  step: ScriptStep; index: number; total: number;
-  onChange: (s: ScriptStep) => void;
-  onDelete: () => void;
-  onMoveUp: () => void;
-  onMoveDown: () => void;
+function StepCard({ step, index, total, scriptId, onChange, onDelete, onMoveUp, onMoveDown }: {
+  step: ScriptStep; index: number; total: number; scriptId: string;
+  onChange: (s: ScriptStep) => void; onDelete: () => void;
+  onMoveUp: () => void; onMoveDown: () => void;
 }) {
-  const [open, setOpen] = useState(true);
-  const fileRef = useRef<HTMLInputElement>(null);
-
   const set = <K extends keyof ScriptStep>(k: K, v: ScriptStep[K]) => onChange({ ...step, [k]: v });
 
   const addPostMsg = () => {
-    const pm: PostMediaMessage = { id: Date.now().toString(), message: "", delaySeconds: 60, mediaUrl: undefined };
+    const pm: PostMediaMessage = { id: Date.now().toString(), message: "", delaySeconds: 5 };
     set("postMediaMessages", [...step.postMediaMessages, pm]);
   };
-
-  const updatePm = (pmId: string, patch: Partial<PostMediaMessage>) => {
+  const updatePm = (pmId: string, patch: Partial<PostMediaMessage>) =>
     set("postMediaMessages", step.postMediaMessages.map(p => p.id === pmId ? { ...p, ...patch } : p));
-  };
-
-  const removePm = (pmId: string) => {
+  const removePm = (pmId: string) =>
     set("postMediaMessages", step.postMediaMessages.filter(p => p.id !== pmId));
-  };
 
   return (
-    <div className="rounded-xl border overflow-hidden" style={{ borderColor: "#1e1e2e", background: "#0f0f1a" }}>
-      {/* Header */}
-      <div className="flex items-center gap-3 px-4 py-3 cursor-pointer select-none"
-        style={{ borderBottom: open ? "1px solid #1e1e2e" : "none" }}
-        onClick={() => setOpen(o => !o)}>
+    <div className="rounded-xl border overflow-hidden" style={{ borderColor: "#2a2a3e", background: "#0d0d1a" }}>
+      {/* Step header */}
+      <div className="flex items-center gap-2 px-4 py-2 border-b" style={{ borderColor: "#1e1e2e", background: "#111118" }}>
         <GripVertical size={14} style={{ color: "#4b5563" }} className="cursor-grab" />
-        <div className="flex items-center gap-2 flex-1 min-w-0">
-          <span className="w-6 h-6 rounded-full flex items-center justify-center text-xs font-bold flex-shrink-0"
-            style={{ background: "#e11d48", color: "#fff" }}>{index + 1}</span>
-          <span className="text-sm font-medium truncate" style={{ color: "#d1d5db" }}>
-            {step.message ? step.message.slice(0, 50) + (step.message.length > 50 ? "…" : "") : `Étape ${index + 1}`}
-          </span>
-          {step.priceStars > 0 && (
-            <span className="flex items-center gap-1 text-xs px-2 py-0.5 rounded-full flex-shrink-0"
-              style={{ background: "rgba(245,158,11,0.15)", color: "#f59e0b" }}>
-              <Star size={10} fill="#f59e0b" /> {step.priceStars} Stars
-            </span>
-          )}
-        </div>
+        <span className="w-6 h-6 rounded-full flex items-center justify-center text-xs font-bold flex-shrink-0"
+          style={{ background: "#e11d48", color: "#fff" }}>{index + 1}</span>
+        <span className="text-sm font-semibold flex-1" style={{ color: "#d1d5db" }}>Step {index + 1}</span>
         <div className="flex items-center gap-1">
-          <button onClick={e => { e.stopPropagation(); onMoveUp(); }} disabled={index === 0}
-            className="p-1 rounded hover:bg-white/5 disabled:opacity-30">
-            <ChevronUp size={13} style={{ color: "#6b7280" }} />
-          </button>
-          <button onClick={e => { e.stopPropagation(); onMoveDown(); }} disabled={index === total - 1}
-            className="p-1 rounded hover:bg-white/5 disabled:opacity-30">
-            <ChevronDown size={13} style={{ color: "#6b7280" }} />
-          </button>
-          <button onClick={e => { e.stopPropagation(); onDelete(); }}
-            className="p-1 rounded hover:bg-white/5 ml-1" style={{ color: "#e11d48" }}>
-            <Trash2 size={13} />
-          </button>
-          {open ? <ChevronUp size={14} style={{ color: "#4b5563" }} /> : <ChevronDown size={14} style={{ color: "#4b5563" }} />}
+          <button onClick={onMoveUp} disabled={index === 0} className="p-1 rounded hover:bg-white/5 disabled:opacity-30"><ChevronUp size={13} style={{ color: "#6b7280" }} /></button>
+          <button onClick={onMoveDown} disabled={index === total - 1} className="p-1 rounded hover:bg-white/5 disabled:opacity-30"><ChevronDown size={13} style={{ color: "#6b7280" }} /></button>
+          <button onClick={onDelete} className="p-1 rounded hover:bg-red-500/10" style={{ color: "#e11d48" }}><X size={13} /></button>
         </div>
       </div>
 
-      {open && (
-        <div className="p-4 space-y-4">
-          {/* Message */}
-          <Field label="Message">
-            <textarea value={step.message} onChange={e => set("message", e.target.value)}
-              rows={3} placeholder="Texte du message envoyé au fan..."
-              className="w-full px-3 py-2.5 rounded-lg text-sm outline-none resize-none"
-              style={{ background: "#0a0a0f", border: "1px solid #1e1e2e", color: "#d1d5db" }} />
-          </Field>
-
-          {/* Media */}
-          <Field label="Médias">
-            <div className="flex flex-wrap gap-2">
-              {step.mediaUrls.map((url, i) => (
-                <div key={i} className="relative group w-20 h-20 rounded-lg overflow-hidden border"
-                  style={{ borderColor: "#1e1e2e" }}>
-                  <img src={url} alt="" className="w-full h-full object-cover" />
-                  <button onClick={() => set("mediaUrls", step.mediaUrls.filter((_, j) => j !== i))}
-                    className="absolute top-1 right-1 w-5 h-5 rounded-full flex items-center justify-center opacity-0 group-hover:opacity-100 transition-all"
-                    style={{ background: "#e11d48" }}>
-                    <X size={10} color="#fff" />
-                  </button>
-                </div>
-              ))}
-              <button onClick={() => fileRef.current?.click()}
-                className="w-20 h-20 rounded-lg border-2 border-dashed flex flex-col items-center justify-center gap-1 hover:bg-white/5 transition-all"
-                style={{ borderColor: "#1e1e2e" }}>
-                <Upload size={14} style={{ color: "#4b5563" }} />
-                <span className="text-xs" style={{ color: "#4b5563" }}>Upload</span>
-              </button>
-              <input ref={fileRef} type="file" accept="image/*,video/*" multiple className="hidden"
-                onChange={e => {
-                  const files = Array.from(e.target.files ?? []);
-                  const urls = files.map(f => URL.createObjectURL(f));
-                  set("mediaUrls", [...step.mediaUrls, ...urls]);
-                }} />
-            </div>
-          </Field>
-
-          {/* Row: Stars + Discount */}
-          <div className="grid grid-cols-2 gap-3">
-            <Field label="Prix en Stars (0 = gratuit)">
-              <input type="number" min={0} value={step.priceStars}
-                onChange={e => set("priceStars", Number(e.target.value))}
-                className="w-full px-3 py-2 rounded-lg text-sm outline-none"
-                style={{ background: "#0a0a0f", border: "1px solid #1e1e2e", color: "#d1d5db" }} />
-            </Field>
-            <Field label="Prix réduit (si activé)">
-              <div className="flex items-center gap-2">
-                <input type="number" min={0} value={step.discountedPriceStars}
-                  disabled={!step.discountEnabled}
-                  onChange={e => set("discountedPriceStars", Number(e.target.value))}
-                  className="flex-1 px-3 py-2 rounded-lg text-sm outline-none disabled:opacity-40"
-                  style={{ background: "#0a0a0f", border: "1px solid #1e1e2e", color: "#d1d5db" }} />
-                <Toggle value={step.discountEnabled} onChange={v => set("discountEnabled", v)} />
-              </div>
-            </Field>
-          </div>
-
-          {/* Pre-media teaser */}
-          <Field label="Teaser avant média (envoyé avant le média payant)">
-            <textarea value={step.preMediaTeaser} onChange={e => set("preMediaTeaser", e.target.value)}
-              rows={2} placeholder="Ex: J'ai quelque chose de spécial pour toi… 🔥"
-              className="w-full px-3 py-2.5 rounded-lg text-sm outline-none resize-none"
-              style={{ background: "#0a0a0f", border: "1px solid #1e1e2e", color: "#d1d5db" }} />
-          </Field>
-
-          {/* Options row */}
-          <div className="flex flex-wrap gap-4">
-            <Toggle value={step.waitBeforeMedia} onChange={v => set("waitBeforeMedia", v)} label="Attendre avant le média" />
-            <Toggle value={step.skipFollowupIfPaid} onChange={v => set("skipFollowupIfPaid", v)} label="Skip follow-up si déjà payé" />
-          </div>
-
-          {/* Messages between steps */}
-          <Field label="Vitesse d'envoi des messages entre étapes">
-            <div className="flex gap-2">
-              {(["fast", "normal", "slow"] as const).map(v => (
-                <button key={v} onClick={() => set("messagesBetweenSteps", v)}
-                  className="flex-1 py-2 rounded-lg text-xs font-medium border transition-all"
-                  style={{
-                    borderColor: step.messagesBetweenSteps === v ? "#e11d48" : "#1e1e2e",
-                    background: step.messagesBetweenSteps === v ? "rgba(225,29,72,0.1)" : "transparent",
-                    color: step.messagesBetweenSteps === v ? "#e11d48" : "#6b7280",
-                  }}>
-                  {v === "fast" ? "Rapide (1-2s)" : v === "normal" ? "Normal (4-5s)" : "Lent (8-10s)"}
-                </button>
-              ))}
-            </div>
-          </Field>
-
-          {/* Post-media messages */}
+      <div className="p-4 space-y-4">
+        {/* Message + Media row */}
+        <div className="grid grid-cols-2 gap-4">
           <div>
-            <div className="flex items-center justify-between mb-2">
-              <label className="text-xs font-medium" style={{ color: "#6b7280" }}>Messages post-média</label>
-              <button onClick={addPostMsg} className="flex items-center gap-1 text-xs px-2.5 py-1 rounded-lg"
-                style={{ background: "rgba(225,29,72,0.1)", color: "#e11d48", border: "1px solid rgba(225,29,72,0.2)" }}>
-                <Plus size={11} /> Ajouter
-              </button>
-            </div>
-            <div className="space-y-2">
-              {step.postMediaMessages.map(pm => (
-                <div key={pm.id} className="flex items-start gap-2 p-3 rounded-lg border"
-                  style={{ borderColor: "#1e1e2e", background: "#0a0a0f" }}>
-                  <div className="flex-1 space-y-2">
-                    <input value={pm.message} onChange={e => updatePm(pm.id, { message: e.target.value })}
-                      placeholder="Message de suivi..."
-                      className="w-full px-3 py-2 rounded-lg text-sm outline-none"
-                      style={{ background: "#111118", border: "1px solid #1e1e2e", color: "#d1d5db" }} />
-                    <div className="flex items-center gap-2">
-                      <span className="text-xs" style={{ color: "#6b7280" }}>Délai:</span>
-                      <input type="number" min={0} value={pm.delaySeconds}
-                        onChange={e => updatePm(pm.id, { delaySeconds: Number(e.target.value) })}
-                        className="w-24 px-2 py-1 rounded text-xs outline-none"
-                        style={{ background: "#111118", border: "1px solid #1e1e2e", color: "#d1d5db" }} />
-                      <span className="text-xs" style={{ color: "#6b7280" }}>secondes</span>
-                    </div>
-                  </div>
-                  <button onClick={() => removePm(pm.id)} className="mt-1 flex-shrink-0" style={{ color: "#e11d48" }}>
-                    <X size={13} />
-                  </button>
-                </div>
-              ))}
-              {step.postMediaMessages.length === 0 && (
-                <p className="text-xs py-3 text-center" style={{ color: "#374151" }}>Aucun message post-média</p>
-              )}
+            <label className="block text-xs font-medium mb-1.5" style={{ color: "#9ca3af" }}>Message</label>
+            <textarea value={step.message} onChange={e => set("message", e.target.value)}
+              rows={4} placeholder="Tu préfères lequel? 🙈"
+              className="w-full px-3 py-2.5 rounded-lg text-sm outline-none resize-none"
+              style={{ background: "#0a0a0f", border: "1px solid #1e1e2e", color: "#d1d5db" }} />
+          </div>
+          <div>
+            <label className="block text-xs font-medium mb-1.5" style={{ color: "#9ca3af" }}>Medias</label>
+            <div className="rounded-lg p-2 min-h-[100px] flex flex-wrap gap-2 items-start"
+              style={{ background: "#0a0a0f", border: "1px solid #1e1e2e" }}>
+              <MediaUpload urls={step.mediaUrls} folder={scriptId}
+                onAdd={url => set("mediaUrls", [...step.mediaUrls, url])}
+                onRemove={url => set("mediaUrls", step.mediaUrls.filter(u => u !== url))} />
             </div>
           </div>
         </div>
-      )}
+
+        {/* Wait before sending */}
+        <div className="flex items-center justify-between p-3 rounded-lg" style={{ background: "#111118" }}>
+          <div>
+            <p className="text-sm font-medium" style={{ color: "#d1d5db" }}>Wait before sending video/audio</p>
+            <p className="text-xs mt-0.5" style={{ color: "#6b7280" }}>Only available for steps with video or audio media.</p>
+          </div>
+          <Toggle value={step.waitBeforeMedia} onChange={v => set("waitBeforeMedia", v)} />
+        </div>
+
+        {/* Price + Discount */}
+        <div className="grid grid-cols-2 gap-4">
+          <div>
+            <label className="block text-xs font-medium mb-1.5" style={{ color: "#9ca3af" }}>Price (+ Stars)</label>
+            <input type="number" min={0} value={step.priceStars} onChange={e => set("priceStars", Number(e.target.value))}
+              className="w-full px-3 py-2 rounded-lg text-sm outline-none"
+              style={{ background: "#0a0a0f", border: "1px solid #1e1e2e", color: "#d1d5db" }} />
+          </div>
+          <div>
+            <div className="flex items-center gap-2 mb-1.5">
+              <label className="text-xs font-medium" style={{ color: "#9ca3af" }}>Discounted Price (+ Stars)</label>
+              <div className="flex items-center gap-1.5 ml-auto">
+                <span className="text-xs" style={{ color: "#6b7280" }}>Enable discount</span>
+                <Toggle value={step.discountEnabled} onChange={v => set("discountEnabled", v)} />
+              </div>
+            </div>
+            <input type="number" min={0} value={step.discountedPriceStars} disabled={!step.discountEnabled}
+              onChange={e => set("discountedPriceStars", Number(e.target.value))}
+              className="w-full px-3 py-2 rounded-lg text-sm outline-none disabled:opacity-40"
+              style={{ background: "#0a0a0f", border: "1px solid #1e1e2e", color: "#d1d5db" }} />
+          </div>
+        </div>
+
+        {/* Messages between steps */}
+        <div className="grid grid-cols-2 gap-4 items-start">
+          <div>
+            <label className="block text-xs font-medium mb-1.5" style={{ color: "#9ca3af" }}>Approx. Messages Between This Step And The Next One</label>
+            <select value={step.messagesBetweenSteps} onChange={e => set("messagesBetweenSteps", e.target.value as "fast" | "normal" | "slow")}
+              className="w-full px-3 py-2 rounded-lg text-sm outline-none"
+              style={{ background: "#0a0a0f", border: "1px solid #1e1e2e", color: "#d1d5db" }}>
+              <option value="fast">Fast (1–2)</option>
+              <option value="normal">Normal (4–5)</option>
+              <option value="slow">Slow (8–10)</option>
+            </select>
+          </div>
+          <div>
+            <label className="block text-xs font-medium mb-1.5" style={{ color: "#9ca3af" }}>Skip media followup if paid (send next step)</label>
+            <label className="flex items-center gap-2 mt-2 cursor-pointer">
+              <input type="checkbox" checked={step.skipFollowupIfPaid} onChange={e => set("skipFollowupIfPaid", e.target.checked)}
+                className="w-4 h-4 rounded accent-red-600" />
+              <span className="text-xs" style={{ color: "#6b7280" }}>Available only for paid steps</span>
+            </label>
+          </div>
+        </div>
+
+        {/* Pre-media teaser */}
+        <div>
+          <label className="block text-xs font-medium mb-1.5" style={{ color: "#9ca3af" }}>
+            Pre-Media Teaser <span style={{ color: "#4b5563" }}>(Optional)</span>
+          </label>
+          <textarea value={step.preMediaTeaser} onChange={e => set("preMediaTeaser", e.target.value)}
+            rows={2} placeholder="Add video or audio media to enable pre-media teaser"
+            className="w-full px-3 py-2 rounded-lg text-sm outline-none resize-none"
+            style={{ background: "#0a0a0f", border: "1px solid #1e1e2e", color: "#d1d5db" }} />
+          <p className="text-xs mt-1" style={{ color: "#4b5563" }}>Pre-media teaser is only available for steps with video or audio media.</p>
+        </div>
+
+        {/* Post-media messages */}
+        <div>
+          <div className="flex items-center justify-between mb-2">
+            <div>
+              <label className="text-xs font-medium" style={{ color: "#9ca3af" }}>
+                Post-Media Messages <span style={{ color: "#4b5563" }}>(Optional)</span>
+              </label>
+              <p className="text-xs mt-0.5" style={{ color: "#4b5563" }}>Add multiple follow up messages after the main media, each with its own delay and optional media.</p>
+            </div>
+            <button onClick={addPostMsg}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs border"
+              style={{ borderColor: "#1e1e2e", color: "#9ca3af" }}>
+              <Plus size={11} /> Add Post-Media Message
+            </button>
+          </div>
+          {step.postMediaMessages.length > 0 && (
+            <div className="rounded-lg border overflow-hidden" style={{ borderColor: "#1e1e2e" }}>
+              <div className="grid text-xs px-3 py-2 border-b" style={{ gridTemplateColumns: "1fr 160px 80px 32px", borderColor: "#1e1e2e", color: "#6b7280" }}>
+                <span>Message Post Media</span><span>Delay (in seconds)</span><span>Medias</span><span></span>
+              </div>
+              {step.postMediaMessages.map(pm => (
+                <div key={pm.id} className="grid items-center px-3 py-2 gap-2 border-b last:border-b-0"
+                  style={{ gridTemplateColumns: "1fr 160px 80px 32px", borderColor: "#111118" }}>
+                  <input value={pm.message} onChange={e => updatePm(pm.id, { message: e.target.value })}
+                    placeholder="Jsp lequel mettre pour ce soir"
+                    className="px-2 py-1.5 rounded text-xs outline-none"
+                    style={{ background: "#0a0a0f", border: "1px solid #1e1e2e", color: "#d1d5db" }} />
+                  <div>
+                    <input type="number" min={0} value={pm.delaySeconds}
+                      onChange={e => updatePm(pm.id, { delaySeconds: Number(e.target.value) })}
+                      className="w-full px-2 py-1.5 rounded text-xs outline-none"
+                      style={{ background: "#0a0a0f", border: "1px solid #1e1e2e", color: "#d1d5db" }} />
+                    <p className="text-xs mt-0.5" style={{ color: "#4b5563" }}>Relative to previous</p>
+                  </div>
+                  <button onClick={() => { /* media upload for pm */ }}
+                    className="w-8 h-8 rounded border-2 border-dashed flex items-center justify-center"
+                    style={{ borderColor: "#374151" }}>
+                    <Plus size={12} style={{ color: "#6b7280" }} />
+                  </button>
+                  <button onClick={() => removePm(pm.id)} style={{ color: "#e11d48" }}><Trash2 size={13} /></button>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
     </div>
   );
 }
 
-/* ── Main page ── */
 export default function ScriptEditorPage() {
   const { id, scriptId } = useParams<{ id: string; scriptId: string }>();
   const router = useRouter();
   const [script, setScript] = useState<Script | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
 
   useEffect(() => {
-    (async () => {
-      const res = await fetch(`/api/creators/${id}/scripts`);
-      const d = await res.json();
-      const found = (d.scripts as Script[]).find(s => s.id === scriptId) ?? null;
-      setScript(found);
+    fetch(`/api/creators/${id}/scripts`).then(r => r.json()).then(d => {
+      setScript((d.scripts as Script[]).find(s => s.id === scriptId) ?? null);
       setLoading(false);
-    })();
+    });
   }, [id, scriptId]);
+
+  const setS = (patch: Partial<Script>) => setScript(s => s ? { ...s, ...patch } : s);
 
   const save = async () => {
     if (!script) return;
@@ -255,34 +266,26 @@ export default function ScriptEditorPage() {
       body: JSON.stringify({ script }),
     });
     setSaving(false);
+    setSaved(true);
+    setTimeout(() => setSaved(false), 2000);
   };
-
-  const setS = (patch: Partial<Script>) => setScript(s => s ? { ...s, ...patch } : s);
 
   const addStep = () => {
     if (!script) return;
-    const newStep = {
+    const newStep: ScriptStep = {
       id: Date.now().toString() + Math.random().toString(36).slice(2, 5),
       order: script.steps.length + 1,
-      message: "",
-      mediaUrls: [],
-      waitBeforeMedia: false,
-      priceStars: 0,
-      discountEnabled: false,
-      discountedPriceStars: 0,
-      messagesBetweenSteps: "normal" as const,
-      skipFollowupIfPaid: false,
-      preMediaTeaser: "",
-      postMediaMessages: [],
+      message: "", mediaUrls: [], waitBeforeMedia: false,
+      priceStars: 0, discountEnabled: false, discountedPriceStars: 0,
+      messagesBetweenSteps: "normal", skipFollowupIfPaid: false,
+      preMediaTeaser: "", postMediaMessages: [],
     };
     setS({ steps: [...script.steps, newStep] });
   };
 
   const updateStep = (idx: number, s: ScriptStep) => {
     if (!script) return;
-    const steps = [...script.steps];
-    steps[idx] = s;
-    setS({ steps });
+    const steps = [...script.steps]; steps[idx] = s; setS({ steps });
   };
 
   const deleteStep = (idx: number) => {
@@ -293,113 +296,103 @@ export default function ScriptEditorPage() {
   const moveStep = (idx: number, dir: -1 | 1) => {
     if (!script) return;
     const steps = [...script.steps];
-    const target = idx + dir;
-    if (target < 0 || target >= steps.length) return;
-    [steps[idx], steps[target]] = [steps[target], steps[idx]];
+    const t = idx + dir;
+    if (t < 0 || t >= steps.length) return;
+    [steps[idx], steps[t]] = [steps[t], steps[idx]];
     setS({ steps: steps.map((s, i) => ({ ...s, order: i + 1 })) });
   };
 
-  if (loading) return (
-    <div className="flex items-center justify-center py-20" style={{ color: "#4b5563" }}>
-      <RefreshCw size={18} className="animate-spin mr-2" /> Chargement...
-    </div>
-  );
-
-  if (!script) return (
-    <div className="p-8 text-center text-sm" style={{ color: "#4b5563" }}>Script introuvable.</div>
-  );
+  if (loading) return <div className="flex items-center justify-center py-20" style={{ color: "#4b5563" }}><RefreshCw size={16} className="animate-spin mr-2" /></div>;
+  if (!script) return <div className="p-8 text-center text-sm" style={{ color: "#4b5563" }}>Script introuvable.</div>;
 
   return (
-    <div className="max-w-3xl mx-auto p-6 space-y-6" style={{ color: "#fff" }}>
-      {/* Back + title */}
-      <div className="flex items-center gap-3">
+    <div className="p-6 max-w-4xl" style={{ color: "#fff" }}>
+      {/* Header */}
+      <div className="flex items-center gap-3 mb-6">
         <button onClick={() => router.push(`/dashboard/creators/${id}/scripts`)}
-          className="p-1.5 rounded-lg hover:bg-white/5 transition-all" style={{ color: "#9ca3af" }}>
-          <ChevronLeft size={18} />
+          className="flex items-center gap-1.5 text-sm hover:text-white transition-all" style={{ color: "#6b7280" }}>
+          <ArrowLeft size={15} /> Back
         </button>
-        <input value={script.name} onChange={e => setS({ name: e.target.value.toUpperCase() })}
-          className="text-xl font-bold bg-transparent outline-none border-b border-transparent hover:border-white/10 focus:border-white/20 transition-all uppercase"
-          style={{ color: "#fff" }} />
+        <div className="w-8 h-8 rounded-full flex items-center justify-center text-sm" style={{ background: "#e11d48" }}>✦</div>
+        <div>
+          <h1 className="text-base font-bold">Edit Script</h1>
+          <p className="text-xs" style={{ color: "#6b7280" }}>Modify {script.name}</p>
+        </div>
         <div className="flex-1" />
         <button onClick={save} disabled={saving}
-          className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium disabled:opacity-60"
-          style={{ background: "#e11d48", color: "#fff" }}>
-          {saving ? <RefreshCw size={13} className="animate-spin" /> : <Save size={13} />}
-          {saving ? "Sauvegarde…" : "Sauvegarder"}
+          className="flex items-center gap-2 px-5 py-2.5 rounded-xl text-sm font-semibold"
+          style={{ background: saved ? "#10b981" : "#e11d48", color: "#fff" }}>
+          {saving ? <RefreshCw size={13} className="animate-spin" /> : null}
+          {saved ? "Saved ✓" : saving ? "Saving..." : "Update Script"}
         </button>
       </div>
 
-      {/* Description */}
-      <textarea value={script.description} onChange={e => setS({ description: e.target.value })}
-        rows={2} placeholder="Description du script (optionnel)…"
-        className="w-full px-4 py-3 rounded-xl text-sm outline-none resize-none"
-        style={{ background: "#111118", border: "1px solid #1e1e2e", color: "#9ca3af" }} />
-
-      {/* Global settings */}
-      <div className="rounded-xl border p-5 space-y-5" style={{ borderColor: "#1e1e2e", background: "#0f0f1a" }}>
-        <h3 className="text-sm font-semibold" style={{ color: "#d1d5db" }}>Paramètres généraux</h3>
-
-        <div className="grid grid-cols-2 gap-4">
-          <Toggle value={script.active} onChange={v => setS({ active: v })} label="Script actif" />
-          <Toggle value={script.first} onChange={v => setS({ first: v })} label="Script prioritaire (⭐)" />
-          <Toggle value={script.strictCooldown} onChange={v => setS({ strictCooldown: v })} label="Cooldown strict" />
+      <div className="space-y-5">
+        {/* Name */}
+        <div>
+          <label className="block text-xs font-medium mb-1.5" style={{ color: "#9ca3af" }}>Name</label>
+          <input value={script.name} onChange={e => setS({ name: e.target.value.toUpperCase() })}
+            className="w-full px-4 py-2.5 rounded-xl text-sm outline-none uppercase font-semibold"
+            style={{ background: "#111118", border: "1px solid #1e1e2e", color: "#fff" }} />
         </div>
 
-        <div className="grid grid-cols-2 gap-4">
-          <Field label={`Timeout inactivité: ${script.inactivityTimeoutHours}h`}>
-            <input type="range" min={1} max={72} value={script.inactivityTimeoutHours}
-              onChange={e => setS({ inactivityTimeoutHours: Number(e.target.value) })}
-              className="w-full accent-rose-600" />
-            <div className="flex justify-between text-xs mt-1" style={{ color: "#4b5563" }}>
-              <span>1h</span><span>72h</span>
-            </div>
-          </Field>
-          <Field label="Groupe (tag optionnel)">
-            <input value={script.group ?? ""} onChange={e => setS({ group: e.target.value || null })}
-              placeholder="Ex: welcome, ppv, vip…"
-              className="w-full px-3 py-2 rounded-lg text-sm outline-none"
-              style={{ background: "#0a0a0f", border: "1px solid #1e1e2e", color: "#d1d5db" }} />
-          </Field>
+        {/* Description */}
+        <div>
+          <label className="block text-xs font-medium mb-1.5" style={{ color: "#9ca3af" }}>Description</label>
+          <textarea value={script.description} onChange={e => setS({ description: e.target.value })}
+            rows={3} className="w-full px-4 py-2.5 rounded-xl text-sm outline-none resize-none"
+            style={{ background: "#111118", border: "1px solid #1e1e2e", color: "#d1d5db" }} />
         </div>
-      </div>
 
-      {/* Steps */}
-      <div className="space-y-3">
-        <div className="flex items-center justify-between">
-          <h3 className="text-sm font-semibold" style={{ color: "#d1d5db" }}>
-            Étapes du script ({script.steps.length})
-          </h3>
-          <button onClick={addStep}
-            className="flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm"
-            style={{ background: "rgba(225,29,72,0.1)", color: "#e11d48", border: "1px solid rgba(225,29,72,0.2)" }}>
-            <Plus size={13} /> Ajouter une étape
+        {/* Strict cooldown */}
+        <div className="flex items-start justify-between p-4 rounded-xl border" style={{ borderColor: "#1e1e2e", background: "#0f0f1a" }}>
+          <div>
+            <p className="text-sm font-medium">Apply strict cooldown even after full script purchase</p>
+            <p className="text-xs mt-1" style={{ color: "#6b7280" }}>If enabled, the script will enter strict cooldown even when fully purchased.</p>
+          </div>
+          <Toggle value={script.strictCooldown} onChange={v => setS({ strictCooldown: v })} />
+        </div>
+
+        {/* Inactivity timeout */}
+        <div className="p-4 rounded-xl border" style={{ borderColor: "#1e1e2e", background: "#0f0f1a" }}>
+          <div className="flex items-center justify-between mb-2">
+            <label className="text-sm font-medium">Script Inactivity timeout (hours): {script.inactivityTimeoutHours}h</label>
+          </div>
+          <input type="range" min={1} max={72} value={script.inactivityTimeoutHours}
+            onChange={e => setS({ inactivityTimeoutHours: Number(e.target.value) })}
+            className="w-full" style={{ accentColor: "#e11d48" }} />
+          <p className="text-xs mt-2" style={{ color: "#6b7280" }}>After this delay without interaction, the bot exits the script.</p>
+        </div>
+
+        {/* Script Steps */}
+        <div>
+          <h3 className="font-semibold text-base mb-1">Script Steps</h3>
+          <p className="text-xs mb-4" style={{ color: "#6b7280" }}>Define the conversation flow and actions for this script</p>
+          <div className="space-y-4">
+            {script.steps.map((step, idx) => (
+              <StepCard key={step.id} step={step} index={idx} total={script.steps.length}
+                scriptId={script.id}
+                onChange={s => updateStep(idx, s)}
+                onDelete={() => deleteStep(idx)}
+                onMoveUp={() => moveStep(idx, -1)}
+                onMoveDown={() => moveStep(idx, 1)} />
+            ))}
+            <button onClick={addStep}
+              className="w-full py-3 rounded-xl border-2 border-dashed flex items-center justify-center gap-2 text-sm hover:border-red-500/40 transition-all"
+              style={{ borderColor: "#1e1e2e", color: "#6b7280" }}>
+              <Plus size={15} /> Add Step
+            </button>
+          </div>
+        </div>
+
+        {/* Update button bottom */}
+        <div className="flex justify-end pb-8">
+          <button onClick={save} disabled={saving}
+            className="px-8 py-3 rounded-xl text-sm font-semibold"
+            style={{ background: saved ? "#10b981" : "#e11d48", color: "#fff" }}>
+            {saved ? "Saved ✓" : saving ? "Saving..." : "Update Script"}
           </button>
         </div>
-
-        {script.steps.length === 0 ? (
-          <div className="rounded-xl border border-dashed py-12 text-center text-sm"
-            style={{ borderColor: "#1e1e2e", color: "#4b5563" }}>
-            Aucune étape — clique &quot;Ajouter une étape&quot; pour commencer
-          </div>
-        ) : (
-          script.steps.map((step, idx) => (
-            <StepCard key={step.id} step={step} index={idx} total={script.steps.length}
-              onChange={s => updateStep(idx, s)}
-              onDelete={() => deleteStep(idx)}
-              onMoveUp={() => moveStep(idx, -1)}
-              onMoveDown={() => moveStep(idx, 1)} />
-          ))
-        )}
-      </div>
-
-      {/* Save bottom */}
-      <div className="flex justify-end pt-2 pb-8">
-        <button onClick={save} disabled={saving}
-          className="flex items-center gap-2 px-6 py-2.5 rounded-xl text-sm font-medium disabled:opacity-60"
-          style={{ background: "#e11d48", color: "#fff" }}>
-          {saving ? <RefreshCw size={13} className="animate-spin" /> : <Save size={13} />}
-          {saving ? "Sauvegarde…" : "Sauvegarder les changements"}
-        </button>
       </div>
     </div>
   );

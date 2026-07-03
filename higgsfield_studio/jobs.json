@@ -1,0 +1,30 @@
+{
+  "dfd64e26a1c8": {
+    "id": "dfd64e26a1c8",
+    "name": "TEST",
+    "model": "kling3_0",
+    "duration": 8,
+    "resolution": "720p",
+    "status": "error",
+    "log": "Erreur : SyncClient.upload_file() takes 2 positional arguments but 3 were given",
+    "created": "05/06/2026 04:42",
+    "photo_path": "C:\\Users\\MAEL\\Downloads\\higgsfield-batch\\higgsfield-batch\\higgsfield_studio\\uploads\\photos\\dfd64e26a1c8.png",
+    "video_path": "C:\\Users\\MAEL\\Downloads\\higgsfield-batch\\higgsfield-batch\\higgsfield_studio\\uploads\\videos\\dfd64e26a1c8.MP4",
+    "output_url": null,
+    "cdn_url": null
+  },
+  "57ca2052aab5": {
+    "id": "57ca2052aab5",
+    "name": "snaptik_7630938110142024990_hd",
+    "model": "kling3_0",
+    "duration": 8,
+    "resolution": "720p",
+    "status": "error",
+    "log": "Erreur : SyncClient.upload_file() takes 2 positional arguments but 3 were given",
+    "created": "05/06/2026 04:43",
+    "photo_path": "C:\\Users\\MAEL\\Downloads\\higgsfield-batch\\higgsfield-batch\\higgsfield_studio\\uploads\\photos\\57ca2052aab5.jpg",
+    "video_path": "C:\\Users\\MAEL\\Downloads\\higgsfield-batch\\higgsfield-batch\\higgsfield_studio\\uploads\\videos\\57ca2052aab5.mp4",
+    "output_url": null,
+    "cdn_url": null
+  }
+}

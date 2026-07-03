@@ -1,9 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
-import fs from "fs";
-import path from "path";
-import { getDataDir } from "@/lib/data-dir";
+import { saveStyleProfile } from "@/lib/style-store";
 
-const SECRET = "onlychat-admin-2026";
+const SECRET = process.env.ADMIN_SECRET ?? "onlychat-admin-2026";
 
 export async function POST(req: NextRequest) {
   const secret = req.headers.get("x-admin-secret");
@@ -12,22 +10,19 @@ export async function POST(req: NextRequest) {
   }
 
   try {
-    const { creatorId, profile } = await req.json();
-    if (!profile?.realExamples) {
-      return NextResponse.json({ error: "Profil invalide" }, { status: 400 });
+    const { creatorId, profile, profileName } = await req.json();
+    if (!profile?.realExamples || !creatorId) {
+      return NextResponse.json({ error: "Profil ou creatorId invalide" }, { status: 400 });
     }
 
-    const dir = getDataDir();
-    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-
-    const filename = creatorId ? `style-${creatorId}.json` : "style-global.json";
-    const filepath = path.join(dir, filename);
-    fs.writeFileSync(filepath, JSON.stringify(profile, null, 2), "utf-8");
+    const name = profileName || profile.name || "Profil importé";
+    const meta = saveStyleProfile(creatorId, profile, name, true);
 
     return NextResponse.json({
       ok: true,
-      file: filename,
-      examples: profile.realExamples.length,
+      file: `style-${creatorId}-${meta.slug}.json`,
+      examples: meta.examples,
+      slug: meta.slug,
     });
   } catch (err) {
     console.error(err);

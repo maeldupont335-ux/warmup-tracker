@@ -1,0 +1,13 @@
+{
+  "personality": "flirty",
+  "customPrompt": "",
+  "languages": [
+    "Français",
+    "English"
+  ],
+  "ppvEnabled": true,
+  "ppvPrice": "15",
+  "nudgeDelay": "48",
+  "welcomeEnabled": true,
+  "creatorName": ""
+}

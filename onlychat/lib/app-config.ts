@@ -1,7 +1,8 @@
 import fs from "fs";
 import path from "path";
+import { getDataDir } from "./data-dir";
 
-const CONFIG_FILE = path.join(process.cwd(), "data", "app-config.json");
+const CONFIG_FILE = path.join(getDataDir(), "app-config.json");
 
 interface AppConfig {
   productionUrl: string; // ex: https://onlychat-ai.onrender.com

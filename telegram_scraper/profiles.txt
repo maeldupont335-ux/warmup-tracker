@@ -1,0 +1,12 @@
+# Liste des profils AdsPower pour le warm-up
+# Une ligne = un profil
+# Pour en ajouter : colle l'ID sur une nouvelle ligne
+# Pour en désactiver : mets un # devant
+
+k1csfeja
+k1cup0ch
+k1cup0ci
+k1cup0cj
+k1cup0ck
+k1cup0cl
+k1cvbnrr

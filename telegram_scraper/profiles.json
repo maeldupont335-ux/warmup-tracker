@@ -1,0 +1,88 @@
+[
+  {
+    "id": "default",
+    "name": "Profil principal💲",
+    "oneup_api_key": "a596437209bb16ce9d73",
+    "cloudinary_cloud_name": "donimprgr",
+    "cloudinary_api_key": "588748259662185",
+    "cloudinary_api_secret": "x0IrhR0Y06zAXQU2uo_ktUizigI",
+    "category_id_snap": "177234",
+    "snap_accounts": [
+      {
+        "username": "la_petite2003",
+        "id": "24c727b3-1030-40ef-8b69-d1eb279823e2"
+      },
+      {
+        "username": "bby_louloutee",
+        "id": "71486fff-253b-4210-b3f1-fc95a99f0cd8"
+      },
+      {
+        "username": "poulette95",
+        "id": "8054ecd2-41d8-4a41-be4c-b742948e9ca5"
+      },
+      {
+        "username": "pauline.onlinee",
+        "id": "9036dd0e-7107-4c18-a752-7f1579ac69fc"
+      },
+      {
+        "username": "blm.pauline",
+        "id": "1d993bbe-0734-4813-ab62-73a14cc36868"
+      },
+      {
+        "username": "pauline_esp",
+        "id": "d7189755-4eeb-458d-b577-fd8ea4fb01ab"
+      }
+    ],
+    "spotlight_pool_dir": "C:\\Users\\MAEL\\Downloads\\Telegram Desktop\\MYM PAULINE\\AUTO SPOTLIGHT\\3 - A POSTER",
+    "data_dir": "C:\\Users\\MAEL\\Downloads\\higgsfield-batch\\higgsfield-batch\\telegram_scraper"
+  },
+  {
+    "id": "17c59ce3",
+    "name": "LOUNA",
+    "oneup_api_key": "a596437209bb16ce9d73",
+    "cloudinary_cloud_name": "donimprgr",
+    "cloudinary_api_key": "588748259662185",
+    "cloudinary_api_secret": "x0IrhR0Y06zAXQU2uo_ktUizigI",
+    "category_id_snap": "177234",
+    "snap_accounts": [
+      {
+        "username": "louna.texier",
+        "id": "2a98d4ad-665a-42b4-a97a-baaf460237bc"
+      }
+    ],
+    "spotlight_pool_dir": ""
+  },
+  {
+    "id": "7d683068",
+    "name": "NINA",
+    "oneup_api_key": "a596437209bb16ce9d73",
+    "cloudinary_cloud_name": "donimprgr",
+    "cloudinary_api_key": "588748259662185",
+    "cloudinary_api_secret": "x0IrhR0Y06zAXQU2uo_ktUizigI",
+    "category_id_snap": "177234",
+    "snap_accounts": [
+      {
+        "username": "niinaaxx",
+        "id": "e446e4cd-e532-4249-885b-576505dc64dc"
+      }
+    ],
+    "spotlight_pool_dir": ""
+  },
+  {
+    "id": "12e901f7",
+    "name": "OPH",
+    "oneup_api_key": "a596437209bb16ce9d73",
+    "cloudinary_cloud_name": "donimprgr",
+    "cloudinary_api_key": "588748259662185",
+    "cloudinary_api_secret": "x0IrhR0Y06zAXQU2uo_ktUizigI",
+    "category_id_snap": "177234",
+    "snap_accounts": [
+      {
+        "username": "oph_677",
+        "id": "e6ea765a-27c9-4f21-9fa8-4595f3fa756f"
+      }
+    ],
+    "spotlight_pool_dir": "C:\\Users\\MAEL\\Downloads\\Telegram Desktop\\MYM PAULINE\\AUTO SPOTLIGHT\\3 - A POSTER",
+    "data_dir": "C:\\Users\\MAEL\\Downloads\\higgsfield-batch\\higgsfield-batch\\telegram_scraper"
+  }
+]

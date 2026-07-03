@@ -2,15 +2,15 @@ import { NextRequest, NextResponse } from "next/server";
 import fs from "fs";
 import path from "path";
 import { getWebhookBase } from "@/lib/app-config";
-
-const FILE = path.join(process.cwd(), "data", "creators.json");
+import { createServerClient } from "@supabase/ssr";
+import { getDataDir } from "@/lib/data-dir";
 
 export interface Creator {
   id: string;
   name: string;
   botUsername: string;
   botToken: string;
-  businessConnection: string | null; // @username connecté via Telegram Business
+  businessConnection: string | null;
   license: "none" | "telegram" | "onlyfans";
   syncStatus: "active" | "inactive";
   autoRenew: boolean;
@@ -19,19 +19,38 @@ export interface Creator {
   createdAt: string;
 }
 
-function load(): Creator[] {
+/* ── Auth ── */
+async function getUserId(req: NextRequest): Promise<string | null> {
+  const supabase = createServerClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
+    { cookies: { getAll: () => req.cookies.getAll(), setAll: () => {} } }
+  );
+  const { data: { user } } = await supabase.auth.getUser();
+  return user?.id ?? null;
+}
+
+/* ── Storage par userId ── */
+function userFile(userId: string) {
+  return path.join(getDataDir(), "users", `${userId}-creators.json`);
+}
+
+function load(userId: string): Creator[] {
   try {
-    if (!fs.existsSync(FILE)) return [];
-    return JSON.parse(fs.readFileSync(FILE, "utf-8"));
+    const f = userFile(userId);
+    if (!fs.existsSync(f)) return [];
+    return JSON.parse(fs.readFileSync(f, "utf-8"));
   } catch { return []; }
 }
 
-function save(creators: Creator[]) {
-  const dir = path.dirname(FILE);
+function save(userId: string, creators: Creator[]) {
+  const f = userFile(userId);
+  const dir = path.dirname(f);
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(FILE, JSON.stringify(creators, null, 2));
+  fs.writeFileSync(f, JSON.stringify(creators, null, 2));
 }
 
+/* ── Telegram API ── */
 async function telegramAPI(token: string, method: string, body?: Record<string, unknown>) {
   const res = await fetch(`https://api.telegram.org/bot${token}/${method}`, {
     method: body ? "POST" : "GET",
@@ -41,105 +60,93 @@ async function telegramAPI(token: string, method: string, body?: Record<string, 
   return res.json();
 }
 
-// GET — liste tous les créateurs
-export async function GET() {
-  return NextResponse.json({ creators: load() });
-}
-
-function getAppUrl(_req: NextRequest): string {
+function getAppUrl(): string {
   const base = getWebhookBase();
-  if (!base) throw new Error("URL de production non configurée. Va dans Paramètres → App URL et entre ton URL Render.");
+  if (!base) throw new Error("URL de production non configurée — va dans Paramètres et entre ton URL Render.");
   return base;
 }
 
-// POST — ajouter un créateur ou action sur un créateur existant
+/* ── Routes ── */
+export async function GET(req: NextRequest) {
+  const userId = await getUserId(req);
+  if (!userId) return NextResponse.json({ error: "Non authentifié" }, { status: 401 });
+  return NextResponse.json({ creators: load(userId) });
+}
+
 export async function POST(req: NextRequest) {
+  const userId = await getUserId(req);
+  if (!userId) return NextResponse.json({ error: "Non authentifié" }, { status: 401 });
   const body = await req.json();
 
-  // Action sur un créateur existant
   if (body.action && body.id) {
-    const creators = load();
+    const creators = load(userId);
     const idx = creators.findIndex(c => c.id === body.id);
     if (idx === -1) return NextResponse.json({ error: "Créateur introuvable" }, { status: 404 });
 
     if (body.action === "toggle-ia") {
       creators[idx].enableIA = body.value;
-      save(creators);
+      save(userId, creators);
       return NextResponse.json({ ok: true });
     }
-
     if (body.action === "toggle-renew") {
       creators[idx].autoRenew = body.value;
-      save(creators);
+      save(userId, creators);
       return NextResponse.json({ ok: true });
     }
-
     if (body.action === "set-webhook") {
       const c = creators[idx];
-      if (!body.appUrl) return NextResponse.json({ error: "appUrl manquant" }, { status: 400 });
       let secureBase: string;
-      try { secureBase = getAppUrl(req); } catch (e) { return NextResponse.json({ error: String(e) }, { status: 400 }); }
+      try { secureBase = getAppUrl(); } catch (e) { return NextResponse.json({ error: String(e) }, { status: 400 }); }
       const webhookUrl = `${secureBase}/api/telegram/bot/${c.id}`;
       console.log("[set-webhook] URL:", webhookUrl);
       const result = await telegramAPI(c.botToken, "setWebhook", {
         url: webhookUrl,
         allowed_updates: ["message", "business_message", "business_connection"],
       });
-      console.log("[set-webhook] Telegram response:", JSON.stringify(result));
-      if (!result.ok) return NextResponse.json({ error: `${result.description ?? "Erreur"} (URL: ${webhookUrl})` }, { status: 400 });
+      console.log("[set-webhook] Telegram:", JSON.stringify(result));
+      if (!result.ok) return NextResponse.json({ error: `${result.description} (URL: ${webhookUrl})` }, { status: 400 });
       creators[idx].webhookSet = true;
       creators[idx].syncStatus = "active";
-      save(creators);
+      save(userId, creators);
       return NextResponse.json({ ok: true, webhookUrl });
     }
-
     if (body.action === "set-business") {
       creators[idx].businessConnection = body.username || null;
-      save(creators);
+      save(userId, creators);
       return NextResponse.json({ ok: true });
     }
-
     if (body.action === "assign-license") {
       creators[idx].license = body.license;
-      save(creators);
+      save(userId, creators);
       return NextResponse.json({ ok: true });
     }
-
     if (body.action === "renew-token") {
-      const newToken = body.botToken;
-      if (!newToken) return NextResponse.json({ error: "Token manquant" }, { status: 400 });
-      const me = await telegramAPI(newToken, "getMe");
+      if (!body.botToken) return NextResponse.json({ error: "Token manquant" }, { status: 400 });
+      const me = await telegramAPI(body.botToken, "getMe");
       if (!me.ok) return NextResponse.json({ error: "Token invalide" }, { status: 400 });
-      creators[idx].botToken = newToken;
+      creators[idx].botToken = body.botToken;
       creators[idx].botUsername = `@${me.result.username}`;
-      // Reconnecte le webhook (force HTTPS)
-      let secureBase2: string;
-      try { secureBase2 = getAppUrl(req); } catch (e) { return NextResponse.json({ error: String(e) }, { status: 400 }); }
-      const webhookUrl = `${secureBase2}/api/telegram/bot/${creators[idx].id}`;
-      const wh = await telegramAPI(newToken, "setWebhook", {
-        url: webhookUrl,
+      let base: string;
+      try { base = getAppUrl(); } catch (e) { return NextResponse.json({ error: String(e) }, { status: 400 }); }
+      const wh = await telegramAPI(body.botToken, "setWebhook", {
+        url: `${base}/api/telegram/bot/${creators[idx].id}`,
         allowed_updates: ["message", "business_message", "business_connection"],
       });
       creators[idx].webhookSet = wh.ok;
       creators[idx].syncStatus = wh.ok ? "active" : "inactive";
-      save(creators);
+      save(userId, creators);
       return NextResponse.json({ ok: true });
     }
-
     return NextResponse.json({ error: "Action inconnue" }, { status: 400 });
   }
 
   // Créer un nouveau créateur
   const { name, botToken } = body;
   if (!name || !botToken) return NextResponse.json({ error: "Nom et token requis" }, { status: 400 });
-
-  // Vérifie le token
   const me = await telegramAPI(botToken, "getMe");
-  if (!me.ok) return NextResponse.json({ error: "Token bot invalide — vérifie sur @BotFather" }, { status: 400 });
+  if (!me.ok) return NextResponse.json({ error: "Token bot invalide" }, { status: 400 });
 
-  const creators = load();
-
-  // Vérifie doublon
+  const creators = load(userId);
   if (creators.find(c => c.botToken === botToken)) {
     return NextResponse.json({ error: "Ce bot est déjà enregistré" }, { status: 400 });
   }
@@ -159,21 +166,19 @@ export async function POST(req: NextRequest) {
   };
 
   creators.push(creator);
-  save(creators);
-
+  save(userId, creators);
   return NextResponse.json({ ok: true, creator });
 }
 
-// DELETE — supprimer un créateur
 export async function DELETE(req: NextRequest) {
+  const userId = await getUserId(req);
+  if (!userId) return NextResponse.json({ error: "Non authentifié" }, { status: 401 });
   const { id } = await req.json();
-  const creators = load();
+  const creators = load(userId);
   const c = creators.find(cr => cr.id === id);
-
   if (c?.botToken && c.webhookSet) {
     await telegramAPI(c.botToken, "deleteWebhook").catch(() => {});
   }
-
-  save(creators.filter(cr => cr.id !== id));
+  save(userId, creators.filter(cr => cr.id !== id));
   return NextResponse.json({ ok: true });
 }

@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+*.session
+*.session-journal
+story_uploads/
+scheduler.log
+mg_err*.log
+mg_run*.log
+site.log
+snap_scheduled.json
+scheduled_stories.json
+story_accounts.json
+story_playlists.json

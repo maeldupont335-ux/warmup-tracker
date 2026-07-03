@@ -1,0 +1,15 @@
+[
+  {
+    "id": "1782944747915",
+    "name": "TEST1",
+    "botUsername": "@MYBOYTEST_bot",
+    "botToken": "8825182106:AAFKwez-yboXz8cZbiXAS4ccT6TNWOyn5jk",
+    "businessConnection": "@LOUNA_MANAGEMENT",
+    "license": "none",
+    "syncStatus": "inactive",
+    "autoRenew": false,
+    "enableIA": true,
+    "webhookSet": false,
+    "createdAt": "2026-07-01T22:25:47.915Z"
+  }
+]

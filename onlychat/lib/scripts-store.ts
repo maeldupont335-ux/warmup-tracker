@@ -1,5 +1,6 @@
 import fs from "fs";
 import path from "path";
+import { getDataDir } from "./data-dir";
 
 export interface PostMediaMessage {
   id: string;
@@ -39,11 +40,11 @@ export interface Script {
 }
 
 function filePath(creatorId: string) {
-  return path.join(process.cwd(), "data", "creators", `${creatorId}-scripts.json`);
+  return path.join(getDataDir(), "creators", `${creatorId}-scripts.json`);
 }
 
 function ensureDir(creatorId: string) {
-  const dir = path.join(process.cwd(), "data", "creators");
+  const dir = path.join(getDataDir(), "creators");
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
   return filePath(creatorId);
 }

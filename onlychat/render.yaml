@@ -5,7 +5,13 @@ services:
     rootDir: onlychat
     buildCommand: npm install && npm run build
     startCommand: npm start
+    disk:
+      name: onlychat-data
+      mountPath: /var/data
+      sizeGB: 1
     envVars:
+      - key: DATA_DIR
+        value: /var/data
       - key: ANTHROPIC_API_KEY
         sync: false
       - key: TELEGRAM_BOT_TOKEN
@@ -16,9 +22,7 @@ services:
         sync: false
       - key: SUPABASE_SERVICE_ROLE_KEY
         sync: false
-      - key: NEXT_PUBLIC_APP_URL
-        sync: false
       - key: NODE_ENV
         value: production
       - key: NEXT_PUBLIC_APP_URL
-        value: https://onlychat-ai.onrender.com
+        value: https://chat-ai-pro.onrender.com
