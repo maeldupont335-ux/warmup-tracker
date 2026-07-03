@@ -1061,7 +1061,7 @@ CLOUDINARY_API_KEY_CL = "588748259662185"
 CLOUDINARY_API_SECRET = "x0IrhR0Y06zAXQU2uo_ktUizigI"
 CLOUDINARY_FOLDER     = "default"   # dossier Cloudinary = nom du profil (rempli au chargement)
 CATEGORY_ID_SNAP      = "177234"
-CLAUDE_API_KEY        = os.environ.get("CLAUDE_API_KEY", "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")
+CLAUDE_API_KEY        = os.environ.get("CLAUDE_API_KEY", "REMOVED")
 SNAP_SCHED_FILE       = _DATA_DIR / "snap_scheduled.json"
 _snap_scheduled: list[dict] = _load_json(SNAP_SCHED_FILE, [])
 SNAP_BLOCKED_FILE     = _DATA_DIR / "snap_blocked_until.json"
@@ -1668,9 +1668,9 @@ async def api_auth_login(req: dict = Body(...)):
     if not username or not password:
         raise HTTPException(401, "Identifiant et mot de passe requis")
     profs = _load_profiles()
-    # Match by profile `login` field or fallback to profile name (lowercase)
+    # Match ONLY by explicit `login` field — profiles without a login field cannot log in
     prof = next((p for p in profs if
-                 p.get("login", p.get("name","")).strip().lower() == username), None)
+                 p.get("login", "").strip().lower() == username), None)
     if not prof:
         raise HTTPException(401, "Identifiant ou mot de passe incorrect")
     pw_hash = prof.get("password_hash", "")
@@ -1711,11 +1711,18 @@ def _hash_pin(pin: str) -> str:
     return hashlib.sha256(pin.strip().encode()).hexdigest()
 
 @app.get("/api/profiles")
-async def api_get_profiles():
+async def api_get_profiles(request: Request):
+    session_pid = _get_session_profile(request)
     profs = _load_profiles()
+    # Non-admins only see their own profile
+    if session_pid:
+        me = next((p for p in profs if p["id"] == session_pid), None)
+        if me and not me.get("is_admin"):
+            profs = [me]
     safe = [{**p,
              "pin_set": bool(p.get("pin_hash")),
              "password_set": bool(p.get("password_hash")),
+             "is_admin": bool(p.get("is_admin")),
              "pin_hash": None,
              "password_hash": None} for p in profs]
     return {"profiles": safe, "active_id": _get_active_profile_id()}
@@ -1981,8 +1988,14 @@ async def api_delete_profile(pid: str):
     return {"ok": True}
 
 @app.post("/api/profiles/{pid}/activate")
-async def api_activate_profile(pid: str, req: dict = Body(default={})):
+async def api_activate_profile(pid: str, req: dict = Body(default={}), request: Request = None):
     profs = _load_profiles()
+    # Non-admins cannot switch profiles
+    session_pid = _get_session_profile(request) if request else None
+    if session_pid:
+        me = next((p for p in profs if p["id"] == session_pid), None)
+        if me and not me.get("is_admin"):
+            raise HTTPException(403, "Accès refusé")
     prof  = next((p for p in profs if p["id"] == pid), None)
     if not prof:
         raise HTTPException(404, "Profil introuvable")
@@ -3451,16 +3464,38 @@ function _profileAvatar(name){return(name||'?')[0].toUpperCase();}
 function _renderSbProfile(){
   const prof=_profiles.find(p=>p.id===_activeProfileId)||_profiles[0];
   if(!prof)return;
+  const isAdmin=!!prof.is_admin;
   document.getElementById('sbProfileAvatar').textContent=_profileAvatar(prof.name);
   document.getElementById('sbProfileName').textContent=prof.name;
+  // Admin: show switcher. Non-admin: profile name only, no click
+  const btn=document.getElementById('sbProfileBtn');
+  if(isAdmin){
+    btn.onclick=toggleProfileMenu;btn.style.cursor='pointer';
+    btn.querySelector('svg').style.display='';
+  } else {
+    btn.onclick=null;btn.style.cursor='default';
+    btn.querySelector('svg').style.display='none';
+  }
   const list=document.getElementById('sbProfileList');
-  list.innerHTML=_profiles.map(p=>`
-    <button class="sb-profile-menu-item${p.id===_activeProfileId?' active-prof':''}" onclick="switchProfile('${p.id}')">
-      <span style="width:18px;height:18px;border-radius:5px;background:linear-gradient(135deg,#7c3aed,#4f46e5);display:inline-flex;align-items:center;justify-content:center;font-size:.6rem;font-weight:800;color:#fff;flex-shrink:0">${_profileAvatar(p.name)}</span>
-      <span style="flex:1;text-align:left;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${p.name}</span>
-      ${p.pin_set?'<span style="font-size:.7rem;opacity:.6" title="Profil protégé par PIN">🔒</span>':''}
-      ${p.id===_activeProfileId?'<span style="width:6px;height:6px;border-radius:50%;background:var(--green);flex-shrink:0"></span>':''}
-    </button>`).join('');
+  if(isAdmin){
+    list.innerHTML=_profiles.map(p=>`
+      <button class="sb-profile-menu-item${p.id===_activeProfileId?' active-prof':''}" onclick="switchProfile('${p.id}')">
+        <span style="width:18px;height:18px;border-radius:5px;background:linear-gradient(135deg,#7c3aed,#4f46e5);display:inline-flex;align-items:center;justify-content:center;font-size:.6rem;font-weight:800;color:#fff;flex-shrink:0">${_profileAvatar(p.name)}</span>
+        <span style="flex:1;text-align:left;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${p.name}</span>
+        ${p.pin_set?'<span style="font-size:.7rem;opacity:.6">🔒</span>':''}
+        ${p.id===_activeProfileId?'<span style="width:6px;height:6px;border-radius:50%;background:var(--green);flex-shrink:0"></span>':''}
+      </button>`).join('');
+  } else {
+    list.innerHTML='';
+  }
+  // Hide profile management buttons for non-admins
+  const manageBtn=document.querySelector('.sb-profile-menu-item[onclick="openProfileManager()"]');
+  const newBtn=document.querySelector('.sb-profile-menu-item[onclick="newProfileQuick()"]');
+  const sep=document.querySelector('.sb-profile-menu-sep');
+  [manageBtn,newBtn,sep].forEach(el=>{if(el)el.style.display=isAdmin?'':'none';});
+  // Hide Settings nav item for non-admins
+  const settingsBtn=document.querySelector('.sb-item[data-page="settings"]');
+  if(settingsBtn) settingsBtn.style.display=isAdmin?'':'none';
 }
 
 function toggleProfileMenu(){
