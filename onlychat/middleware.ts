@@ -39,7 +39,8 @@ export async function middleware(req: NextRequest) {
   if (path.startsWith("/dashboard") || (
     path.startsWith("/api") &&
     !path.startsWith("/api/telegram/bot") &&
-    !path.startsWith("/api/media/")
+    !path.startsWith("/api/media/") &&
+    !path.startsWith("/api/admin/")
   )) {
     if (!user) {
       return NextResponse.redirect(new URL("/login", req.url));
