@@ -2,6 +2,18 @@ import fs from "fs";
 import path from "path";
 import { getDataDir } from "./data-dir";
 import type { StyleProfile } from "./style-analyzer";
+import { SEED_PROFILES } from "./seed-profiles";
+
+// Initialise les profils seeds si le créateur n'a aucun profil
+export function initSeedProfiles(creatorId: string) {
+  const index = loadStyleIndex(creatorId);
+  if (index.profiles.length > 0) return;
+  const seeds = SEED_PROFILES[creatorId];
+  if (!seeds) return;
+  for (const seed of seeds) {
+    saveStyleProfile(seed.creatorId, seed.profile, seed.profileName, true);
+  }
+}
 
 export interface StyleProfileMeta {
   slug: string;
@@ -44,6 +56,8 @@ function saveStyleIndex(creatorId: string, index: StyleIndex) {
 
 export function loadActiveStyleProfile(creatorId: string): StyleProfile | null {
   try {
+    // Auto-initialise les profils seeds si aucun profil existant
+    initSeedProfiles(creatorId);
     // Nouveau système multi-profils
     const index = loadStyleIndex(creatorId);
     if (index.active) {
