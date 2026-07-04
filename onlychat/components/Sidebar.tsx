@@ -3,7 +3,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import {
   MessageCircle, LayoutDashboard, Users, BarChart3,
-  Settings, LogOut, Bell, Zap, MessagesSquare, Brain, Bot, CreditCard, ShieldCheck
+  Settings, LogOut, Bell, Zap, MessagesSquare, Brain, Bot, CreditCard, ShieldCheck, DollarSign
 } from "lucide-react";
 import { createClient } from "@/lib/supabase-browser";
 import { useEffect, useState } from "react";
@@ -22,10 +22,12 @@ const nav = [
 export default function Sidebar() {
   const pathname = usePathname();
   const [isAdmin, setIsAdmin] = useState(false);
+  const [balance, setBalance] = useState<number | null>(null);
 
   useEffect(() => {
     fetch("/api/billing").then(r => r.ok ? r.json() : null).then(d => {
       if (d?.isAdmin) setIsAdmin(true);
+      if (d?.billing?.balance !== undefined) setBalance(d.billing.balance);
     }).catch(() => {});
   }, []);
 
@@ -79,6 +81,21 @@ export default function Sidebar() {
           );
         })}
       </nav>
+
+      {/* Solde */}
+      {balance !== null && (
+        <div className="px-4 pb-2">
+          <Link href="/dashboard/billing"
+            className="flex items-center justify-between px-3 py-2.5 rounded-xl transition-all hover:bg-white/5"
+            style={{ background: "rgba(16,185,129,0.06)", border: "1px solid rgba(16,185,129,0.15)" }}>
+            <div className="flex items-center gap-2">
+              <DollarSign size={14} style={{ color: "#10b981" }} />
+              <span className="text-xs font-medium" style={{ color: "#10b981" }}>Solde</span>
+            </div>
+            <span className="text-sm font-black" style={{ color: "#10b981" }}>${balance.toFixed(2)}</span>
+          </Link>
+        </div>
+      )}
 
       {/* Bottom */}
       <div className="px-4 py-4 border-t space-y-1" style={{ borderColor: "#1e1e2e" }}>

@@ -4,7 +4,11 @@ import {
   ADMIN_EMAIL, LICENSE_PRICE_USD,
   loadUserBilling, saveUserBilling, addTransaction,
   purchaseLicense, getPlatformStats,
+  purchaseCreatorLicense, setCreatorAutoRenew, autoRenewExpiredLicenses,
 } from "@/lib/billing-store";
+import fs from "fs";
+import path from "path";
+import { getDataDir } from "@/lib/data-dir";
 
 async function getUser(req: NextRequest) {
   const supabase = createServerClient(
@@ -26,12 +30,14 @@ export async function GET(req: NextRequest) {
     return NextResponse.json(getPlatformStats());
   }
 
+  autoRenewExpiredLicenses(user.id);
   const billing = loadUserBilling(user.id, user.email ?? "");
   if (!billing.email && user.email) {
     billing.email = user.email;
     saveUserBilling(billing);
   }
-  return NextResponse.json({ billing, licensePrice: LICENSE_PRICE_USD, isAdmin });
+  const creators = _loadCreatorsForUser(user.id);
+  return NextResponse.json({ billing, licensePrice: LICENSE_PRICE_USD, isAdmin, creators });
 }
 
 // POST — actions billing
@@ -69,11 +75,38 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ ok: true });
   }
 
-  // Acheter une licence
+  // Acheter une licence (ancienne, globale)
   if (body.action === "buy-license") {
     const result = purchaseLicense(user.id);
     return NextResponse.json(result);
   }
 
+  // Acheter une licence par créateur
+  if (body.action === "buy-creator-license") {
+    const { creatorId, creatorName } = body;
+    if (!creatorId) return NextResponse.json({ error: "creatorId requis" }, { status: 400 });
+    // Auto-renew les licences expirées d'abord
+    autoRenewExpiredLicenses(user.id);
+    const result = purchaseCreatorLicense(user.id, creatorId, creatorName ?? creatorId);
+    return NextResponse.json(result);
+  }
+
+  // Toggle auto-renouvellement
+  if (body.action === "toggle-autorenew") {
+    const { creatorId, autoRenew } = body;
+    if (!creatorId) return NextResponse.json({ error: "creatorId requis" }, { status: 400 });
+    setCreatorAutoRenew(user.id, creatorId, !!autoRenew);
+    return NextResponse.json({ ok: true });
+  }
+
   return NextResponse.json({ error: "Action inconnue" }, { status: 400 });
+}
+
+// Helper pour récupérer les créateurs depuis le fichier utilisateur
+function _loadCreatorsForUser(userId: string): { id: string; name: string }[] {
+  try {
+    const f = path.join(getDataDir(), "users", `${userId}-creators.json`);
+    if (!fs.existsSync(f)) return [];
+    return JSON.parse(fs.readFileSync(f, "utf-8"));
+  } catch { return []; }
 }

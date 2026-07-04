@@ -19,6 +19,14 @@ export interface BillingTransaction {
   createdAt: string;
 }
 
+export interface CreatorLicense {
+  creatorId: string;
+  creatorName: string;
+  active: boolean;
+  expiry: string | null;     // ISO date
+  autoRenew: boolean;
+}
+
 export interface UserBilling {
   userId: string;
   email: string;
@@ -28,6 +36,7 @@ export interface UserBilling {
   totalCommissionUsd: number;
   licenseActive: boolean;
   licenseExpiry: string | null;
+  creatorLicenses: Record<string, CreatorLicense>; // clé = creatorId
   transactions: BillingTransaction[];
 }
 
@@ -51,12 +60,18 @@ function userBillingFile(userId: string) {
 export function loadUserBilling(userId: string, email = ""): UserBilling {
   try {
     const f = userBillingFile(userId);
-    if (fs.existsSync(f)) return JSON.parse(fs.readFileSync(f, "utf-8"));
+    if (fs.existsSync(f)) {
+      const data = JSON.parse(fs.readFileSync(f, "utf-8"));
+      // Migration : ajouter creatorLicenses si absent
+      if (!data.creatorLicenses) data.creatorLicenses = {};
+      return data;
+    }
   } catch { /* ignore */ }
   return {
     userId, email, balance: 0,
     totalStarsSold: 0, totalRevenueUsd: 0, totalCommissionUsd: 0,
-    licenseActive: false, licenseExpiry: null, transactions: [],
+    licenseActive: false, licenseExpiry: null,
+    creatorLicenses: {}, transactions: [],
   };
 }
 
@@ -125,6 +140,93 @@ export function recordStarsSale(
       saveFans(creatorId, fans);
     }
   } catch { /* ignore */ }
+}
+
+/** Vérifie si la licence d'un créateur est active */
+export function isCreatorLicenseActive(userId: string, creatorId: string): boolean {
+  const billing = loadUserBilling(userId);
+  const lic = billing.creatorLicenses?.[creatorId];
+  if (!lic) return false;
+  return lic.active && !!lic.expiry && new Date(lic.expiry) > new Date();
+}
+
+/** Achète une licence pour un créateur (30$/mois) */
+export function purchaseCreatorLicense(
+  userId: string, creatorId: string, creatorName: string
+): { ok: boolean; error?: string } {
+  const billing = loadUserBilling(userId);
+  if (billing.balance < LICENSE_PRICE_USD)
+    return { ok: false, error: `Solde insuffisant (${billing.balance.toFixed(2)}$ / ${LICENSE_PRICE_USD}$ requis)` };
+
+  billing.balance -= LICENSE_PRICE_USD;
+  const expiry = new Date();
+  expiry.setDate(expiry.getDate() + 30);
+
+  billing.creatorLicenses = billing.creatorLicenses ?? {};
+  billing.creatorLicenses[creatorId] = {
+    creatorId, creatorName,
+    active: true,
+    expiry: expiry.toISOString(),
+    autoRenew: billing.creatorLicenses[creatorId]?.autoRenew ?? false,
+  };
+
+  billing.transactions.unshift({
+    id: Date.now().toString(), type: "license",
+    amount: -LICENSE_PRICE_USD,
+    description: `Licence 30j — ${creatorName}`,
+    createdAt: new Date().toISOString(),
+  });
+
+  saveUserBilling(billing);
+  return { ok: true };
+}
+
+/** Active/désactive le renouvellement automatique */
+export function setCreatorAutoRenew(userId: string, creatorId: string, autoRenew: boolean) {
+  const billing = loadUserBilling(userId);
+  billing.creatorLicenses = billing.creatorLicenses ?? {};
+  if (!billing.creatorLicenses[creatorId]) {
+    billing.creatorLicenses[creatorId] = { creatorId, creatorName: creatorId, active: false, expiry: null, autoRenew };
+  } else {
+    billing.creatorLicenses[creatorId].autoRenew = autoRenew;
+  }
+  saveUserBilling(billing);
+}
+
+/** Vérifie et renouvelle automatiquement les licences expirées */
+export function autoRenewExpiredLicenses(userId: string): void {
+  const billing = loadUserBilling(userId);
+  if (!billing.creatorLicenses) return;
+  let changed = false;
+
+  for (const [creatorId, lic] of Object.entries(billing.creatorLicenses)) {
+    if (!lic.autoRenew) continue;
+    const expired = !lic.expiry || new Date(lic.expiry) <= new Date();
+    if (!expired) continue;
+
+    if (billing.balance < LICENSE_PRICE_USD) {
+      lic.active = false;
+      changed = true;
+      continue;
+    }
+
+    billing.balance -= LICENSE_PRICE_USD;
+    const expiry = new Date();
+    expiry.setDate(expiry.getDate() + 30);
+    lic.active = true;
+    lic.expiry = expiry.toISOString();
+    billing.creatorLicenses[creatorId] = lic;
+
+    billing.transactions.unshift({
+      id: Date.now().toString() + creatorId.slice(-4), type: "license",
+      amount: -LICENSE_PRICE_USD,
+      description: `Renouvellement auto licence 30j — ${lic.creatorName}`,
+      createdAt: new Date().toISOString(),
+    });
+    changed = true;
+  }
+
+  if (changed) saveUserBilling(billing);
 }
 
 /** Stats globales de la plateforme (admin seulement) */

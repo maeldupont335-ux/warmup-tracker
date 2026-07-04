@@ -11,7 +11,7 @@ import type { Creator } from "@/app/api/creators/route";
 import type { Script, ScriptStep } from "@/lib/scripts-store";
 import type { Fan } from "@/app/api/creators/[id]/fans/route";
 import { getDataDir } from "@/lib/data-dir";
-import { recordStarsSale } from "@/lib/billing-store";
+import { recordStarsSale, isCreatorLicenseActive, autoRenewExpiredLicenses } from "@/lib/billing-store";
 
 /* ─── Cherche le creator dans tous les fichiers users ─── */
 function findCreator(creatorId: string): { creator: Creator; userId: string } | null {
@@ -275,6 +275,13 @@ async function handleUpdate(creatorId: string, update: Record<string, unknown>) 
   if (!found || !found.creator.enableIA) return;
 
   const { creator, userId } = found;
+
+  // Vérifie la licence (auto-renouvelle si nécessaire)
+  autoRenewExpiredLicenses(userId);
+  if (!isCreatorLicenseActive(userId, creatorId)) {
+    console.log(`[Bot] Licence expirée ou absente pour créateur ${creatorId} — réponse bloquée`);
+    return;
+  }
 
   try {
     const msg = (update.business_message || update.message) as Record<string, unknown> | undefined;
