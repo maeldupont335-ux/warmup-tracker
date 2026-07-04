@@ -10,12 +10,9 @@ import { useEffect, useState } from "react";
 
 const nav = [
   { href: "/dashboard", label: "Vue d'ensemble", icon: LayoutDashboard },
-  { href: "/dashboard/connect", label: "Connecter le bot", icon: Bot },
   { href: "/dashboard/creators", label: "Mes créateurs", icon: Users },
   { href: "/dashboard/conversations", label: "Conversations", icon: MessagesSquare },
   { href: "/dashboard/analytics", label: "Analytics", icon: BarChart3 },
-  { href: "/dashboard/training", label: "Entraîner l'IA", icon: Brain },
-  { href: "/dashboard/settings", label: "Paramètres IA", icon: Settings },
   { href: "/dashboard/billing", label: "Facturation", icon: CreditCard },
 ];
 
