@@ -424,7 +424,7 @@ export default function BillingPage() {
           <p className="text-sm" style={{ color: "#6b7280" }}>Aucune transaction.</p>
         ) : (
           <div className="space-y-2">
-            {billing.transactions.map((tx) => (
+            {billing.transactions.filter(tx => tx.amount !== 0).map((tx) => (
               <div key={tx.id} className="flex items-center justify-between py-3 border-b last:border-0"
                 style={{ borderColor: "#1e1e2e" }}>
                 <div className="flex items-center gap-3">

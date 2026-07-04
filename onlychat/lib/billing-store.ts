@@ -177,6 +177,13 @@ export function purchaseCreatorLicense(
   userId: string, creatorId: string, creatorName: string
 ): { ok: boolean; error?: string } {
   const billing = loadUserBilling(userId);
+
+  // Guard : si ce créateur a déjà une licence active, ne pas débiter une deuxième fois
+  const existing = billing.creatorLicenses?.[creatorId];
+  if (existing?.active && existing?.expiry && new Date(existing.expiry) > new Date()) {
+    return { ok: true }; // déjà actif, rien à faire
+  }
+
   const fromPool = (billing.telegramLicensePool ?? 0) > 0;
 
   if (!fromPool && billing.balance < LICENSE_PRICE_USD)
