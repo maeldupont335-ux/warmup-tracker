@@ -48,7 +48,6 @@ function getMime(fileName: string) {
   return MIME_MAP[fileName.split(".").pop()?.toLowerCase() ?? ""] ?? "application/octet-stream";
 }
 
-/** Résout /api/media/... → chemin disque absolu */
 function resolveLocalPath(mediaUrl: string): string | null {
   const match = mediaUrl.match(/^\/api\/media\/(.+)$/);
   if (!match) return null;
@@ -67,7 +66,6 @@ async function sendText(token: string, chatId: number, text: string, bizId?: str
   return tg(token, "sendMessage", p);
 }
 
-/** Envoie 1 fichier (photo ou vidéo) en multipart binaire */
 async function sendMediaFile(token: string, chatId: number, mediaUrl: string, bizId?: string) {
   const isVideo = /\.(mp4|mov|webm|avi)$/i.test(mediaUrl);
   const localPath = resolveLocalPath(mediaUrl);
@@ -83,7 +81,6 @@ async function sendMediaFile(token: string, chatId: number, mediaUrl: string, bi
     const name = path.basename(localPath);
     form.append(field, new Blob([buf], { type: getMime(name) }), name);
   } else {
-    // Fallback : URL directe
     form.append(field, mediaUrl);
   }
 
@@ -95,7 +92,6 @@ async function sendMediaFile(token: string, chatId: number, mediaUrl: string, bi
   return json;
 }
 
-/** Envoie paid media en multipart avec attach:// (méthode officielle Telegram) */
 async function sendPaidMedia(token: string, chatId: number, mediaUrls: string[], stars: number, bizId?: string) {
   const form = new FormData();
   form.append("chat_id", String(chatId));
@@ -116,7 +112,6 @@ async function sendPaidMedia(token: string, chatId: number, mediaUrls: string[],
       form.append(attachKey, new Blob([buf], { type: getMime(name) }), name);
       mediaArray.push({ type: isVideo ? "video" : "photo", media: `attach://${attachKey}` });
     } else {
-      // Fallback URL publique
       mediaArray.push({ type: isVideo ? "video" : "photo", media: mediaUrl });
     }
   }
@@ -136,11 +131,14 @@ async function sendPaidMedia(token: string, chatId: number, mediaUrls: string[],
 async function sendScriptStep(
   token: string, chatId: number, step: ScriptStep,
   appBase: string, bizId?: string,
-  userId?: string, fanId?: string, scriptId?: string
+  userId?: string, fanId?: string, scriptId?: string,
+  forcePrice?: number  // pour envoyer au prix réduit
 ) {
-  const price = step.priceStars > 0
-    ? (step.discountEnabled && step.discountedPriceStars > 0 ? step.discountedPriceStars : step.priceStars)
-    : 0;
+  const price = forcePrice !== undefined
+    ? forcePrice
+    : step.priceStars > 0
+      ? (step.discountEnabled && step.discountedPriceStars > 0 ? step.discountedPriceStars : step.priceStars)
+      : 0;
 
   // 1. Message texte
   if (step.message.trim()) {
@@ -159,13 +157,11 @@ async function sendScriptStep(
   if (step.mediaUrls.filter(Boolean).length > 0) {
     await new Promise(r => setTimeout(r, 400));
     if (price > 0) {
-      // Contenu payant via Telegram Stars
       const result = await sendPaidMedia(token, chatId, step.mediaUrls.filter(Boolean), price, bizId);
       if (result?.ok && userId && fanId && scriptId) {
         recordStarsSale(userId, String(chatId), fanId, scriptId, price);
       }
     } else {
-      // Contenu gratuit — envoi binaire direct
       for (const mediaUrl of step.mediaUrls.filter(Boolean)) {
         await sendMediaFile(token, chatId, mediaUrl, bizId);
         await new Promise(r => setTimeout(r, 400));
@@ -181,13 +177,21 @@ async function sendScriptStep(
   }
 }
 
-/* ─── Nombre de messages requis entre étapes (approximatif, pas pile) ─── */
+/* ─── Nombre de messages requis entre étapes ─── */
 function messagesNeeded(speed: string): number {
   const rand = (min: number, max: number) => min + Math.floor(Math.random() * (max - min + 1));
-  if (speed === "fast")   return rand(1, 3);   // environ 2
-  if (speed === "slow")   return rand(8, 13);  // environ 10
-  return rand(4, 7);                           // environ 5 (normal)
+  if (speed === "fast")   return rand(1, 3);
+  if (speed === "slow")   return rand(8, 13);
+  return rand(4, 7);
 }
+
+/* ─── Mots-clés de réduction ─── */
+const DISCOUNT_KEYWORDS = [
+  "réduction", "discount", "moins cher", "trop cher", "c'est cher",
+  "j'ai pas l'argent", "jai pas l'argent", "j'ai pas d'argent", "jai pas d'argent",
+  "pas les moyens", "j'ai pas les sous", "je peux pas payer", "jpeux pas",
+  "promo", "offre", "remise", "prix", "cher",
+];
 
 /* ─── Moteur de script ─── */
 async function runScriptEngine(
@@ -196,9 +200,12 @@ async function runScriptEngine(
   userId?: string, fanId?: string
 ): Promise<Fan> {
   const active = fan.activeScript!;
+
+  // Si on attend un paiement → ne pas renvoyer l'étape
+  if (active.waitingForPayment) return fan;
+
   const step = script.steps[active.stepIndex];
   if (!step) {
-    // Script terminé
     fan.activeScript = null;
     fan.completedScripts = [...(fan.completedScripts ?? []), script.id];
     await sendText(token, chatId, "✨", bizId);
@@ -208,20 +215,29 @@ async function runScriptEngine(
   const needed = messagesNeeded(step.messagesBetweenSteps ?? "normal");
 
   if (active.messagesSinceStep < needed) {
-    // Pas encore l'heure d'avancer — le bot répond en IA free
     return fan;
   }
 
   // Envoie l'étape
   await sendScriptStep(token, chatId, step, appBase, bizId, userId, fanId, script.id);
 
-  // Avance à la prochaine étape
-  active.stepIndex += 1;
-  active.messagesSinceStep = 0;
+  // Si contenu payant + skipFollowupIfPaid décoché → attendre paiement avant d'avancer
+  if (step.priceStars > 0 && !step.skipFollowupIfPaid) {
+    active.waitingForPayment = true;
+    active.mediaSentAt = new Date().toISOString();
+    active.discountOffered = false;
+    active.salePushSent = false;
+    // On ne réinitialise PAS messagesSinceStep car on ne change pas d'étape
+  } else {
+    // Avance à la prochaine étape (contenu gratuit OU skipFollowupIfPaid coché)
+    active.stepIndex += 1;
+    active.messagesSinceStep = 0;
+    active.waitingForPayment = false;
 
-  if (active.stepIndex >= script.steps.length) {
-    fan.activeScript = null;
-    fan.completedScripts = [...(fan.completedScripts ?? []), script.id];
+    if (active.stepIndex >= script.steps.length) {
+      fan.activeScript = null;
+      fan.completedScripts = [...(fan.completedScripts ?? []), script.id];
+    }
   }
 
   return fan;
@@ -276,7 +292,6 @@ async function updateFanProfile(
   lastMessage: string,
   history: { role: string; content: string }[]
 ) {
-  // Construire le contexte de la conversation
   const recentMessages = history.slice(-10).map(h =>
     `${h.role === "user" ? "Fan" : "Modèle"}: ${h.content}`
   ).join("\n");
@@ -317,7 +332,6 @@ async function handleUpdate(creatorId: string, update: Record<string, unknown>) 
 
   const { creator, userId } = found;
 
-  // Vérifie la licence (auto-renouvelle si nécessaire)
   autoRenewExpiredLicenses(userId);
   if (!isCreatorLicenseActive(userId, creatorId)) {
     console.log(`[Bot] Licence expirée ou absente pour créateur ${creatorId} — réponse bloquée`);
@@ -326,7 +340,7 @@ async function handleUpdate(creatorId: string, update: Record<string, unknown>) 
 
   try {
     const msg = (update.business_message || update.message) as Record<string, unknown> | undefined;
-    if (!msg?.text) return;
+    if (!msg) return;
     if ((msg.from as Record<string, unknown>)?.is_bot) return;
 
     const bizMsg = update.business_message as Record<string, unknown> | undefined;
@@ -335,35 +349,128 @@ async function handleUpdate(creatorId: string, update: Record<string, unknown>) 
     const fanId = String(fromObj?.id ?? chatId);
     const fanUsername: string = (fromObj?.username as string) || "";
     const fanName: string = [fromObj?.first_name, fromObj?.last_name].filter(Boolean).join(" ") || fanUsername || fanId;
-    const userText: string = msg.text as string;
     const bizId: string | undefined = bizMsg?.business_connection_id as string | undefined;
     const appBase = getWebhookBase();
 
     // Enregistre / récupère le fan
     let fan = upsertFan(creator.id, fanId, { name: fanName, username: fanUsername || null });
-
-    // Vérifie si l'IA est désactivée pour ce fan
     if (!fan.enableIA) return;
 
-    // Charge les settings & scripts
     const settings = loadCreatorSettings(userId, creator.id);
     const scripts = loadScripts(creator.id);
     const activeScripts = scripts.filter(s => s.active);
+    const styleProfile = loadCreatorStyleProfile(creator.id);
 
-    // Mots déclencheurs sexuels → court-circuite le cooldown
+    /* ── Paiement Stars confirmé ── */
+    const successfulPayment = (msg as Record<string, unknown>)?.successful_payment as Record<string, unknown> | undefined;
+    if (successfulPayment) {
+      if (fan.activeScript?.waitingForPayment) {
+        const paidStars = successfulPayment.total_amount as number;
+        console.log(`[Bot] Paiement confirmé ${paidStars}⭐ pour fan ${fanId}`);
+        fan.activeScript.waitingForPayment = false;
+        fan.activeScript.stepIndex += 1;
+        fan.activeScript.messagesSinceStep = 999; // déclenche la prochaine étape rapidement
+        fan.activeScript.mediaSentAt = null;
+        if (fan.activeScript.stepIndex >= (scripts.find(s => s.id === fan.activeScript?.scriptId)?.steps.length ?? 0)) {
+          fan.completedScripts = [...(fan.completedScripts ?? []), fan.activeScript.scriptId];
+          fan.activeScript = null;
+        }
+        const fans = loadFans(creator.id);
+        const idx = fans.findIndex(f => f.telegramId === fanId);
+        if (idx >= 0) fans[idx] = fan;
+        saveFans(creator.id, fans);
+      }
+      return;
+    }
+
+    const userText: string = (msg.text as string) || "";
+    if (!userText) return;
+
+    /* ── Gestion du paiement en attente ── */
+    if (fan.activeScript?.waitingForPayment && fan.activeScript.mediaSentAt) {
+      const script = scripts.find(s => s.id === fan.activeScript?.scriptId);
+      const step = script?.steps[fan.activeScript.stepIndex];
+      const elapsed = Date.now() - new Date(fan.activeScript.mediaSentAt).getTime();
+      const TEN_MIN = 10 * 60 * 1000;
+      const fanWantsDiscount = DISCOUNT_KEYWORDS.some(kw => userText.toLowerCase().includes(kw));
+
+      if (step) {
+        // Proposer le prix réduit si : fan demande réduction OU 10 min passées sans paiement
+        if (step.discountEnabled && step.discountedPriceStars > 0 && !fan.activeScript.discountOffered
+          && (fanWantsDiscount || elapsed >= TEN_MIN)) {
+          fan.activeScript.discountOffered = true;
+          // Générer un message de proposition de prix réduit
+          const discountPrompt = buildCreatorPrompt(settings, styleProfile) + `
+Le fan n'a pas encore payé pour le contenu exclusif que tu lui as envoyé (${step.priceStars}⭐).
+${fanWantsDiscount ? "Il vient de dire : \"" + userText + "\" — il semble vouloir une réduction ou dire qu'il a pas les moyens." : "Cela fait 10 minutes sans paiement."}
+
+Propose-lui le même contenu à prix réduit : ${step.discountedPriceStars}⭐ au lieu de ${step.priceStars}⭐.
+Sois naturelle, sympa, comme si tu faisais une exception juste pour lui.
+1-2 messages courts maximum, séparés par |||
+Ne mentionne pas de chiffres exacts si ça sonne robot, parle de "tarif spécial", "offre", "prix spécial pour toi".`;
+
+          const discountMsg = await chatWithAI(discountPrompt, userText, []);
+          const bubbles = (discountMsg.includes("|||") ? discountMsg.split("|||") : discountMsg.split("\n"))
+            .map((b: string) => b.trim()).filter((b: string) => b.length > 0).slice(0, 2);
+
+          for (let i = 0; i < bubbles.length; i++) {
+            if (i > 0) { await sendTyping(creator.botToken, chatId, bizId); await new Promise(r => setTimeout(r, 4000)); }
+            await sendText(creator.botToken, chatId, bubbles[i], bizId);
+          }
+          await new Promise(r => setTimeout(r, 2000));
+          // Renvoie le même média au prix réduit
+          await sendScriptStep(creator.botToken, chatId, step, appBase, bizId, userId, fanId, script!.id, step.discountedPriceStars);
+
+          const fans = loadFans(creator.id);
+          const idx = fans.findIndex(f => f.telegramId === fanId);
+          if (idx >= 0) fans[idx] = fan;
+          saveFans(creator.id, fans);
+          return;
+        }
+
+        // Si 10 min passées, pas de réduction possible ou déjà proposée → push vente puis stop
+        if (elapsed >= TEN_MIN && !fan.activeScript.salePushSent) {
+          fan.activeScript.salePushSent = true;
+          const salePushPrompt = buildCreatorPrompt(settings, styleProfile) + `
+Le fan n'a pas payé pour le contenu exclusif que tu lui as proposé (${step.priceStars}⭐). Cela fait plus de 10 minutes.
+
+Fais une DERNIÈRE tentative de vente : rappelle-lui qu'il peut encore accéder au contenu, joue sur la rareté/l'exclusivité.
+Sois naturelle, séduisante, pas agressive. 1-2 messages maximum séparés par |||
+Exemples de style pour t'inspirer :
+${styleProfile?.realExamples?.slice(0, 3).map(e => `Fan: "${e.fanMessage}"\nToi: "${e.yourReply}"`).join("\n---\n") ?? ""}`;
+
+          const pushMsg = await chatWithAI(salePushPrompt, userText, []);
+          const bubbles = (pushMsg.includes("|||") ? pushMsg.split("|||") : pushMsg.split("\n"))
+            .map((b: string) => b.trim()).filter((b: string) => b.length > 0).slice(0, 2);
+
+          for (let i = 0; i < bubbles.length; i++) {
+            if (i > 0) { await sendTyping(creator.botToken, chatId, bizId); await new Promise(r => setTimeout(r, 4000)); }
+            await sendText(creator.botToken, chatId, bubbles[i], bizId);
+          }
+
+          // Stop le script
+          fan.activeScript = null;
+
+          const fans = loadFans(creator.id);
+          const idx = fans.findIndex(f => f.telegramId === fanId);
+          if (idx >= 0) fans[idx] = fan;
+          saveFans(creator.id, fans);
+          return;
+        }
+      }
+    }
+
+    /* ── Mots déclencheurs sexuels → court-circuite le cooldown ── */
     const SEXY_KEYWORDS = ["nude", "t'es sexy", "tes sexy", "fesse", "chatte", "t'es bonne", "tes bonne", "photo de toi", "montre toi", "nue", "seins", "cul"];
     const fanSaidSexy = SEXY_KEYWORDS.some(kw => userText.toLowerCase().includes(kw));
 
-    // Cooldown : X jours depuis le PREMIER message du fan
     const firstMsgAt = new Date(fan.firstMessageAt ?? fan.lastInteraction);
     const cooldownDays = settings.sexualizationCooldownDays ?? 2;
     const cooldownMs = cooldownDays * 24 * 60 * 60 * 1000;
     const cooldownOk = (Date.now() - firstMsgAt.getTime()) >= cooldownMs;
-
-    // Peut lancer le script : cooldown respecté OU mot déclencheur
     const canLaunchScript = cooldownOk || fanSaidSexy;
 
-    // ── 1. Déclenchement par nom de script (mot-clé exact) ──
+    /* ── Déclenchement par nom de script (mot-clé exact) ── */
     const keyword = userText.trim().toLowerCase();
     const keywordScript = activeScripts.find(s =>
       s.name.toLowerCase().replace(/[^a-z0-9]/g, "") === keyword.replace(/[^a-z0-9]/g, "")
@@ -372,7 +479,7 @@ async function handleUpdate(creatorId: string, update: Record<string, unknown>) 
       fan.activeScript = { scriptId: keywordScript.id, stepIndex: 0, messagesSinceStep: 999, startedAt: new Date().toISOString() };
     }
 
-    // ── 2. Lancement de script — seulement si conditions remplies ──
+    /* ── Lancement de script ── */
     if (canLaunchScript && !fan.activeScript) {
       const completed = fan.completedScripts ?? [];
       const remaining = activeScripts.filter(s => !completed.includes(s.id));
@@ -380,15 +487,12 @@ async function handleUpdate(creatorId: string, update: Record<string, unknown>) 
       let chosenScript: Script | null = null;
 
       if (completed.length === 0) {
-        // Premier script = toujours celui marqué ⭐ First
         chosenScript = activeScripts.find(s => s.first) ?? remaining[0] ?? null;
       } else if (remaining.length > 0) {
-        // Scripts suivants = IA choisit le meilleur selon contexte
         chosenScript = await pickBestScript(remaining, fan, userText, settings);
       }
 
       if (chosenScript) {
-        // Warm-up avant le PREMIER script seulement
         if (completed.length === 0 && !fan.warmupSent) {
           fan.warmupSent = true;
           const fansWu = loadFans(creator.id);
@@ -396,7 +500,6 @@ async function handleUpdate(creatorId: string, update: Record<string, unknown>) 
           if (wuIdx >= 0) fansWu[wuIdx] = fan;
           saveFans(creator.id, fansWu);
 
-          const styleProfile = loadCreatorStyleProfile(creator.id);
           const warmupPrompt = buildCreatorPrompt(settings, styleProfile) + `
 Le fan vient de te parler. Tu vas bientôt lui envoyer du contenu exclusif.
 Envoie 2-3 messages courts et naturels pour créer de l'anticipation sans mentionner de photo/vidéo explicitement.
@@ -412,7 +515,7 @@ Sois mystérieuse, taquine, donne envie. Format: sépare chaque message par |||`
 
           const warmupReply = await chatWithAI(warmupPrompt, userText, []);
           const warmupBubbles = (warmupReply.includes("|||") ? warmupReply.split("|||") : warmupReply.split("\n"))
-            .map(b => b.trim()).filter(b => b.length > 0).slice(0, 3);
+            .map((b: string) => b.trim()).filter((b: string) => b.length > 0).slice(0, 3);
 
           for (let i = 0; i < warmupBubbles.length; i++) {
             if (i > 0) {
@@ -425,41 +528,40 @@ Sois mystérieuse, taquine, donne envie. Format: sépare chaque message par |||`
         }
 
         fan.activeScript = { scriptId: chosenScript.id, stepIndex: 0, messagesSinceStep: 999, startedAt: new Date().toISOString() };
-        console.log(`[Bot] Script choisi : "${chosenScript.name}" (${completed.length === 0 ? "premier/étoile" : "IA pick"}) pour fan ${fanId}`);
+        console.log(`[Bot] Script choisi : "${chosenScript.name}" pour fan ${fanId}`);
       }
     }
 
-    // ── 3. Incrémente le compteur de messages de l'étape en cours ──
-    if (fan.activeScript) {
+    /* ── Incrémente compteur de messages ── */
+    if (fan.activeScript && !fan.activeScript.waitingForPayment) {
       fan.activeScript.messagesSinceStep += 1;
     }
 
-    // ── 4. Exécute le moteur de script si actif ──
+    /* ── Exécute le moteur de script si actif ── */
     let scriptHandled = false;
-    if (fan.activeScript) {
-      const script = scripts.find(s => s.id === fan.activeScript?.scriptId);
+    const activeScriptRef = fan.activeScript;
+    if (activeScriptRef && !activeScriptRef.waitingForPayment) {
+      const script = scripts.find(s => s.id === activeScriptRef.scriptId);
       if (script) {
-        const stepIdx = fan.activeScript.stepIndex;
+        const stepIdx = activeScriptRef.stepIndex;
         const step = script.steps[stepIdx];
         const needed = messagesNeeded(step?.messagesBetweenSteps ?? "normal");
 
-        if (fan.activeScript.messagesSinceStep >= needed) {
+        if (activeScriptRef.messagesSinceStep >= needed) {
           fan = await runScriptEngine(fan, script, creator.botToken, chatId, appBase, bizId, userId, fanId);
           scriptHandled = true;
         }
       }
     }
 
-    // ── 5. Sauvegarde le fan mis à jour ──
+    /* ── Sauvegarde le fan ── */
     const fans = loadFans(creator.id);
     const fanIdx = fans.findIndex(f => f.telegramId === fanId);
     if (fanIdx >= 0) fans[fanIdx] = fan;
     saveFans(creator.id, fans);
 
-    // ── 6. Réponse IA (si pas géré par le script) ──
-    if (!scriptHandled) {
-      const styleProfile = loadCreatorStyleProfile(creator.id);
-
+    /* ── Réponse IA ── */
+    {
       let history: { role: "user" | "assistant"; content: string }[] = [];
       let conversation;
       try {
@@ -467,17 +569,45 @@ Sois mystérieuse, taquine, donne envie. Format: sépare chaque message par |||`
         history = await getHistory(conversation.id, 30);
       } catch { /* Supabase optionnel */ }
 
-      // Extraire les questions déjà posées par le bot pour éviter les répétitions
-      const alreadyAsked = history
-        .filter(h => h.role === "assistant")
-        .map(h => h.content)
-        .join(" ");
+      const alreadyAsked = history.filter(h => h.role === "assistant").map(h => h.content).join(" ");
 
       const fanProfileSection = fan.fanProfile
-        ? `\n\nCE QUE TU SAIS SUR CE FAN :\n${fan.fanProfile}\nUtilise ces infos pour personnaliser tes réponses (appelle-le par son prénom si tu le connais, parle de ses intérêts...).\n`
+        ? `\n\nCE QUE TU SAIS SUR CE FAN :\n${fan.fanProfile}\nUtilise ces infos pour personnaliser tes réponses.\n`
         : "";
 
-      const systemPrompt = buildCreatorPrompt(settings, styleProfile) + fanProfileSection + `
+      // Exemples du style d'entraînement
+      const trainingExamples = styleProfile?.realExamples?.slice(0, 6)
+        .map((e: { fanMessage: string; yourReply: string }) => `Fan: "${e.fanMessage}"\nToi: "${e.yourReply}"`)
+        .join("\n---\n") ?? "";
+      const trainingSection = trainingExamples
+        ? `\n\nEXEMPLES DE TA FAÇON DE PARLER (reproduis ce style, ces expressions, ces émojis) :\n${trainingExamples}\n`
+        : "";
+
+      // Si le fan est dans un script, enrichit le prompt avec le contexte de la prochaine étape
+      let interStepContext = "";
+      if (fan.activeScript && !fan.activeScript.waitingForPayment && !scriptHandled) {
+        const activeScriptData = scripts.find(s => s.id === fan.activeScript?.scriptId);
+        const nextStep = activeScriptData?.steps[fan.activeScript.stepIndex];
+        if (nextStep) {
+          const needed = messagesNeeded(nextStep.messagesBetweenSteps ?? "normal");
+          const remaining = Math.max(0, needed - fan.activeScript.messagesSinceStep);
+          interStepContext = `
+
+TU ES EN TRAIN DE PRÉPARER LE TERRAIN (encore ~${remaining} messages avant d'envoyer du contenu exclusif) :
+${nextStep.preMediaTeaser ? `Indice sur le prochain contenu : "${nextStep.preMediaTeaser}"` : "Prépare le fan à recevoir quelque chose de spécial."}
+${nextStep.message ? `Prochain message du script : "${nextStep.message.slice(0, 60)}..."` : ""}
+- Crée l'envie naturellement, sans spoiler
+- Réponds au fan ET glisse une phrase qui crée l'anticipation
+- NE DIS PAS "j'ai une vidéo" ou "je t'envoie une photo", reste mystérieuse`;
+      }
+    }
+
+      if (fan.activeScript?.waitingForPayment) {
+        // Fan n'a pas encore payé — encourage sans être agressif
+        interStepContext = `\n\nLe fan n'a pas encore payé pour le contenu que tu lui as envoyé. Reste naturelle, parle avec lui normalement, tu peux subtilement rappeler que le contenu l'attend.`;
+      }
+
+      const systemPrompt = buildCreatorPrompt(settings, styleProfile) + fanProfileSection + trainingSection + interStepContext + `
 
 RÈGLES DE RÉPONSE — OBLIGATOIRES :
 - Réponds en 1, 2 ou 3 messages MAXIMUM, séparés par "|||"
@@ -495,15 +625,12 @@ Exemples corrects :
 "Oui je suis là 😊|||tu fais quoi en ce moment ?"
 "Pauline 😘"`;
 
-      // Délai naturel : attend en silence, puis typing 8 sec avant d'envoyer
       const delayMs = settings.responseDelayMinutes > 0
         ? settings.responseDelayMinutes * 60 * 1000
         : (20 + Math.floor(Math.random() * 40)) * 1000;
-      const TYPING_BEFORE_SEND = 8000; // 8 secondes de typing visible
+      const TYPING_BEFORE_SEND = 8000;
       const waitMs = Math.max(0, delayMs - TYPING_BEFORE_SEND);
-      // Attendre en silence
       await new Promise(r => setTimeout(r, waitMs));
-      // Puis typing visible 8 sec
       const typingInterval = setInterval(() => sendTyping(creator.botToken, chatId, bizId), 4500);
       await sendTyping(creator.botToken, chatId, bizId);
       await new Promise(r => setTimeout(r, TYPING_BEFORE_SEND));
@@ -511,19 +638,11 @@ Exemples corrects :
 
       const reply = await chatWithAI(systemPrompt, userText, history);
 
-      // Sépare en bulles sur ||| ou sur les sauts de ligne
-      const rawBubbles = reply.includes("|||")
-        ? reply.split("|||")
-        : reply.split(/\n{1,}/);
-
-      const bubbles = rawBubbles
-        .map(b => b.trim())
-        .filter(b => b.length > 0)
-        .slice(0, 3);
+      const rawBubbles = reply.includes("|||") ? reply.split("|||") : reply.split(/\n{1,}/);
+      const bubbles = rawBubbles.map((b: string) => b.trim()).filter((b: string) => b.length > 0).slice(0, 3);
 
       for (let i = 0; i < bubbles.length; i++) {
         if (i > 0) {
-          // Délai naturel entre bulles : 4 à 12 secondes
           const gap = (4000 + Math.random() * 8000);
           await sendTyping(creator.botToken, chatId, bizId);
           await new Promise(r => setTimeout(r, gap));
@@ -536,7 +655,6 @@ Exemples corrects :
         await saveMessage(conversation.id, "assistant", bubbles.join(" "));
       }
 
-      // Mise à jour du profil fan en arrière-plan (pas de await pour ne pas bloquer)
       updateFanProfile(creator.id, fanId, fan, userText, history).catch(() => {});
     }
 
@@ -550,7 +668,7 @@ Exemples corrects :
 interface PendingMsg { text: string; update: Record<string, unknown>; receivedAt: number; }
 const fanQueues = new Map<string, PendingMsg[]>();
 const fanTimers = new Map<string, ReturnType<typeof setTimeout>>();
-const DEBOUNCE_MS = 5000; // attendre 5s pour regrouper les messages
+const DEBOUNCE_MS = 5000;
 
 function enqueueFanMessage(creatorId: string, fanId: string, text: string, update: Record<string, unknown>) {
   const key = `${creatorId}_${fanId}`;
@@ -558,7 +676,6 @@ function enqueueFanMessage(creatorId: string, fanId: string, text: string, updat
   queue.push({ text, update, receivedAt: Date.now() });
   fanQueues.set(key, queue);
 
-  // Réinitialise le timer à chaque nouveau message
   const existing = fanTimers.get(key);
   if (existing) clearTimeout(existing);
 
@@ -568,7 +685,6 @@ function enqueueFanMessage(creatorId: string, fanId: string, text: string, updat
     fanQueues.delete(key);
     if (msgs.length === 0) return;
 
-    // Regrouper tous les textes en un seul message
     const combinedText = msgs.map(m => m.text).join("\n");
     const firstUpdate = msgs[0].update;
     const mergedUpdate = { ...firstUpdate };
@@ -593,7 +709,6 @@ export async function POST(
   const { creatorId } = await params;
   const update = await req.json() as Record<string, unknown>;
 
-  // Déduplique les updates Telegram (Telegram retente si réponse trop lente)
   const updateId = update.update_id as number | undefined;
   if (updateId) {
     const seenFile = path.join(getDataDir(), `seen-updates-${creatorId}.json`);
@@ -604,14 +719,20 @@ export async function POST(
     try { fs.writeFileSync(seenFile, JSON.stringify(seen)); } catch { /* ignore */ }
   }
 
-  // Extraire fanId pour le debounce
   const msg = (update.business_message || update.message) as Record<string, unknown> | undefined;
+
+  // Paiement Stars — transmettre directement à handleUpdate
+  const successfulPayment = (msg as Record<string, unknown> | undefined)?.successful_payment;
+  if (msg && successfulPayment) {
+    handleUpdate(creatorId, update).catch(err => console.error("[Bot payment error]", err));
+    return NextResponse.json({ ok: true });
+  }
+
   const text = msg?.text as string | undefined;
   if (msg && text && !(msg.from as Record<string, unknown>)?.is_bot) {
     const fromObj = msg.from as Record<string, unknown> | undefined;
     const chatId = (msg.chat as Record<string, unknown>)?.id as number;
     const fanId = String(fromObj?.id ?? chatId);
-    // Mettre en queue avec debounce 5s
     enqueueFanMessage(creatorId, fanId, text, update);
   }
 

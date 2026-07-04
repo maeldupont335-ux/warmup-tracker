@@ -10,6 +10,10 @@ export interface ActiveScript {
   stepIndex: number;           // étape actuelle (0-based)
   messagesSinceStep: number;   // messages échangés depuis la dernière étape
   startedAt: string;
+  waitingForPayment?: boolean; // étape envoyée, en attente de paiement Stars
+  mediaSentAt?: string | null; // timestamp quand le média payant a été envoyé
+  discountOffered?: boolean;   // prix réduit déjà proposé pour cette étape
+  salePushSent?: boolean;      // tentative de vente déjà faite
 }
 
 export interface Fan {
