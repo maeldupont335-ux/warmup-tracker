@@ -227,6 +227,52 @@ async function runScriptEngine(
   return fan;
 }
 
+/* ─── Mise à jour profil fan ─── */
+async function updateFanProfile(
+  creatorId: string,
+  fanId: string,
+  fan: Fan,
+  lastMessage: string,
+  history: { role: string; content: string }[]
+) {
+  // Construire le contexte de la conversation
+  const recentMessages = history.slice(-10).map(h =>
+    `${h.role === "user" ? "Fan" : "Modèle"}: ${h.content}`
+  ).join("\n");
+  const context = recentMessages + `\nFan: ${lastMessage}`;
+
+  const extractPrompt = `Tu es un assistant qui analyse des conversations pour extraire les informations personnelles partagées par un fan.
+
+Voici la conversation récente :
+${context}
+
+Profil actuel du fan :
+${fan.fanProfile || "(aucun profil pour l'instant)"}
+
+Mets à jour le profil du fan en français avec UNIQUEMENT les informations qu'il a lui-même mentionnées. Format compact, une ligne par info connue. Si une info est déjà dans le profil et toujours valide, garde-la. N'invente rien.
+
+Exemple de format :
+Prénom : Yoann
+Âge : 33 ans
+Ville/Région : Rhône-Alpes
+Métier : mécanicien auto indépendant
+Situation : célibataire
+Centres d'intérêt : aime les femmes de 20-25 ans, cherche une fille coquine sans prise de tête
+Se décrit comme : pas le plus beau, un peu enrobé, "gros nounours" joueur
+
+Réponds UNIQUEMENT avec le profil mis à jour, rien d'autre. Si aucune nouvelle info, réponds "(inchangé)".`;
+
+  const updated = await chatWithAI(extractPrompt, "", []);
+  if (updated && updated !== "(inchangé)" && updated.length > 5) {
+    const fans = loadFans(creatorId);
+    const idx = fans.findIndex(f => f.telegramId === fanId);
+    if (idx >= 0) {
+      fans[idx].fanProfile = updated.trim();
+      saveFans(creatorId, fans);
+    }
+  }
+}
+
 /* ─── Route principale ─── */
 export async function POST(
   req: NextRequest,
@@ -379,7 +425,11 @@ Sois mystérieuse, taquine, donne envie. Format: sépare chaque message par |||`
         .map(h => h.content)
         .join(" ");
 
-      const systemPrompt = buildCreatorPrompt(settings, styleProfile) + `
+      const fanProfileSection = fan.fanProfile
+        ? `\n\nCE QUE TU SAIS SUR CE FAN :\n${fan.fanProfile}\nUtilise ces infos pour personnaliser tes réponses (appelle-le par son prénom si tu le connais, parle de ses intérêts...).\n`
+        : "";
+
+      const systemPrompt = buildCreatorPrompt(settings, styleProfile) + fanProfileSection + `
 
 RÈGLES IMPORTANTES :
 - Tu réponds TOUJOURS en plusieurs messages courts séparés par "|||" (2 à 4 bulles max, 1-2 phrases chacune)
@@ -428,6 +478,9 @@ Exemple : "Haha oui exactement 😏|||t'as raison en fait|||tu fais quoi ce soir
         await saveMessage(conversation.id, "user", userText);
         await saveMessage(conversation.id, "assistant", bubbles.join(" "));
       }
+
+      // Mise à jour du profil fan en arrière-plan (pas de await pour ne pas bloquer)
+      updateFanProfile(creator.id, fanId, fan, userText, history).catch(() => {});
     }
 
     console.log(`[Bot ${creator.name}] @${fanUsername}: "${userText.slice(0, 40)}" | script=${fan.activeScript?.scriptId ?? "none"}`);

@@ -26,6 +26,7 @@ export interface Fan {
   completedScripts: string[];
   firstMessageAt: string;    // date du tout premier message du fan
   warmupSent: boolean;       // warm-up envoyé avant le premier script
+  fanProfile: string;        // résumé du profil du fan (prénom, âge, ville, job...)
 }
 
 function filePath(creatorId: string) {
@@ -44,6 +45,7 @@ export function loadFans(creatorId: string): Fan[] {
       completedScripts: [],
       firstMessageAt: fan.lastInteraction ?? new Date().toISOString(),
       warmupSent: false,
+      fanProfile: "",
       ...fan,
     }));
   } catch { return []; }
@@ -79,6 +81,7 @@ export function upsertFan(creatorId: string, telegramId: string, patch: Partial<
     completedScripts: [],
     firstMessageAt: new Date().toISOString(),
     warmupSent: false,
+    fanProfile: "",
     ...patch,
   };
   fans.unshift(fan);
