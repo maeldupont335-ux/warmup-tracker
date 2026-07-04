@@ -1,4 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
+import fs from "fs";
+import path from "path";
+import { getDataDir } from "@/lib/data-dir";
 import { buildStylePromptSection } from "@/lib/style-analyzer";
 import type { StyleProfile } from "@/lib/style-analyzer";
 import { loadActiveStyleProfile } from "@/lib/style-store";

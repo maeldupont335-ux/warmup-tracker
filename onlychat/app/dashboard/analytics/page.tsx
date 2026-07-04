@@ -181,7 +181,7 @@ export default function AnalyticsPage() {
               ) : (
                 <div className="space-y-3">
                   {data.topFans.map((f) => (
-                    <div key={f.telegramId ?? f.rank} className="flex items-center gap-3">
+                    <div key={f.rank} className="flex items-center gap-3">
                       <span className="text-xs font-bold w-5 text-center"
                         style={{ color: f.rank <= 3 ? "#f59e0b" : "#4b5563" }}>
                         #{f.rank}

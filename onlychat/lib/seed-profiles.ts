@@ -6,7 +6,6 @@ export const SEED_PROFILES: Record<string, { creatorId: string; profileName: str
       creatorId: "1782944747915",
       profileName: "Pauline V2",
       profile: {
-      "name": "Pauline V2",
       "yourName": "Paulinee💞",
       "totalMessagesAnalyzed": 74877,
       "avgMessageLength": 34,
