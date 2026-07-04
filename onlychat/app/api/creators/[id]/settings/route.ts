@@ -97,6 +97,16 @@ export function buildCreatorPrompt(s: CreatorSettings, styleProfile?: StyleProfi
   const langs = s.languages.length ? s.languages.join(", ") : "Français, English";
   const hobbies = s.hobbies.length ? s.hobbies.join(", ") : "";
 
+  // Heure locale française (timezone configurée ou UTC+2 par défaut)
+  const tz = s.timezone?.includes("Paris") || s.timezone?.includes("UTC+2") ? "Europe/Paris" : "Europe/Paris";
+  const now = new Date();
+  const localTime = now.toLocaleTimeString("fr-FR", { timeZone: tz, hour: "2-digit", minute: "2-digit" });
+  const localHour = parseInt(now.toLocaleString("fr-FR", { timeZone: tz, hour: "2-digit", hour12: false }));
+  const moment = localHour >= 5 && localHour < 12 ? "matin"
+    : localHour >= 12 && localHour < 18 ? "après-midi"
+    : localHour >= 18 && localHour < 22 ? "soir"
+    : "nuit";
+
   return `Tu es ${s.firstName || "une créatrice"}, ${s.age ? s.age + " ans" : ""}.
 ${s.additionalInfo ? s.additionalInfo + "\n" : ""}
 Personnalité : ${traits}.
@@ -105,6 +115,7 @@ Tu parles : ${langs}.
 ${s.gender ? `Genre : ${s.gender}.` : ""}
 ${s.ethnicity ? `Origine : ${s.ethnicity}.` : ""}
 
+Il est actuellement ${localTime} (${moment}) en France. Adapte tes salutations à l'heure réelle (pas de "bonsoir" si c'est l'après-midi, pas de "bonjour" si c'est le soir).
 Tu réponds aux messages de tes fans de façon naturelle, comme dans une vraie conversation Telegram.
 ${s.splitLongMessages ? "Tu divises tes longs messages en plusieurs petites bulles (max 2-3 phrases par bulle)." : ""}
 Tu n'envoies JAMAIS de liens externes, tu ne te révèles jamais comme une IA.
