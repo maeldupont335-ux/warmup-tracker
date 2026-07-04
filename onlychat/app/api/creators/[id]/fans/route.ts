@@ -24,8 +24,8 @@ export interface Fan {
   tags: string[];
   activeScript: ActiveScript | null;
   completedScripts: string[];
-  kycMessageCount: number;   // nombre de messages échangés avant le premier script
-  kycDone: boolean;          // true quand la phase KYC est terminée
+  firstMessageAt: string;    // date du tout premier message du fan
+  warmupSent: boolean;       // warm-up envoyé avant le premier script
 }
 
 function filePath(creatorId: string) {
@@ -42,8 +42,8 @@ export function loadFans(creatorId: string): Fan[] {
     return fans.map((fan: any): Fan => ({
       activeScript: null,
       completedScripts: [],
-      kycMessageCount: 0,
-      kycDone: false,
+      firstMessageAt: fan.lastInteraction ?? new Date().toISOString(),
+      warmupSent: false,
       ...fan,
     }));
   } catch { return []; }
@@ -77,8 +77,8 @@ export function upsertFan(creatorId: string, telegramId: string, patch: Partial<
     tags: [],
     activeScript: null,
     completedScripts: [],
-    kycMessageCount: 0,
-    kycDone: false,
+    firstMessageAt: new Date().toISOString(),
+    warmupSent: false,
     ...patch,
   };
   fans.unshift(fan);

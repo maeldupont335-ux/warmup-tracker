@@ -264,42 +264,74 @@ export async function POST(
     const scripts = loadScripts(creator.id);
     const activeScripts = scripts.filter(s => s.active);
 
-    // ── KYC : compteur d'échanges libres avant de lancer le premier script ──
-    const KYC_MIN = 5; // nombre minimum d'échanges avant script
-    if (!fan.kycDone) {
-      fan.kycMessageCount = (fan.kycMessageCount ?? 0) + 1;
-      if (fan.kycMessageCount >= KYC_MIN) fan.kycDone = true;
-    }
+    // Mots déclencheurs sexuels → court-circuite le cooldown
+    const SEXY_KEYWORDS = ["nude", "t'es sexy", "tes sexy", "fesse", "chatte", "t'es bonne", "tes bonne", "photo de toi", "montre toi", "nue", "seins", "cul"];
+    const fanSaidSexy = SEXY_KEYWORDS.some(kw => userText.toLowerCase().includes(kw));
 
-    // ── 1. Déclenchement par mot-clé (toujours autorisé) ──
+    // Cooldown : X jours depuis le PREMIER message du fan
+    const firstMsgAt = new Date(fan.firstMessageAt ?? fan.lastInteraction);
+    const cooldownDays = settings.sexualizationCooldownDays ?? 2;
+    const cooldownMs = cooldownDays * 24 * 60 * 60 * 1000;
+    const cooldownOk = (Date.now() - firstMsgAt.getTime()) >= cooldownMs;
+
+    // Peut lancer le script : cooldown respecté OU mot déclencheur
+    const canLaunchScript = cooldownOk || fanSaidSexy;
+
+    // ── 1. Déclenchement par nom de script (mot-clé exact) ──
     const keyword = userText.trim().toLowerCase();
     const keywordScript = activeScripts.find(s =>
       s.name.toLowerCase().replace(/[^a-z0-9]/g, "") === keyword.replace(/[^a-z0-9]/g, "")
     );
     if (keywordScript && !fan.activeScript) {
       fan.activeScript = { scriptId: keywordScript.id, stepIndex: 0, messagesSinceStep: 999, startedAt: new Date().toISOString() };
-      const fans = loadFans(creator.id);
-      const idx = fans.findIndex(f => f.telegramId === fanId);
-      if (idx >= 0) fans[idx] = fan;
-      saveFans(creator.id, fans);
     }
 
-    // ── 2. Script "First" — seulement si cooldown respecté OU mot-clé sexy ──
-    const SEXY_KEYWORDS = ["nude", "t'es sexy", "tes sexy", "fesse", "chatte", "t'es bonne", "tes bonne", "photo de toi", "montre toi", "nue"];
-    const fanSaidSexy = SEXY_KEYWORDS.some(kw => userText.toLowerCase().includes(kw));
-
-    // Cooldown sexualisation : X jours depuis la première interaction
-    const firstSeen = new Date(fan.lastInteraction);
-    const cooldownDays = settings.sexualizationCooldownDays ?? 2;
-    const cooldownMs = cooldownDays * 24 * 60 * 60 * 1000;
-    const cooldownOk = (Date.now() - firstSeen.getTime()) >= cooldownMs;
-
-    const canLaunchScript = fan.kycDone && (cooldownOk || fanSaidSexy);
-
-    if (canLaunchScript && !fan.activeScript && fan.completedScripts?.length === 0) {
+    // ── 2. Script "First" — seulement si conditions remplies et fan actif ──
+    if (canLaunchScript && !fan.activeScript && (fan.completedScripts?.length ?? 0) === 0) {
       const firstScript = activeScripts.find(s => s.first);
       if (firstScript) {
-        fan.activeScript = { scriptId: firstScript.id, stepIndex: 0, messagesSinceStep: 999, startedAt: new Date().toISOString() };
+        // Warm-up : quelques messages de chauffe avant le script
+        if (!fan.warmupSent) {
+          fan.warmupSent = true;
+          // Sauvegarder avant d'envoyer le warm-up
+          const fansWu = loadFans(creator.id);
+          const wuIdx = fansWu.findIndex(f => f.telegramId === fanId);
+          if (wuIdx >= 0) fansWu[wuIdx] = fan;
+          saveFans(creator.id, fansWu);
+
+          // Messages de chauffe générés par l'IA
+          const styleProfile = loadCreatorStyleProfile(creator.id);
+          const warmupPrompt = buildCreatorPrompt(settings, styleProfile) + `
+Le fan vient de te parler. Tu vas bientôt lui envoyer du contenu exclusif.
+Envoie 2-3 messages courts et naturels pour créer de l'anticipation sans mentionner de photo/vidéo explicitement.
+Sois mystérieuse, taquine, donne envie. Format: sépare chaque message par |||`;
+
+          const delayMs = settings.responseDelayMinutes > 0
+            ? settings.responseDelayMinutes * 60 * 1000
+            : (15 + Math.floor(Math.random() * 20)) * 1000;
+          const typingWu = setInterval(() => sendTyping(creator.botToken, chatId, bizId), 4500);
+          await sendTyping(creator.botToken, chatId, bizId);
+          await new Promise(r => setTimeout(r, delayMs));
+          clearInterval(typingWu);
+
+          const warmupReply = await chatWithAI(warmupPrompt, userText, []);
+          const warmupBubbles = (warmupReply.includes("|||") ? warmupReply.split("|||") : warmupReply.split("\n"))
+            .map(b => b.trim()).filter(b => b.length > 0).slice(0, 3);
+
+          for (let i = 0; i < warmupBubbles.length; i++) {
+            if (i > 0) {
+              await sendTyping(creator.botToken, chatId, bizId);
+              await new Promise(r => setTimeout(r, 4000 + Math.random() * 5000));
+            }
+            await sendText(creator.botToken, chatId, warmupBubbles[i], bizId);
+          }
+
+          // Maintenant lance le vrai script
+          await new Promise(r => setTimeout(r, 3000));
+          fan.activeScript = { scriptId: firstScript.id, stepIndex: 0, messagesSinceStep: 999, startedAt: new Date().toISOString() };
+        } else {
+          fan.activeScript = { scriptId: firstScript.id, stepIndex: 0, messagesSinceStep: 999, startedAt: new Date().toISOString() };
+        }
       }
     }
 
