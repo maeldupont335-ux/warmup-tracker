@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getDataDir } from "@/lib/data-dir";
+import { createServerClient } from "@supabase/ssr";
+import { isCreatorLicenseActive } from "@/lib/billing-store";
 import fs from "fs";
 import path from "path";
 
@@ -96,10 +98,30 @@ export async function GET(_: NextRequest, { params }: Ctx) {
   return NextResponse.json({ fans: loadFans(id) });
 }
 
+async function getUserId(req: NextRequest): Promise<string | null> {
+  try {
+    const supabase = createServerClient(
+      process.env.NEXT_PUBLIC_SUPABASE_URL!,
+      process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
+      { cookies: { getAll: () => req.cookies.getAll(), setAll: () => {} } }
+    );
+    const { data: { user } } = await supabase.auth.getUser();
+    return user?.id ?? null;
+  } catch { return null; }
+}
+
 export async function PATCH(req: NextRequest, { params }: Ctx) {
   const { id } = await params;
   const body = await req.json();
   const fans = loadFans(id);
+
+  // Bloquer enableIA si pas de licence active pour ce créateur
+  if (body.enableIA === true || (body.all === true && body.enableIA === true)) {
+    const userId = await getUserId(req);
+    if (userId && !isCreatorLicenseActive(userId, id)) {
+      return NextResponse.json({ error: "Licence Telegram requise pour activer l'IA" }, { status: 403 });
+    }
+  }
 
   if (body.all !== undefined) {
     saveFans(id, fans.map(f => ({ ...f, enableIA: body.enableIA })));
