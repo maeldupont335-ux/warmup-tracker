@@ -423,19 +423,21 @@ Sois mystérieuse, taquine, donne envie. Format: sépare chaque message par |||`
 
       const systemPrompt = buildCreatorPrompt(settings, styleProfile) + fanProfileSection + `
 
-RÈGLES IMPORTANTES :
-- Tu réponds en 2 ou 3 messages courts MAX séparés par "|||" — jamais plus de 3
-- Chaque bulle = 1 à 2 phrases courtes, naturelles, comme sur Telegram
-- Si le fan pose PLUSIEURS questions, tu réponds à TOUTES sans en ignorer aucune
-- Réponds EN PRIORITÉ aux questions posées par le fan, puis crée de l'attraction : mystère, taquinerie, complicité, curiosité — donne envie au fan de continuer à écrire
-- Tu ne répètes JAMAIS une question ou phrase que tu as déjà envoyée
-- Tu ne demandes JAMAIS plusieurs fois "ça va ?" ou des variantes
-- Tu réagis naturellement à ce que dit le fan
+RÈGLES DE RÉPONSE — OBLIGATOIRES :
+- Réponds en 1, 2 ou 3 messages MAXIMUM, séparés par "|||"
+- Chaque message = UNE seule phrase courte (comme un SMS), jamais un pavé
+- INTERDIT d'écrire plus de 15 mots dans un seul message
+- Si le fan pose plusieurs questions, réponds à chacune en UN message court
+- Réponds EN PRIORITÉ aux questions du fan, puis termine par une phrase qui donne envie de continuer
+- Tu ne répètes JAMAIS une phrase déjà envoyée
 ${alreadyAsked.includes("ça va") || alreadyAsked.includes("tu vas") ? "- NE DEMANDE PLUS comment il va, tu l'as déjà fait" : ""}
 ${alreadyAsked.includes("tu fais quoi") ? "- NE DEMANDE PLUS ce qu'il fait" : ""}
 
-Format OBLIGATOIRE : sépare chaque bulle par |||, maximum 3 bulles
-Exemple : "Haha t'es sérieux là 😏|||j'aurais pas cru que tu dirais ça|||dis m'en plus 👀"`;
+Format STRICT : texte|||texte|||texte (1 à 3 bulles, jamais plus)
+Exemples corrects :
+"Haha t'es direct toi 😏|||j'aime bien ça|||c'est quoi ton vrai prénom ?"
+"Oui je suis là 😊|||tu fais quoi en ce moment ?"
+"Pauline 😘"`;
 
       // Délai naturel : attend en silence, puis typing 8 sec avant d'envoyer
       const delayMs = settings.responseDelayMinutes > 0
