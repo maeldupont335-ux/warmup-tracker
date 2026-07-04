@@ -1,7 +1,7 @@
 "use client";
 import { useState, useEffect } from "react";
 import { useParams } from "next/navigation";
-import { Search, MessageSquare, FileText, Tag, RefreshCw, Star, X } from "lucide-react";
+import { Search, MessageSquare, FileText, Tag, RefreshCw, Star, X, CheckCircle, XCircle, ToggleLeft, ToggleRight } from "lucide-react";
 
 interface Fan {
   id: string;
@@ -15,6 +15,11 @@ interface Fan {
   enableIA: boolean;
   tags: string[];
   fanProfile?: string;
+}
+
+interface CreatorLicense {
+  creatorId: string; creatorName: string;
+  active: boolean; expiry: string | null; autoRenew: boolean;
 }
 
 function Toggle({ value, onChange }: { value: boolean; onChange: (v: boolean) => void }) {
@@ -91,6 +96,12 @@ export default function CreatorFansPage() {
   const [enableAllLoading, setEnableAllLoading] = useState(false);
   const [noteFan, setNoteFan] = useState<Fan | null>(null);
   const [licenseActive, setLicenseActive] = useState(false);
+  const [license, setLicense] = useState<CreatorLicense | null>(null);
+  const [balance, setBalance] = useState(0);
+  const [pool, setPool] = useState(0);
+  const [licLoading, setLicLoading] = useState(false);
+  const [licMsg, setLicMsg] = useState("");
+  const [creatorName, setCreatorName] = useState("");
 
   const fetchFans = async () => {
     setLoading(true);
@@ -104,15 +115,72 @@ export default function CreatorFansPage() {
     setLoading(false);
   };
 
+  const fetchBilling = async () => {
+    try {
+      const r = await fetch("/api/billing");
+      if (!r.ok) return;
+      const d = await r.json();
+      const lic: CreatorLicense | undefined = d?.billing?.creatorLicenses?.[id];
+      setLicense(lic ?? null);
+      const active = !!(lic?.active && lic?.expiry && new Date(lic.expiry) > new Date());
+      setLicenseActive(active);
+      setBalance(d?.billing?.balance ?? 0);
+      setPool(d?.billing?.telegramLicensePool ?? 0);
+      // Récupère le nom du créateur depuis la liste
+      const c = (d?.creators ?? []).find((x: { id: string; name: string }) => x.id === id);
+      if (c) setCreatorName(c.name);
+    } catch { /* ignore */ }
+  };
+
   useEffect(() => {
     fetchFans();
-    // Vérifie si la licence est active pour ce créateur
-    fetch("/api/billing").then(r => r.ok ? r.json() : null).then(d => {
-      const lic = d?.billing?.creatorLicenses?.[id];
-      const active = lic?.active && lic?.expiry && new Date(lic.expiry) > new Date();
-      setLicenseActive(!!active);
-    }).catch(() => {});
+    fetchBilling();
   }, [id]);
+
+  const assignLicense = async () => {
+    setLicLoading(true); setLicMsg("");
+    const r = await fetch("/api/billing", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "buy-creator-license", creatorId: id, creatorName }),
+    });
+    const d = await r.json();
+    if (d.ok) { setLicMsg("✅ Licence activée !"); fetchBilling(); }
+    else setLicMsg(`❌ ${d.error}`);
+    setLicLoading(false);
+  };
+
+  const suspendLicense = async () => {
+    setLicLoading(true); setLicMsg("");
+    const r = await fetch("/api/billing", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "suspend-license", creatorId: id }),
+    });
+    const d = await r.json();
+    if (d.ok) { setLicMsg("⏸ Licence suspendue — jours conservés"); fetchBilling(); }
+    else setLicMsg("❌ Erreur");
+    setLicLoading(false);
+  };
+
+  const reactivateLicense = async () => {
+    setLicLoading(true); setLicMsg("");
+    const r = await fetch("/api/billing", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "reactivate-license", creatorId: id }),
+    });
+    const d = await r.json();
+    if (d.ok) { setLicMsg("✅ Licence réactivée !"); fetchBilling(); }
+    else setLicMsg(`❌ ${d.error}`);
+    setLicLoading(false);
+  };
+
+  const toggleAutoRenew = async () => {
+    const newVal = !(license?.autoRenew ?? false);
+    await fetch("/api/billing", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "toggle-autorenew", creatorId: id, autoRenew: newVal }),
+    });
+    fetchBilling();
+  };
 
   const toggleFanIA = async (fanId: string, value: boolean) => {
     setFans(fs => fs.map(f => f.id === fanId ? { ...f, enableIA: value } : f));
@@ -137,11 +205,17 @@ export default function CreatorFansPage() {
   const formatDate = (d: string) =>
     new Date(d).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric", hour: "2-digit", minute: "2-digit" });
 
+  const daysLeft = (expiry: string | null) =>
+    expiry ? Math.max(0, Math.ceil((new Date(expiry).getTime() - Date.now()) / 86400000)) : 0;
+
   const filtered = fans.filter(f =>
     (f.name ?? "").toLowerCase().includes(search.toLowerCase()) ||
     (f.username ?? "").toLowerCase().includes(search.toLowerCase()) ||
     f.telegramId.includes(search)
   );
+
+  const isSuspended = !!(license && !license.active && license.expiry && new Date(license.expiry) > new Date());
+  const canBuy = pool > 0 || balance >= 30;
 
   return (
     <div className="p-6" style={{ color: "#fff" }}>
@@ -153,6 +227,70 @@ export default function CreatorFansPage() {
         />
       )}
 
+      {/* Licence Telegram — panneau directement sur la page */}
+      <div className="mb-5 p-4 rounded-xl border flex items-center gap-4 flex-wrap"
+        style={{
+          background: "#111118",
+          borderColor: licenseActive ? "rgba(16,185,129,0.25)" : isSuspended ? "rgba(245,158,11,0.25)" : "rgba(239,68,68,0.2)",
+        }}>
+        {licenseActive
+          ? <CheckCircle size={18} style={{ color: "#10b981", flexShrink: 0 }} />
+          : <XCircle size={18} style={{ color: isSuspended ? "#f59e0b" : "#ef4444", flexShrink: 0 }} />}
+
+        <div className="flex-1 min-w-0">
+          <div className="text-sm font-semibold">
+            {licenseActive
+              ? `Licence Telegram active — expire dans ${daysLeft(license?.expiry ?? null)}j (${new Date(license!.expiry!).toLocaleDateString("fr-FR")})`
+              : isSuspended
+              ? `Licence suspendue — ${daysLeft(license?.expiry ?? null)}j restants`
+              : "Aucune licence Telegram active"}
+          </div>
+          {licMsg && (
+            <div className="text-xs mt-1" style={{ color: licMsg.startsWith("✅") ? "#10b981" : licMsg.startsWith("⏸") ? "#f59e0b" : "#ef4444" }}>
+              {licMsg}
+            </div>
+          )}
+        </div>
+
+        {/* Auto-renouvellement */}
+        {license && (
+          <div className="flex items-center gap-1.5">
+            <span className="text-xs" style={{ color: "#6b7280" }}>Auto</span>
+            <button onClick={toggleAutoRenew} style={{ color: license.autoRenew ? "#10b981" : "#4b5563" }}>
+              {license.autoRenew ? <ToggleRight size={22} /> : <ToggleLeft size={22} />}
+            </button>
+          </div>
+        )}
+
+        {/* Actions licence */}
+        {licenseActive ? (
+          <>
+            <button onClick={suspendLicense} disabled={licLoading}
+              className="px-3 py-1.5 rounded-lg text-xs font-bold"
+              style={{ background: "rgba(245,158,11,0.15)", color: "#f59e0b" }}>
+              {licLoading ? "..." : "⏸ Suspendre"}
+            </button>
+            <button onClick={assignLicense} disabled={licLoading || !canBuy}
+              className="px-3 py-1.5 rounded-lg text-xs font-bold"
+              style={{ background: canBuy ? "#e11d48" : "rgba(75,85,99,0.2)", color: canBuy ? "#fff" : "#6b7280", cursor: canBuy ? "pointer" : "not-allowed" }}>
+              {licLoading ? "..." : "↻ Renouveler"}
+            </button>
+          </>
+        ) : isSuspended ? (
+          <button onClick={reactivateLicense} disabled={licLoading}
+            className="px-3 py-1.5 rounded-lg text-xs font-bold"
+            style={{ background: "rgba(16,185,129,0.15)", color: "#10b981" }}>
+            {licLoading ? "..." : "▶ Réactiver"}
+          </button>
+        ) : (
+          <button onClick={assignLicense} disabled={licLoading || !canBuy}
+            className="px-4 py-1.5 rounded-lg text-xs font-bold"
+            style={{ background: canBuy ? "#e11d48" : "rgba(75,85,99,0.2)", color: canBuy ? "#fff" : "#6b7280", cursor: canBuy ? "pointer" : "not-allowed" }}>
+            {licLoading ? "..." : pool > 0 ? `Activer (pool: ${pool})` : "Activer — $30"}
+          </button>
+        )}
+      </div>
+
       {/* Toolbar */}
       <div className="flex items-center gap-3 mb-5">
         <div className="relative max-w-xs flex-1">
@@ -163,12 +301,6 @@ export default function CreatorFansPage() {
             style={{ background: "#111118", border: "1px solid #1e1e2e", color: "#d1d5db" }} />
         </div>
         <div className="flex-1" />
-        {!licenseActive && (
-          <div className="flex items-center gap-2 px-3 py-2 rounded-lg text-xs"
-            style={{ background: "rgba(239,68,68,0.08)", border: "1px solid rgba(239,68,68,0.2)", color: "#ef4444" }}>
-            ⚠️ Aucune licence active — <a href="/dashboard/billing" className="underline ml-1">Activer ($30)</a>
-          </div>
-        )}
         <button onClick={() => setAllIA(true)} disabled={enableAllLoading || !licenseActive}
           className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm border transition-all"
           style={{
