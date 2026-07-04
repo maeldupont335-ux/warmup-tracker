@@ -255,7 +255,6 @@ export async function POST(
 
     // Enregistre / récupère le fan
     let fan = upsertFan(creator.id, fanId, { name: fanName, username: fanUsername || null });
-    const isNewFan = fan.completedScripts?.length === 0 && fan.activeScript === null;
 
     // Vérifie si l'IA est désactivée pour ce fan
     if (!fan.enableIA) return NextResponse.json({ ok: true });
@@ -265,7 +264,14 @@ export async function POST(
     const scripts = loadScripts(creator.id);
     const activeScripts = scripts.filter(s => s.active);
 
-    // ── 1. Déclenchement par mot-clé ──
+    // ── KYC : compteur d'échanges libres avant de lancer le premier script ──
+    const KYC_MIN = 5; // nombre minimum d'échanges avant script
+    if (!fan.kycDone) {
+      fan.kycMessageCount = (fan.kycMessageCount ?? 0) + 1;
+      if (fan.kycMessageCount >= KYC_MIN) fan.kycDone = true;
+    }
+
+    // ── 1. Déclenchement par mot-clé (toujours autorisé) ──
     const keyword = userText.trim().toLowerCase();
     const keywordScript = activeScripts.find(s =>
       s.name.toLowerCase().replace(/[^a-z0-9]/g, "") === keyword.replace(/[^a-z0-9]/g, "")
@@ -278,8 +284,8 @@ export async function POST(
       saveFans(creator.id, fans);
     }
 
-    // ── 2. Script "First" pour les nouveaux fans ──
-    if (isNewFan && !fan.activeScript) {
+    // ── 2. Script "First" — seulement après la phase KYC ──
+    if (fan.kycDone && !fan.activeScript && fan.completedScripts?.length === 0) {
       const firstScript = activeScripts.find(s => s.first);
       if (firstScript) {
         fan.activeScript = { scriptId: firstScript.id, stepIndex: 0, messagesSinceStep: 999, startedAt: new Date().toISOString() };
@@ -316,19 +322,38 @@ export async function POST(
     // ── 6. Réponse IA (si pas géré par le script) ──
     if (!scriptHandled) {
       const styleProfile = loadCreatorStyleProfile(creator.id);
-      const systemPrompt = buildCreatorPrompt(settings, styleProfile);
+
       let history: { role: "user" | "assistant"; content: string }[] = [];
       let conversation;
       try {
         conversation = await getOrCreateConversation("telegram_business", `${creator.id}_${fanId}`, fanUsername || fanName, creator.name);
-        history = await getHistory(conversation.id, 20);
+        history = await getHistory(conversation.id, 30);
       } catch { /* Supabase optionnel */ }
 
-      // 0 min → délai aléatoire 20-59s ; sinon délai exact en minutes
+      // Extraire les questions déjà posées par le bot pour éviter les répétitions
+      const alreadyAsked = history
+        .filter(h => h.role === "assistant")
+        .map(h => h.content)
+        .join(" ");
+
+      const systemPrompt = buildCreatorPrompt(settings, styleProfile) + `
+
+RÈGLES IMPORTANTES :
+- Tu réponds TOUJOURS en plusieurs messages courts séparés par "|||" (2 à 4 bulles max, 1-2 phrases chacune)
+- Tu ne répètes JAMAIS une question ou phrase que tu as déjà envoyée
+- Tu ne demandes JAMAIS plusieurs fois "ça va ?" ou des variantes
+- Tu réagis naturellement à ce que dit le fan, tu ne follows pas un script
+- Tu es spontanée, chaleureuse, tu crées un lien authentique
+${alreadyAsked.includes("ça va") || alreadyAsked.includes("tu vas") ? "- NE DEMANDE PLUS comment il va, tu l'as déjà fait" : ""}
+${alreadyAsked.includes("tu fais quoi") || alreadyAsked.includes("tu fais quoi") ? "- NE DEMANDE PLUS ce qu'il fait" : ""}
+
+Format de réponse OBLIGATOIRE : sépare chaque bulle par |||
+Exemple : "Haha oui exactement 😏|||t'as raison en fait|||tu fais quoi ce soir ?"`;
+
+      // Délai naturel
       const delayMs = settings.responseDelayMinutes > 0
         ? settings.responseDelayMinutes * 60 * 1000
         : (20 + Math.floor(Math.random() * 40)) * 1000;
-      // Typing visible pendant tout le délai (Telegram coupe après 5s, on renouvelle)
       const typingInterval = setInterval(() => sendTyping(creator.botToken, chatId, bizId), 4500);
       await sendTyping(creator.botToken, chatId, bizId);
       await new Promise(r => setTimeout(r, delayMs));
@@ -336,25 +361,29 @@ export async function POST(
 
       const reply = await chatWithAI(systemPrompt, userText, history);
 
-      if (settings.splitLongMessages && reply.length > 200) {
-        const sentences = reply.match(/[^.!?\n]+[.!?\n]*/g) ?? [reply];
-        let bubble = "";
-        for (const s of sentences) {
-          bubble += s;
-          if (bubble.length > 120) {
-            await sendText(creator.botToken, chatId, bubble.trim(), bizId);
-            await new Promise(r => setTimeout(r, 600 + Math.random() * 400));
-            bubble = "";
-          }
+      // Sépare en bulles sur ||| ou sur les sauts de ligne
+      const rawBubbles = reply.includes("|||")
+        ? reply.split("|||")
+        : reply.split(/\n{1,}/);
+
+      const bubbles = rawBubbles
+        .map(b => b.trim())
+        .filter(b => b.length > 0)
+        .slice(0, 4);
+
+      for (let i = 0; i < bubbles.length; i++) {
+        if (i > 0) {
+          // Délai naturel entre bulles : 4 à 12 secondes
+          const gap = (4000 + Math.random() * 8000);
+          await sendTyping(creator.botToken, chatId, bizId);
+          await new Promise(r => setTimeout(r, gap));
         }
-        if (bubble.trim()) await sendText(creator.botToken, chatId, bubble.trim(), bizId);
-      } else {
-        await sendText(creator.botToken, chatId, reply, bizId);
+        await sendText(creator.botToken, chatId, bubbles[i], bizId);
       }
 
       if (conversation) {
         await saveMessage(conversation.id, "user", userText);
-        await saveMessage(conversation.id, "assistant", reply);
+        await saveMessage(conversation.id, "assistant", bubbles.join(" "));
       }
     }
 

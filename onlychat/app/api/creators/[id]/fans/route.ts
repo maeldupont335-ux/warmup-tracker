@@ -22,8 +22,10 @@ export interface Fan {
   totalUsd: number | null;
   enableIA: boolean;
   tags: string[];
-  activeScript: ActiveScript | null;  // script en cours
-  completedScripts: string[];          // IDs des scripts terminés
+  activeScript: ActiveScript | null;
+  completedScripts: string[];
+  kycMessageCount: number;   // nombre de messages échangés avant le premier script
+  kycDone: boolean;          // true quand la phase KYC est terminée
 }
 
 function filePath(creatorId: string) {
@@ -40,6 +42,8 @@ export function loadFans(creatorId: string): Fan[] {
     return fans.map((fan: any): Fan => ({
       activeScript: null,
       completedScripts: [],
+      kycMessageCount: 0,
+      kycDone: false,
       ...fan,
     }));
   } catch { return []; }
@@ -73,6 +77,8 @@ export function upsertFan(creatorId: string, telegramId: string, patch: Partial<
     tags: [],
     activeScript: null,
     completedScripts: [],
+    kycMessageCount: 0,
+    kycDone: false,
     ...patch,
   };
   fans.unshift(fan);
