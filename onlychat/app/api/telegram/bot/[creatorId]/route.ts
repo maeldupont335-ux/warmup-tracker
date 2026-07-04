@@ -341,13 +341,19 @@ async function handleUpdate(creatorId: string, update: Record<string, unknown>) 
   }
 
   try {
+    // successful_payment vient toujours dans update.message, même en mode Business Connection
+    const paymentMsgInner = update.message as Record<string, unknown> | undefined;
+    const successfulPaymentDirect = paymentMsgInner?.successful_payment as Record<string, unknown> | undefined;
+
     const msg = (update.business_message || update.message) as Record<string, unknown> | undefined;
     if (!msg) return;
     if ((msg.from as Record<string, unknown>)?.is_bot) return;
 
     const bizMsg = update.business_message as Record<string, unknown> | undefined;
-    const chatId: number = (msg.chat as Record<string, unknown>).id as number;
-    const fromObj = msg.from as Record<string, unknown> | undefined;
+    // Pour successful_payment : utiliser le chatId/fanId depuis update.message directement
+    const activeMsg = successfulPaymentDirect ? paymentMsgInner! : msg;
+    const chatId: number = (activeMsg.chat as Record<string, unknown>).id as number;
+    const fromObj = activeMsg.from as Record<string, unknown> | undefined;
     const fanId = String(fromObj?.id ?? chatId);
     const fanUsername: string = (fromObj?.username as string) || "";
     const fanName: string = [fromObj?.first_name, fromObj?.last_name].filter(Boolean).join(" ") || fanUsername || fanId;
@@ -364,7 +370,7 @@ async function handleUpdate(creatorId: string, update: Record<string, unknown>) 
     const styleProfile = loadCreatorStyleProfile(creator.id);
 
     /* ── Paiement Stars confirmé ── */
-    const successfulPayment = (msg as Record<string, unknown>)?.successful_payment as Record<string, unknown> | undefined;
+    const successfulPayment = successfulPaymentDirect ?? (msg as Record<string, unknown>)?.successful_payment as Record<string, unknown> | undefined;
     if (successfulPayment) {
       if (fan.activeScript?.waitingForPayment) {
         const paidStars = successfulPayment.total_amount as number;
@@ -780,15 +786,14 @@ export async function POST(
     try { fs.writeFileSync(seenFile, JSON.stringify(seen)); } catch { /* ignore */ }
   }
 
-  const msg = (update.business_message || update.message) as Record<string, unknown> | undefined;
-
-  // Paiement Stars — transmettre directement à handleUpdate
-  const successfulPayment = (msg as Record<string, unknown> | undefined)?.successful_payment;
-  if (msg && successfulPayment) {
+  // successful_payment vient TOUJOURS dans update.message (jamais dans business_message)
+  const paymentMsg = update.message as Record<string, unknown> | undefined;
+  if (paymentMsg?.successful_payment) {
     handleUpdate(creatorId, update).catch(err => console.error("[Bot payment error]", err));
     return NextResponse.json({ ok: true });
   }
 
+  const msg = (update.business_message || update.message) as Record<string, unknown> | undefined;
   const text = msg?.text as string | undefined;
   if (msg && text && !(msg.from as Record<string, unknown>)?.is_bot) {
     const fromObj = msg.from as Record<string, unknown> | undefined;
