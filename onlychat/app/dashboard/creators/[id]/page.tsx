@@ -90,6 +90,7 @@ export default function CreatorFansPage() {
   const [loading, setLoading] = useState(true);
   const [enableAllLoading, setEnableAllLoading] = useState(false);
   const [noteFan, setNoteFan] = useState<Fan | null>(null);
+  const [licenseActive, setLicenseActive] = useState(false);
 
   const fetchFans = async () => {
     setLoading(true);
@@ -103,7 +104,15 @@ export default function CreatorFansPage() {
     setLoading(false);
   };
 
-  useEffect(() => { fetchFans(); }, [id]);
+  useEffect(() => {
+    fetchFans();
+    // Vérifie si la licence est active pour ce créateur
+    fetch("/api/billing").then(r => r.ok ? r.json() : null).then(d => {
+      const lic = d?.billing?.creatorLicenses?.[id];
+      const active = lic?.active && lic?.expiry && new Date(lic.expiry) > new Date();
+      setLicenseActive(!!active);
+    }).catch(() => {});
+  }, [id]);
 
   const toggleFanIA = async (fanId: string, value: boolean) => {
     setFans(fs => fs.map(f => f.id === fanId ? { ...f, enableIA: value } : f));
@@ -154,9 +163,20 @@ export default function CreatorFansPage() {
             style={{ background: "#111118", border: "1px solid #1e1e2e", color: "#d1d5db" }} />
         </div>
         <div className="flex-1" />
-        <button onClick={() => setAllIA(true)} disabled={enableAllLoading}
+        {!licenseActive && (
+          <div className="flex items-center gap-2 px-3 py-2 rounded-lg text-xs"
+            style={{ background: "rgba(239,68,68,0.08)", border: "1px solid rgba(239,68,68,0.2)", color: "#ef4444" }}>
+            ⚠️ Aucune licence active — <a href="/dashboard/billing" className="underline ml-1">Activer ($30)</a>
+          </div>
+        )}
+        <button onClick={() => setAllIA(true)} disabled={enableAllLoading || !licenseActive}
           className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm border transition-all"
-          style={{ borderColor: "rgba(16,185,129,0.3)", color: "#10b981", background: "rgba(16,185,129,0.06)" }}>
+          style={{
+            borderColor: licenseActive ? "rgba(16,185,129,0.3)" : "#1e1e2e",
+            color: licenseActive ? "#10b981" : "#4b5563",
+            background: licenseActive ? "rgba(16,185,129,0.06)" : "rgba(75,85,99,0.06)",
+            cursor: licenseActive ? "pointer" : "not-allowed",
+          }}>
           ✓ Enable AI for all
         </button>
         <button onClick={() => setAllIA(false)} disabled={enableAllLoading}
@@ -241,7 +261,15 @@ export default function CreatorFansPage() {
 
                 {/* Enable IA */}
                 <td className="px-4 py-3">
-                  <Toggle value={f.enableIA} onChange={v => toggleFanIA(f.id, v)} />
+                  {licenseActive
+                    ? <Toggle value={f.enableIA} onChange={v => toggleFanIA(f.id, v)} />
+                    : (
+                      <div title="Licence requise"
+                        className="relative w-10 h-5 rounded-full flex-shrink-0"
+                        style={{ background: "#1e1e2e", cursor: "not-allowed" }}>
+                        <div className="absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-gray-600" />
+                      </div>
+                    )}
                 </td>
 
                 {/* Tags */}
