@@ -122,7 +122,7 @@ export default function BillingPage() {
   const [showBuyModal, setShowBuyModal] = useState(false);
 
   async function load() {
-    const r = await fetch("/api/billing");
+    const r = await fetch(`/api/billing?t=${Date.now()}`, { cache: "no-store" });
     if (!r.ok) return;
     const d = await r.json();
     setBilling(d.billing);
@@ -130,7 +130,11 @@ export default function BillingPage() {
     setCreators(d.creators ?? []);
   }
 
-  useEffect(() => { load(); }, []);
+  useEffect(() => {
+    load();
+    const interval = setInterval(load, 5000);
+    return () => clearInterval(interval);
+  }, []);
 
   function setL(key: string, v: boolean) { setLoading(p => ({ ...p, [key]: v })); }
 
