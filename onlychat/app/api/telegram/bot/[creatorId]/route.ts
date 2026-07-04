@@ -281,6 +281,17 @@ export async function POST(
   const { creatorId } = await params;
   const update = await req.json();
 
+  // Déduplique les updates Telegram (Telegram retente si réponse trop lente)
+  const updateId: number = update.update_id;
+  if (updateId) {
+    const seenFile = path.join(getDataDir(), `seen-updates-${creatorId}.json`);
+    let seen: number[] = [];
+    try { seen = JSON.parse(fs.readFileSync(seenFile, "utf-8")); } catch { /* nouveau */ }
+    if (seen.includes(updateId)) return NextResponse.json({ ok: true }); // déjà traité
+    seen = [...seen.slice(-200), updateId]; // garde les 200 derniers
+    try { fs.writeFileSync(seenFile, JSON.stringify(seen)); } catch { /* ignore */ }
+  }
+
   const found = findCreator(creatorId);
   if (!found || !found.creator.enableIA) return NextResponse.json({ ok: true });
 
