@@ -37,6 +37,7 @@ export interface UserBilling {
   licenseActive: boolean;
   licenseExpiry: string | null;
   creatorLicenses: Record<string, CreatorLicense>; // clé = creatorId
+  telegramLicensePool: number; // licences Telegram achetées non encore assignées
   transactions: BillingTransaction[];
 }
 
@@ -62,8 +63,8 @@ export function loadUserBilling(userId: string, email = ""): UserBilling {
     const f = userBillingFile(userId);
     if (fs.existsSync(f)) {
       const data = JSON.parse(fs.readFileSync(f, "utf-8"));
-      // Migration : ajouter creatorLicenses si absent
       if (!data.creatorLicenses) data.creatorLicenses = {};
+      if (data.telegramLicensePool === undefined) data.telegramLicensePool = 0;
       return data;
     }
   } catch { /* ignore */ }
@@ -71,7 +72,7 @@ export function loadUserBilling(userId: string, email = ""): UserBilling {
     userId, email, balance: 0,
     totalStarsSold: 0, totalRevenueUsd: 0, totalCommissionUsd: 0,
     licenseActive: false, licenseExpiry: null,
-    creatorLicenses: {}, transactions: [],
+    creatorLicenses: {}, telegramLicensePool: 0, transactions: [],
   };
 }
 
@@ -142,6 +143,27 @@ export function recordStarsSale(
   } catch { /* ignore */ }
 }
 
+/** Achète N licences Telegram (ajout au pool) */
+export function buyTelegramLicenses(
+  userId: string, quantity: number
+): { ok: boolean; error?: string; newBalance?: number } {
+  const total = LICENSE_PRICE_USD * quantity;
+  const billing = loadUserBilling(userId);
+  if (billing.balance < total)
+    return { ok: false, error: `Solde insuffisant (${billing.balance.toFixed(2)}$ / ${total.toFixed(2)}$ requis)` };
+
+  billing.balance -= total;
+  billing.telegramLicensePool = (billing.telegramLicensePool ?? 0) + quantity;
+  billing.transactions.unshift({
+    id: Date.now().toString(), type: "license",
+    amount: -total,
+    description: `Achat ${quantity} licence${quantity > 1 ? "s" : ""} Telegram ($${LICENSE_PRICE_USD}/mois)`,
+    createdAt: new Date().toISOString(),
+  });
+  saveUserBilling(billing);
+  return { ok: true, newBalance: billing.balance };
+}
+
 /** Vérifie si la licence d'un créateur est active */
 export function isCreatorLicenseActive(userId: string, creatorId: string): boolean {
   const billing = loadUserBilling(userId);
@@ -150,15 +172,21 @@ export function isCreatorLicenseActive(userId: string, creatorId: string): boole
   return lic.active && !!lic.expiry && new Date(lic.expiry) > new Date();
 }
 
-/** Achète une licence pour un créateur (30$/mois) */
+/** Assigne une licence du pool à un créateur (ou achète directement si pool vide) */
 export function purchaseCreatorLicense(
   userId: string, creatorId: string, creatorName: string
 ): { ok: boolean; error?: string } {
   const billing = loadUserBilling(userId);
-  if (billing.balance < LICENSE_PRICE_USD)
-    return { ok: false, error: `Solde insuffisant (${billing.balance.toFixed(2)}$ / ${LICENSE_PRICE_USD}$ requis)` };
+  const fromPool = (billing.telegramLicensePool ?? 0) > 0;
 
-  billing.balance -= LICENSE_PRICE_USD;
+  if (!fromPool && billing.balance < LICENSE_PRICE_USD)
+    return { ok: false, error: `Solde insuffisant (${billing.balance.toFixed(2)}$ / ${LICENSE_PRICE_USD}$ requis) et aucune licence disponible dans le pool` };
+
+  if (fromPool) {
+    billing.telegramLicensePool -= 1;
+  } else {
+    billing.balance -= LICENSE_PRICE_USD;
+  }
   const expiry = new Date();
   expiry.setDate(expiry.getDate() + 30);
 

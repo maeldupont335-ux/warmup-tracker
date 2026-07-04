@@ -5,6 +5,7 @@ import {
   loadUserBilling, saveUserBilling, addTransaction,
   purchaseLicense, getPlatformStats,
   purchaseCreatorLicense, setCreatorAutoRenew, autoRenewExpiredLicenses,
+  buyTelegramLicenses,
 } from "@/lib/billing-store";
 import fs from "fs";
 import path from "path";
@@ -78,6 +79,13 @@ export async function POST(req: NextRequest) {
   // Acheter une licence (ancienne, globale)
   if (body.action === "buy-license") {
     const result = purchaseLicense(user.id);
+    return NextResponse.json(result);
+  }
+
+  // Acheter des licences Telegram en pool
+  if (body.action === "buy-telegram-licenses") {
+    const qty = Math.max(1, parseInt(body.quantity ?? "1"));
+    const result = buyTelegramLicenses(user.id, qty);
     return NextResponse.json(result);
   }
 
