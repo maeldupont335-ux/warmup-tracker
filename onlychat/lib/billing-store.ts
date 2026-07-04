@@ -113,6 +113,18 @@ export function recordStarsSale(
     creatorId, fanId, scriptId,
     description: `Vente ${stars}⭐ via script (net après 10% commission)`,
   });
+
+  // Met à jour le totalStars du fan
+  try {
+    const { loadFans, saveFans } = require("../app/api/creators/[id]/fans/route");
+    const fans = loadFans(creatorId);
+    const idx = fans.findIndex((f: { telegramId: string }) => f.telegramId === fanId);
+    if (idx >= 0) {
+      fans[idx].totalStars = (fans[idx].totalStars ?? 0) + stars;
+      fans[idx].totalUsd = (fans[idx].totalUsd ?? 0) + revenueUsd;
+      saveFans(creatorId, fans);
+    }
+  } catch { /* ignore */ }
 }
 
 /** Stats globales de la plateforme (admin seulement) */
