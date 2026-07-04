@@ -241,10 +241,7 @@ async function updateFanProfile(
   ).join("\n");
   const context = recentMessages + `\nFan: ${lastMessage}`;
 
-  const extractPrompt = `Tu es un assistant qui analyse des conversations pour extraire les informations personnelles partagées par un fan.
-
-Voici la conversation récente :
-${context}
+  const extractSystemPrompt = `Tu es un assistant qui analyse des conversations pour extraire les informations personnelles partagées par un fan.
 
 Profil actuel du fan :
 ${fan.fanProfile || "(aucun profil pour l'instant)"}
@@ -258,11 +255,10 @@ Ville/Région : Rhône-Alpes
 Métier : mécanicien auto indépendant
 Situation : célibataire
 Centres d'intérêt : aime les femmes de 20-25 ans, cherche une fille coquine sans prise de tête
-Se décrit comme : pas le plus beau, un peu enrobé, "gros nounours" joueur
 
 Réponds UNIQUEMENT avec le profil mis à jour, rien d'autre. Si aucune nouvelle info, réponds "(inchangé)".`;
 
-  const updated = await chatWithAI(extractPrompt, "", []);
+  const updated = await chatWithAI(extractSystemPrompt, `Voici la conversation récente :\n${context}\n\nMets à jour le profil.`, []);
   if (updated && updated !== "(inchangé)" && updated.length > 5) {
     const fans = loadFans(creatorId);
     const idx = fans.findIndex(f => f.telegramId === fanId);
@@ -428,17 +424,18 @@ Sois mystérieuse, taquine, donne envie. Format: sépare chaque message par |||`
       const systemPrompt = buildCreatorPrompt(settings, styleProfile) + fanProfileSection + `
 
 RÈGLES IMPORTANTES :
-- Tu réponds TOUJOURS en plusieurs messages courts séparés par "|||" (2 à 4 bulles max, 1-2 phrases chacune)
+- Tu réponds en 2 ou 3 messages courts MAX séparés par "|||" — jamais plus de 3
+- Chaque bulle = 1 à 2 phrases courtes, naturelles, comme sur Telegram
 - Si le fan pose PLUSIEURS questions, tu réponds à TOUTES sans en ignorer aucune
+- Priorise les phrases qui créent de l'attraction : mystère, taquinerie, complicité, curiosité — donne envie au fan de continuer à écrire
 - Tu ne répètes JAMAIS une question ou phrase que tu as déjà envoyée
 - Tu ne demandes JAMAIS plusieurs fois "ça va ?" ou des variantes
-- Tu réagis naturellement à ce que dit le fan, tu ne follows pas un script
-- Tu es spontanée, chaleureuse, tu crées un lien authentique
+- Tu réagis naturellement à ce que dit le fan
 ${alreadyAsked.includes("ça va") || alreadyAsked.includes("tu vas") ? "- NE DEMANDE PLUS comment il va, tu l'as déjà fait" : ""}
 ${alreadyAsked.includes("tu fais quoi") ? "- NE DEMANDE PLUS ce qu'il fait" : ""}
 
-Format de réponse OBLIGATOIRE : sépare chaque bulle par |||
-Exemple : "Haha oui exactement 😏|||t'as raison en fait|||tu fais quoi ce soir ?"`;
+Format OBLIGATOIRE : sépare chaque bulle par |||, maximum 3 bulles
+Exemple : "Haha t'es sérieux là 😏|||j'aurais pas cru que tu dirais ça|||dis m'en plus 👀"`;
 
       // Délai naturel : attend en silence, puis typing 8 sec avant d'envoyer
       const delayMs = settings.responseDelayMinutes > 0
@@ -464,7 +461,7 @@ Exemple : "Haha oui exactement 😏|||t'as raison en fait|||tu fais quoi ce soir
       const bubbles = rawBubbles
         .map(b => b.trim())
         .filter(b => b.length > 0)
-        .slice(0, 4);
+        .slice(0, 3);
 
       for (let i = 0; i < bubbles.length; i++) {
         if (i > 0) {
