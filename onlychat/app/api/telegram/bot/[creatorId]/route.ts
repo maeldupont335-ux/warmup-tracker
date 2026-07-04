@@ -284,8 +284,19 @@ export async function POST(
       saveFans(creator.id, fans);
     }
 
-    // ── 2. Script "First" — seulement après la phase KYC ──
-    if (fan.kycDone && !fan.activeScript && fan.completedScripts?.length === 0) {
+    // ── 2. Script "First" — seulement si cooldown respecté OU mot-clé sexy ──
+    const SEXY_KEYWORDS = ["nude", "t'es sexy", "tes sexy", "fesse", "chatte", "t'es bonne", "tes bonne", "photo de toi", "montre toi", "nue"];
+    const fanSaidSexy = SEXY_KEYWORDS.some(kw => userText.toLowerCase().includes(kw));
+
+    // Cooldown sexualisation : X jours depuis la première interaction
+    const firstSeen = new Date(fan.lastInteraction);
+    const cooldownDays = settings.sexualizationCooldownDays ?? 2;
+    const cooldownMs = cooldownDays * 24 * 60 * 60 * 1000;
+    const cooldownOk = (Date.now() - firstSeen.getTime()) >= cooldownMs;
+
+    const canLaunchScript = fan.kycDone && (cooldownOk || fanSaidSexy);
+
+    if (canLaunchScript && !fan.activeScript && fan.completedScripts?.length === 0) {
       const firstScript = activeScripts.find(s => s.first);
       if (firstScript) {
         fan.activeScript = { scriptId: firstScript.id, stepIndex: 0, messagesSinceStep: 999, startedAt: new Date().toISOString() };
