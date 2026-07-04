@@ -273,48 +273,33 @@ Réponds UNIQUEMENT avec le profil mis à jour, rien d'autre. Si aucune nouvelle
   }
 }
 
-/* ─── Route principale ─── */
-export async function POST(
-  req: NextRequest,
-  { params }: { params: Promise<{ creatorId: string }> }
-) {
-  const { creatorId } = await params;
-  const update = await req.json();
-
-  // Déduplique les updates Telegram (Telegram retente si réponse trop lente)
-  const updateId: number = update.update_id;
-  if (updateId) {
-    const seenFile = path.join(getDataDir(), `seen-updates-${creatorId}.json`);
-    let seen: number[] = [];
-    try { seen = JSON.parse(fs.readFileSync(seenFile, "utf-8")); } catch { /* nouveau */ }
-    if (seen.includes(updateId)) return NextResponse.json({ ok: true }); // déjà traité
-    seen = [...seen.slice(-200), updateId]; // garde les 200 derniers
-    try { fs.writeFileSync(seenFile, JSON.stringify(seen)); } catch { /* ignore */ }
-  }
-
+/* ─── Traitement principal (fire-and-forget) ─── */
+async function handleUpdate(creatorId: string, update: Record<string, unknown>) {
   const found = findCreator(creatorId);
-  if (!found || !found.creator.enableIA) return NextResponse.json({ ok: true });
+  if (!found || !found.creator.enableIA) return;
 
   const { creator, userId } = found;
 
   try {
-    const msg = update.business_message || update.message;
-    if (!msg?.text) return NextResponse.json({ ok: true });
-    if (msg.from?.is_bot) return NextResponse.json({ ok: true });
+    const msg = (update.business_message || update.message) as Record<string, unknown> | undefined;
+    if (!msg?.text) return;
+    if ((msg.from as Record<string, unknown>)?.is_bot) return;
 
-    const chatId: number = msg.chat.id;
-    const fanId = String(msg.from?.id ?? chatId);
-    const fanUsername: string = msg.from?.username || "";
-    const fanName: string = [msg.from?.first_name, msg.from?.last_name].filter(Boolean).join(" ") || fanUsername || fanId;
-    const userText: string = msg.text;
-    const bizId: string | undefined = update.business_message?.business_connection_id;
+    const bizMsg = update.business_message as Record<string, unknown> | undefined;
+    const chatId: number = (msg.chat as Record<string, unknown>).id as number;
+    const fromObj = msg.from as Record<string, unknown> | undefined;
+    const fanId = String(fromObj?.id ?? chatId);
+    const fanUsername: string = (fromObj?.username as string) || "";
+    const fanName: string = [fromObj?.first_name, fromObj?.last_name].filter(Boolean).join(" ") || fanUsername || fanId;
+    const userText: string = msg.text as string;
+    const bizId: string | undefined = bizMsg?.business_connection_id as string | undefined;
     const appBase = getWebhookBase();
 
     // Enregistre / récupère le fan
     let fan = upsertFan(creator.id, fanId, { name: fanName, username: fanUsername || null });
 
     // Vérifie si l'IA est désactivée pour ce fan
-    if (!fan.enableIA) return NextResponse.json({ ok: true });
+    if (!fan.enableIA) return;
 
     // Charge les settings & scripts
     const settings = loadCreatorSettings(userId, creator.id);
@@ -496,8 +481,32 @@ Exemple : "Haha oui exactement 😏|||t'as raison en fait|||tu fais quoi ce soir
 
     console.log(`[Bot ${creator.name}] @${fanUsername}: "${userText.slice(0, 40)}" | script=${fan.activeScript?.scriptId ?? "none"}`);
   } catch (err) {
-    console.error(`[Bot ${creator.name} error]`, err);
+    console.error(`[Bot error]`, err);
   }
+}
+
+/* ─── Route principale ─── */
+export async function POST(
+  req: NextRequest,
+  { params }: { params: Promise<{ creatorId: string }> }
+) {
+  const { creatorId } = await params;
+  const update = await req.json() as Record<string, unknown>;
+
+  // Déduplique les updates Telegram (Telegram retente si réponse trop lente)
+  const updateId = update.update_id as number | undefined;
+  if (updateId) {
+    const seenFile = path.join(getDataDir(), `seen-updates-${creatorId}.json`);
+    let seen: number[] = [];
+    try { seen = JSON.parse(fs.readFileSync(seenFile, "utf-8")); } catch { /* nouveau */ }
+    if (seen.includes(updateId)) return NextResponse.json({ ok: true });
+    seen = [...seen.slice(-200), updateId];
+    try { fs.writeFileSync(seenFile, JSON.stringify(seen)); } catch { /* ignore */ }
+  }
+
+  // Répondre IMMÉDIATEMENT à Telegram (évite timeout 25s)
+  // Le traitement se fait en arrière-plan
+  handleUpdate(creatorId, update).catch(err => console.error("[Bot background error]", err));
 
   return NextResponse.json({ ok: true });
 }
