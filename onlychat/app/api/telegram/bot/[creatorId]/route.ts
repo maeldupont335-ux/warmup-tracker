@@ -425,7 +425,7 @@ async function handleUpdate(creatorId: string, update: Record<string, unknown>) 
 
       if (step) {
         // Proposer le prix réduit si : fan demande réduction OU 10 min passées sans paiement
-        if (step.discountEnabled && step.discountedPriceStars > 0 && !fan.activeScript.discountOffered
+        if (step.discountEnabled && step.discountedPriceStars > 0 && fan.activeScript && !fan.activeScript.discountOffered
           && (fanWantsDiscount || elapsed >= TEN_MIN)) {
           fan.activeScript.discountOffered = true;
           // Générer un message de proposition de prix réduit
