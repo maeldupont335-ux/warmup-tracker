@@ -429,23 +429,29 @@ Sois mystérieuse, taquine, donne envie. Format: sépare chaque message par |||`
 
 RÈGLES IMPORTANTES :
 - Tu réponds TOUJOURS en plusieurs messages courts séparés par "|||" (2 à 4 bulles max, 1-2 phrases chacune)
+- Si le fan pose PLUSIEURS questions, tu réponds à TOUTES sans en ignorer aucune
 - Tu ne répètes JAMAIS une question ou phrase que tu as déjà envoyée
 - Tu ne demandes JAMAIS plusieurs fois "ça va ?" ou des variantes
 - Tu réagis naturellement à ce que dit le fan, tu ne follows pas un script
 - Tu es spontanée, chaleureuse, tu crées un lien authentique
 ${alreadyAsked.includes("ça va") || alreadyAsked.includes("tu vas") ? "- NE DEMANDE PLUS comment il va, tu l'as déjà fait" : ""}
-${alreadyAsked.includes("tu fais quoi") || alreadyAsked.includes("tu fais quoi") ? "- NE DEMANDE PLUS ce qu'il fait" : ""}
+${alreadyAsked.includes("tu fais quoi") ? "- NE DEMANDE PLUS ce qu'il fait" : ""}
 
 Format de réponse OBLIGATOIRE : sépare chaque bulle par |||
 Exemple : "Haha oui exactement 😏|||t'as raison en fait|||tu fais quoi ce soir ?"`;
 
-      // Délai naturel
+      // Délai naturel : attend en silence, puis typing 8 sec avant d'envoyer
       const delayMs = settings.responseDelayMinutes > 0
         ? settings.responseDelayMinutes * 60 * 1000
         : (20 + Math.floor(Math.random() * 40)) * 1000;
+      const TYPING_BEFORE_SEND = 8000; // 8 secondes de typing visible
+      const waitMs = Math.max(0, delayMs - TYPING_BEFORE_SEND);
+      // Attendre en silence
+      await new Promise(r => setTimeout(r, waitMs));
+      // Puis typing visible 8 sec
       const typingInterval = setInterval(() => sendTyping(creator.botToken, chatId, bizId), 4500);
       await sendTyping(creator.botToken, chatId, bizId);
-      await new Promise(r => setTimeout(r, delayMs));
+      await new Promise(r => setTimeout(r, TYPING_BEFORE_SEND));
       clearInterval(typingInterval);
 
       const reply = await chatWithAI(systemPrompt, userText, history);
