@@ -237,6 +237,7 @@ async function runScriptEngine(
     if (active.stepIndex >= script.steps.length) {
       fan.activeScript = null;
       fan.completedScripts = [...(fan.completedScripts ?? []), script.id];
+      fan.lastScriptEndedAt = new Date().toISOString();
     }
   }
 
@@ -450,12 +451,27 @@ ${styleProfile?.realExamples?.slice(0, 3).map(e => `Fan: "${e.fanMessage}"\nToi:
 
           // Stop le script
           fan.activeScript = null;
+          fan.lastScriptEndedAt = new Date().toISOString();
 
           const fans = loadFans(creator.id);
           const idx = fans.findIndex(f => f.telegramId === fanId);
           if (idx >= 0) fans[idx] = fan;
           saveFans(creator.id, fans);
           return;
+        }
+      }
+    }
+
+    /* ── Inactivity timeout : expire le script si trop de temps passé ── */
+    if (fan.activeScript) {
+      const activeScriptData = scripts.find(s => s.id === fan.activeScript?.scriptId);
+      if (activeScriptData) {
+        const startedAt = new Date(fan.activeScript.startedAt);
+        const timeoutMs = (activeScriptData.inactivityTimeoutHours ?? 4) * 60 * 60 * 1000;
+        if (Date.now() - startedAt.getTime() > timeoutMs) {
+          console.log(`[Bot] Script "${activeScriptData.name}" expiré après ${activeScriptData.inactivityTimeoutHours}h pour fan ${fanId}`);
+          fan.activeScript = null;
+          fan.lastScriptEndedAt = new Date().toISOString();
         }
       }
     }
@@ -480,7 +496,14 @@ ${styleProfile?.realExamples?.slice(0, 3).map(e => `Fan: "${e.fanMessage}"\nToi:
     }
 
     /* ── Lancement de script ── */
-    if (canLaunchScript && !fan.activeScript) {
+    // Vérifie le strict cooldown entre scripts
+    const strictCooldownOk = !fan.lastScriptEndedAt || (() => {
+      const cooldownHours = settings.strictScriptCooldownHours ?? 24;
+      const elapsed = Date.now() - new Date(fan.lastScriptEndedAt).getTime();
+      return elapsed >= cooldownHours * 60 * 60 * 1000;
+    })();
+
+    if (canLaunchScript && !fan.activeScript && strictCooldownOk) {
       const completed = fan.completedScripts ?? [];
       const remaining = activeScripts.filter(s => !completed.includes(s.id));
 

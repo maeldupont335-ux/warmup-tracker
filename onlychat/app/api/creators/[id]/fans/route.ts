@@ -33,6 +33,7 @@ export interface Fan {
   firstMessageAt: string;    // date du tout premier message du fan
   warmupSent: boolean;       // warm-up envoyé avant le premier script
   fanProfile: string;        // résumé du profil du fan (prénom, âge, ville, job...)
+  lastScriptEndedAt: string | null; // quand le dernier script s'est terminé/expiré
 }
 
 function filePath(creatorId: string) {
@@ -52,6 +53,7 @@ export function loadFans(creatorId: string): Fan[] {
       firstMessageAt: fan.lastInteraction ?? new Date().toISOString(),
       warmupSent: false,
       fanProfile: "",
+      lastScriptEndedAt: null as string | null,
       ...fan,
     }));
   } catch { return []; }
@@ -88,6 +90,7 @@ export function upsertFan(creatorId: string, telegramId: string, patch: Partial<
     firstMessageAt: new Date().toISOString(),
     warmupSent: false,
     fanProfile: "",
+    lastScriptEndedAt: null,
     ...patch,
   };
   fans.unshift(fan);

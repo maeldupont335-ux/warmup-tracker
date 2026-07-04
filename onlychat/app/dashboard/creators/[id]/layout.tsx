@@ -2,11 +2,15 @@
 import Link from "next/link";
 import { usePathname, useParams, useRouter } from "next/navigation";
 import { useState, useEffect } from "react";
-import { ChevronLeft, RefreshCw, Eye, EyeOff } from "lucide-react";
+import { ChevronLeft, RefreshCw, Eye, EyeOff, Lock, CheckCircle, ToggleLeft, ToggleRight } from "lucide-react";
 
 interface Creator {
   id: string; name: string; botUsername: string; botToken: string;
   enableIA: boolean; syncStatus: string; businessConnection: string | null;
+}
+
+interface CreatorLicense {
+  active: boolean; expiry: string | null; autoRenew: boolean;
 }
 
 function Toggle({ value, onChange }: { value: boolean; onChange: (v: boolean) => void }) {
@@ -42,12 +46,60 @@ export default function CreatorLayout({ children }: { children: React.ReactNode 
   const [saving, setSaving] = useState(false);
   const [saveMsg, setSaveMsg] = useState("");
 
+  // Licence
+  const [licenseActive, setLicenseActive] = useState<boolean | null>(null); // null = loading
+  const [license, setLicense] = useState<CreatorLicense | null>(null);
+  const [balance, setBalance] = useState(0);
+  const [pool, setPool] = useState(0);
+  const [creatorName, setCreatorName] = useState("");
+  const [licLoading, setLicLoading] = useState(false);
+  const [licMsg, setLicMsg] = useState("");
+
   useEffect(() => {
     fetch("/api/creators").then(r => r.json()).then(d => {
       const found = d.creators?.find((c: Creator) => c.id === params.id) ?? null;
       setCreator(found);
+      if (found) setCreatorName(found.name);
     });
+    fetchBilling();
   }, [params.id]);
+
+  const fetchBilling = async () => {
+    try {
+      const r = await fetch(`/api/billing?t=${Date.now()}`, { cache: "no-store" });
+      if (!r.ok) return;
+      const d = await r.json();
+      const lic: CreatorLicense | undefined = d?.billing?.creatorLicenses?.[params.id];
+      setLicense(lic ?? null);
+      const active = !!(lic?.active && lic?.expiry && new Date(lic.expiry) > new Date());
+      setLicenseActive(active);
+      setBalance(d?.billing?.balance ?? 0);
+      setPool(d?.billing?.telegramLicensePool ?? 0);
+      const c = (d?.creators ?? []).find((x: { id: string; name: string }) => x.id === params.id);
+      if (c) setCreatorName(c.name);
+    } catch { setLicenseActive(false); }
+  };
+
+  const assignLicense = async () => {
+    setLicLoading(true); setLicMsg("");
+    const r = await fetch("/api/billing", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "buy-creator-license", creatorId: params.id, creatorName }),
+    });
+    const d = await r.json();
+    if (d.ok) { setLicMsg("✅ Licence activée !"); await fetchBilling(); }
+    else setLicMsg(`❌ ${d.error}`);
+    setLicLoading(false);
+  };
+
+  const toggleAutoRenew = async () => {
+    const newVal = !(license?.autoRenew ?? false);
+    await fetch("/api/billing", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "toggle-autorenew", creatorId: params.id, autoRenew: newVal }),
+    });
+    fetchBilling();
+  };
 
   const toggleIA = async (v: boolean) => {
     if (!creator) return;
@@ -63,7 +115,6 @@ export default function CreatorLayout({ children }: { children: React.ReactNode 
     if (!newToken.trim() || !creator) return;
     setSaving(true);
     const appUrl = window.location.origin;
-    // Met à jour le token via une action dédiée
     const res = await fetch("/api/creators", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -76,15 +127,132 @@ export default function CreatorLayout({ children }: { children: React.ReactNode 
     setTimeout(() => setSaveMsg(""), 4000);
   };
 
-  if (!creator) return (
+  const daysLeft = (expiry: string | null) =>
+    expiry ? Math.max(0, Math.ceil((new Date(expiry).getTime() - Date.now()) / 86400000)) : 0;
+
+  const canBuy = pool > 0 || balance >= 30;
+
+  // Chargement
+  if (!creator || licenseActive === null) return (
     <div className="flex items-center justify-center h-40" style={{ color: "#4b5563" }}>
       <RefreshCw size={16} className="animate-spin mr-2" /> Chargement...
     </div>
   );
 
+  // ── GATE LICENCE ──
+  if (!licenseActive) {
+    const isSuspended = !!(license && !license.active && license.expiry && new Date(license.expiry) > new Date());
+    return (
+      <div className="flex flex-col min-h-full" style={{ color: "#fff" }}>
+        <div className="px-8 pt-6">
+          <button onClick={() => router.push("/dashboard/creators")}
+            className="flex items-center gap-1.5 text-sm mb-5 hover:text-white transition-all"
+            style={{ color: "#6b7280" }}>
+            <ChevronLeft size={15} /> Go back to creators
+          </button>
+          <div className="flex items-center gap-4 mb-8">
+            <div className="w-14 h-14 rounded-full flex items-center justify-center text-2xl"
+              style={{ background: "#1e1e2e", border: "2px solid #2a1a20" }}>🤖</div>
+            <div>
+              <h1 className="text-2xl font-bold">{creator.name}</h1>
+              <p className="text-sm" style={{ color: "#6b7280" }}>{creator.botUsername}</p>
+            </div>
+          </div>
+        </div>
+
+        {/* Écran de blocage */}
+        <div className="flex-1 flex items-center justify-center px-8">
+          <div className="max-w-md w-full rounded-2xl border p-8 text-center"
+            style={{ background: "#111118", borderColor: "#1e1e2e" }}>
+            <div className="w-16 h-16 rounded-full flex items-center justify-center mx-auto mb-5"
+              style={{ background: "rgba(225,29,72,0.1)", border: "2px solid rgba(225,29,72,0.3)" }}>
+              <Lock size={28} style={{ color: "#e11d48" }} />
+            </div>
+
+            <h2 className="text-xl font-bold mb-2">Licence requise</h2>
+            <p className="text-sm mb-6" style={{ color: "#6b7280" }}>
+              {isSuspended
+                ? `La licence de ${creator.name} est suspendue. Réactivez-la pour accéder au tableau de bord.`
+                : `Activez une licence Telegram pour accéder au tableau de bord de ${creator.name} et utiliser le bot IA.`}
+            </p>
+
+            {/* Infos licence si suspendue */}
+            {isSuspended && license?.expiry && (
+              <div className="mb-5 p-3 rounded-xl text-sm"
+                style={{ background: "rgba(245,158,11,0.1)", border: "1px solid rgba(245,158,11,0.2)", color: "#f59e0b" }}>
+                ⏸ Suspendue · {daysLeft(license.expiry)}j restants — vous pouvez la réactiver gratuitement
+              </div>
+            )}
+
+            {/* Solde & pool */}
+            <div className="flex justify-between text-sm mb-5 p-3 rounded-xl"
+              style={{ background: "#0d0d14", border: "1px solid #1e1e2e" }}>
+              <span style={{ color: "#6b7280" }}>Solde disponible</span>
+              <span className="font-bold" style={{ color: "#10b981" }}>${balance.toFixed(2)}</span>
+            </div>
+            {pool > 0 && (
+              <div className="mb-4 text-xs" style={{ color: "#6b7280" }}>
+                🎟 {pool} licence{pool > 1 ? "s" : ""} disponible{pool > 1 ? "s" : ""} dans le pool
+              </div>
+            )}
+
+            {licMsg && (
+              <div className="mb-4 text-sm" style={{ color: licMsg.startsWith("✅") ? "#10b981" : "#ef4444" }}>
+                {licMsg}
+              </div>
+            )}
+
+            {/* Bouton principal */}
+            {isSuspended ? (
+              <button onClick={async () => {
+                setLicLoading(true); setLicMsg("");
+                const r = await fetch("/api/billing", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "reactivate-license", creatorId: params.id }) });
+                const d = await r.json();
+                if (d.ok) { setLicMsg("✅ Licence réactivée !"); await fetchBilling(); }
+                else setLicMsg(`❌ ${d.error}`);
+                setLicLoading(false);
+              }} disabled={licLoading}
+                className="w-full py-3 rounded-xl text-sm font-bold mb-3"
+                style={{ background: "#10b981", color: "#fff" }}>
+                {licLoading ? "..." : "▶ Réactiver la licence"}
+              </button>
+            ) : (
+              <button onClick={assignLicense} disabled={licLoading || !canBuy}
+                className="w-full py-3 rounded-xl text-sm font-bold mb-3"
+                style={{
+                  background: canBuy ? "#e11d48" : "rgba(75,85,99,0.3)",
+                  color: canBuy ? "#fff" : "#6b7280",
+                  cursor: canBuy ? "pointer" : "not-allowed",
+                }}>
+                {licLoading ? "..." : pool > 0 ? `Activer depuis le pool (${pool} dispo)` : canBuy ? "Activer — $30" : "Solde insuffisant"}
+              </button>
+            )}
+
+            {/* Auto-renouvellement */}
+            {license && (
+              <div className="flex items-center justify-between mt-3 pt-3 border-t"
+                style={{ borderColor: "#1e1e2e" }}>
+                <span className="text-xs" style={{ color: "#6b7280" }}>Renouvellement automatique</span>
+                <button onClick={toggleAutoRenew} style={{ color: license.autoRenew ? "#10b981" : "#4b5563" }}>
+                  {license.autoRenew ? <ToggleRight size={22} /> : <ToggleLeft size={22} />}
+                </button>
+              </div>
+            )}
+
+            <div className="mt-4">
+              <a href="/dashboard/billing" className="text-xs underline" style={{ color: "#6b7280" }}>
+                Gérer les licences dans Facturation
+              </a>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // ── LAYOUT NORMAL (licence active) ──
   return (
     <div className="flex flex-col min-h-full" style={{ color: "#fff" }}>
-      {/* Back link */}
       <div className="px-8 pt-6">
         <button onClick={() => router.push("/dashboard/creators")}
           className="flex items-center gap-1.5 text-sm mb-5 hover:text-white transition-all"
@@ -96,15 +264,18 @@ export default function CreatorLayout({ children }: { children: React.ReactNode 
         <div className="flex items-center justify-between mb-6">
           <div className="flex items-center gap-4">
             <div className="w-14 h-14 rounded-full flex items-center justify-center text-2xl"
-              style={{ background: "#1e1e2e", border: "2px solid #2a1a20" }}>
-              🤖
-            </div>
+              style={{ background: "#1e1e2e", border: "2px solid #2a1a20" }}>🤖</div>
             <div>
               <h1 className="text-2xl font-bold">{creator.name}</h1>
               <p className="text-sm" style={{ color: "#6b7280" }}>{creator.botUsername}</p>
             </div>
           </div>
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-4">
+            {/* Badge licence */}
+            <div className="flex items-center gap-1.5 text-xs px-3 py-1 rounded-full"
+              style={{ background: "rgba(16,185,129,0.1)", color: "#10b981", border: "1px solid rgba(16,185,129,0.2)" }}>
+              <CheckCircle size={12} /> Licence active · {daysLeft(license?.expiry ?? null)}j
+            </div>
             <span className="text-sm" style={{ color: "#9ca3af" }}>Enable IA</span>
             <Toggle value={creator.enableIA} onChange={toggleIA} />
           </div>
