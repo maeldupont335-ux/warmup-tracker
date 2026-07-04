@@ -456,7 +456,7 @@ Sois naturelle, un peu coquine, comme si tu faisais une exception juste pour lui
         }
 
         // skipFollowupIfPaid COCHÉ + 10 min passées → avancer au prochain step sans paiement
-        if (step.skipFollowupIfPaid && elapsed >= TEN_MIN) {
+        if (step.skipFollowupIfPaid && elapsed >= TEN_MIN && fan.activeScript) {
           fan.activeScript.waitingForPayment = false;
           fan.activeScript.mediaSentAt = null;
           fan.activeScript.stepIndex += 1;
