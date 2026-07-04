@@ -3,7 +3,7 @@ import { useState, useEffect, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import {
   Plus, Trash2, RefreshCw, Search, CheckCircle,
-  AlertCircle, ChevronLeft, ChevronRight, Zap, Lock, ShoppingCart
+  AlertCircle, ChevronLeft, ChevronRight, Lock, ShoppingCart
 } from "lucide-react";
 
 interface Creator {
@@ -55,8 +55,6 @@ export default function CreatorsPage() {
   const [showNoLicenseModal, setShowNoLicenseModal] = useState(false);
   const [showBusinessModal, setShowBusinessModal] = useState<Creator | null>(null);
   const [businessInput, setBusinessInput] = useState("");
-  const [webhookLoading, setWebhookLoading] = useState<string | null>(null);
-  const [webhookError, setWebhookError] = useState<Record<string, string>>({});
   const [assigningId, setAssigningId] = useState<string | null>(null);
 
   const [newName, setNewName] = useState("");
@@ -71,12 +69,15 @@ export default function CreatorsPage() {
       const res = await fetch(`/api/billing?t=${Date.now()}`, { cache: "no-store" });
       if (!res.ok) return;
       const d = await res.json();
-      const activeCreatorIds: string[] = (d.creatorLicenses ?? [])
-        .filter((l: { active: boolean; expiry: string }) => l.active && new Date(l.expiry) > new Date())
-        .map((l: { creatorId: string }) => l.creatorId);
+      // L'API retourne { billing: UserBilling, ... } — lire depuis d.billing
+      const b = d.billing ?? {};
+      const licenses: Record<string, { active: boolean; expiry: string; creatorId: string }> = b.creatorLicenses ?? {};
+      const activeCreatorIds = Object.values(licenses)
+        .filter(l => l.active && new Date(l.expiry) > new Date())
+        .map(l => l.creatorId);
       setBilling({
-        pool: d.telegramLicensePool ?? 0,
-        balance: d.balance ?? 0,
+        pool: b.telegramLicensePool ?? 0,
+        balance: b.balance ?? 0,
         activeCreatorIds,
       });
     } catch { /* ignore */ }
@@ -106,6 +107,14 @@ export default function CreatorsPage() {
     if (!canAssign) { setShowNoLicenseModal(true); return; }
     setAssigningId(creator.id);
     try {
+      // Si webhook pas encore configuré, le faire automatiquement d'abord
+      if (!creator.webhookSet) {
+        await fetch("/api/creators", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "set-webhook", id: creator.id, appUrl }),
+        });
+      }
       const res = await fetch("/api/billing", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -137,23 +146,6 @@ export default function CreatorsPage() {
       body: JSON.stringify({ id }),
     });
     fetch_();
-  };
-
-  const handleSetWebhook = async (id: string) => {
-    setWebhookLoading(id);
-    setWebhookError(e => ({ ...e, [id]: "" }));
-    try {
-      const res = await fetch("/api/creators", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "set-webhook", id, appUrl }),
-      });
-      const d = await res.json();
-      if (!res.ok || !d.ok) {
-        setWebhookError(e => ({ ...e, [id]: d.error ?? "Erreur inconnue" }));
-      } else { fetch_(); }
-    } catch (err) { setWebhookError(e => ({ ...e, [id]: String(err) })); }
-    setWebhookLoading(null);
   };
 
   const handleSetBusiness = async () => {
@@ -275,7 +267,7 @@ export default function CreatorsPage() {
                           </div>
                           <div className="flex flex-col">
                             <span className="font-medium">{c.name}</span>
-                            {!hasLicense && c.webhookSet && (
+                            {!hasLicense && (
                               <span className="text-xs flex items-center gap-1" style={{ color: "#f59e0b" }}>
                                 <Lock size={10} /> Licence requise
                               </span>
@@ -350,22 +342,7 @@ export default function CreatorsPage() {
                       </td>
 
                       <td className="px-4 py-3" onClick={e => e.stopPropagation()}>
-                        {!c.webhookSet ? (
-                          <div className="flex flex-col gap-1">
-                            <button onClick={() => handleSetWebhook(c.id)}
-                              disabled={webhookLoading === c.id}
-                              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-all hover:opacity-90 disabled:opacity-50"
-                              style={{ background: "#e11d48", color: "#fff" }}>
-                              {webhookLoading === c.id ? <RefreshCw size={11} className="animate-spin" /> : <Zap size={11} />}
-                              Activer
-                            </button>
-                            {webhookError[c.id] && (
-                              <p className="text-xs max-w-[180px] leading-tight" style={{ color: "#f87171" }}>
-                                {webhookError[c.id]}
-                              </p>
-                            )}
-                          </div>
-                        ) : !hasLicense ? (
+                        {!hasLicense ? (
                           <button
                             onClick={() => handleAssignLicense(c)}
                             disabled={assigningId === c.id}
