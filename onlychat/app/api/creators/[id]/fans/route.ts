@@ -118,7 +118,7 @@ export async function PATCH(req: NextRequest, { params }: Ctx) {
   // Bloquer enableIA si pas de licence active pour ce créateur
   if (body.enableIA === true || (body.all === true && body.enableIA === true)) {
     const userId = await getUserId(req);
-    if (userId && !isCreatorLicenseActive(userId, id)) {
+    if (!userId || !isCreatorLicenseActive(userId, id)) {
       return NextResponse.json({ error: "Licence Telegram requise pour activer l'IA" }, { status: 403 });
     }
   }
