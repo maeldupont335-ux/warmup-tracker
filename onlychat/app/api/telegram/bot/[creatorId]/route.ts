@@ -396,6 +396,27 @@ async function handleUpdate(creatorId: string, update: Record<string, unknown>) 
       const TEN_MIN = 10 * 60 * 1000;
       const fanWantsDiscount = DISCOUNT_KEYWORDS.some(kw => userText.toLowerCase().includes(kw));
 
+      // Détection paiement confirmé par le fan en texte (fallback si successful_payment manqué)
+      const PAID_KEYWORDS = ["j'ai payé", "j'ai payer", "jai payé", "jai payer", "j ai payé", "j ai payer", "jpayé", "jpayer", "i paid", "already paid", "j'ai acheté", "jai acheté"];
+      const fanClaimsPayment = PAID_KEYWORDS.some(kw => userText.toLowerCase().includes(kw));
+      if (fanClaimsPayment && fan.activeScript) {
+        console.log(`[Bot] Fan ${fanId} a confirmé le paiement par message texte — avance le script`);
+        fan.activeScript.waitingForPayment = false;
+        fan.activeScript.stepIndex += 1;
+        fan.activeScript.messagesSinceStep = 999;
+        fan.activeScript.mediaSentAt = null;
+        if (fan.activeScript.stepIndex >= (script?.steps.length ?? 0)) {
+          fan.completedScripts = [...(fan.completedScripts ?? []), fan.activeScript.scriptId];
+          fan.lastScriptEndedAt = new Date().toISOString();
+          fan.activeScript = null;
+        }
+        const fansP = loadFans(creator.id);
+        const idxP = fansP.findIndex(f => f.telegramId === fanId);
+        if (idxP >= 0) fansP[idxP] = fan;
+        saveFans(creator.id, fansP);
+        // Continue pour envoyer le prochain step immédiatement
+      }
+
       if (step) {
         // Proposer le prix réduit si : fan demande réduction OU 10 min passées sans paiement
         if (step.discountEnabled && step.discountedPriceStars > 0 && !fan.activeScript.discountOffered
@@ -403,13 +424,11 @@ async function handleUpdate(creatorId: string, update: Record<string, unknown>) 
           fan.activeScript.discountOffered = true;
           // Générer un message de proposition de prix réduit
           const discountPrompt = buildCreatorPrompt(settings, styleProfile) + `
-Le fan n'a pas encore payé pour le contenu exclusif que tu lui as envoyé (${step.priceStars}⭐).
-${fanWantsDiscount ? "Il vient de dire : \"" + userText + "\" — il semble vouloir une réduction ou dire qu'il a pas les moyens." : "Cela fait 10 minutes sans paiement."}
+Tu as envoyé un contenu exclusif payant au fan. ${fanWantsDiscount ? "Il semble hésiter sur le prix." : "Il n'a pas encore cliqué pour débloquer."}
 
-Propose-lui le même contenu à prix réduit : ${step.discountedPriceStars}⭐ au lieu de ${step.priceStars}⭐.
-Sois naturelle, sympa, comme si tu faisais une exception juste pour lui.
-1-2 messages courts maximum, séparés par |||
-Ne mentionne pas de chiffres exacts si ça sonne robot, parle de "tarif spécial", "offre", "prix spécial pour toi".`;
+Propose-lui une offre spéciale — dis-lui juste que tu lui fais un prix spécial, sans parler de chiffres exacts si possible. Le bouton de paiement est directement sur le message dans Telegram, donc NE mentionne PAS de "plateforme", "lien externe", "accès", ou "validation" — le paiement se fait en un clic sur le message.
+Sois naturelle, un peu coquine, comme si tu faisais une exception juste pour lui.
+1-2 messages courts maximum, séparés par |||`;
 
           const discountMsg = await chatWithAI(discountPrompt, userText, []);
           const bubbles = (discountMsg.includes("|||") ? discountMsg.split("|||") : discountMsg.split("\n"))
@@ -452,11 +471,11 @@ Ne mentionne pas de chiffres exacts si ça sonne robot, parle de "tarif spécial
         if (!step.skipFollowupIfPaid && elapsed >= TEN_MIN && fan.activeScript && !fan.activeScript.salePushSent) {
           fan.activeScript.salePushSent = true;
           const salePushPrompt = buildCreatorPrompt(settings, styleProfile) + `
-Le fan n'a pas payé pour le contenu exclusif que tu lui as proposé (${step.priceStars}⭐). Cela fait plus de 10 minutes.
+Tu as envoyé un contenu payant il y a un moment. Le fan peut encore le débloquer directement dans le chat Telegram (il voit le bouton de paiement en étoiles sur le message).
 
-Fais une DERNIÈRE tentative de vente : rappelle-lui qu'il peut encore accéder au contenu, joue sur la rareté/l'exclusivité.
-Sois naturelle, séduisante, pas agressive. 1-2 messages maximum séparés par |||
-Exemples de style pour t'inspirer :
+Fais une DERNIÈRE relance naturelle et séduisante — pas de mention de "plateforme", "lien", "accès" ou "validation". Le paiement se fait directement sur le message que tu lui as envoyé dans le chat.
+Sois légère, coquine, donne envie. 1-2 messages courts max séparés par |||
+Style inspiré de tes exemples :
 ${styleProfile?.realExamples?.slice(0, 3).map(e => `Fan: "${e.fanMessage}"\nToi: "${e.yourReply}"`).join("\n---\n") ?? ""}`;
 
           const pushMsg = await chatWithAI(salePushPrompt, userText, []);
@@ -645,8 +664,8 @@ ${nextStep.message ? `Prochain message du script : "${nextStep.message.slice(0, 
     }
 
       if (fan.activeScript?.waitingForPayment) {
-        // Fan n'a pas encore payé — encourage sans être agressif
-        interStepContext = `\n\nLe fan n'a pas encore payé pour le contenu que tu lui as envoyé. Reste naturelle, parle avec lui normalement, tu peux subtilement rappeler que le contenu l'attend.`;
+        // Fan n'a pas encore payé — INTERDICTION absolue de parler de paiement
+        interStepContext = `\n\nRÈGLE ABSOLUE — NE JAMAIS ENFREINDRE : Tu continues à chatter normalement avec ce fan sur n'importe quel autre sujet (sa journée, ses activités, toi, la météo, etc.). INTERDIT FORMELLEMENT de mentionner : paiement, plateforme, lien, accès, validation, contenu, stars, argent, achat, offre, ou quoi que ce soit lié au contenu exclusif. Le système de paiement Telegram fonctionne automatiquement, tu n'as RIEN à gérer. Sois juste naturelle et spontanée.`;
       }
 
       const systemPrompt = buildCreatorPrompt(settings, styleProfile) + fanProfileSection + trainingSection + interStepContext + `
