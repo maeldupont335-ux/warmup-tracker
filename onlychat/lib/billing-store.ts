@@ -184,8 +184,15 @@ export function purchaseCreatorLicense(
 
   if (fromPool) {
     billing.telegramLicensePool -= 1;
+    // Pas de transaction : la licence est déjà payée (déjà comptée lors de l'achat du pool)
   } else {
     billing.balance -= LICENSE_PRICE_USD;
+    billing.transactions.unshift({
+      id: Date.now().toString(), type: "license",
+      amount: -LICENSE_PRICE_USD,
+      description: `Licence achetée et assignée à ${creatorName}`,
+      createdAt: new Date().toISOString(),
+    });
   }
   const expiry = new Date();
   expiry.setDate(expiry.getDate() + 30);
@@ -198,13 +205,31 @@ export function purchaseCreatorLicense(
     autoRenew: billing.creatorLicenses[creatorId]?.autoRenew ?? false,
   };
 
-  billing.transactions.unshift({
-    id: Date.now().toString(), type: "license",
-    amount: -LICENSE_PRICE_USD,
-    description: `Licence 30j — ${creatorName}`,
-    createdAt: new Date().toISOString(),
-  });
+  saveUserBilling(billing);
+  return { ok: true };
+}
 
+/** Suspend une licence (désactive le bot sans annuler les jours restants) */
+export function suspendCreatorLicense(userId: string, creatorId: string): { ok: boolean } {
+  const billing = loadUserBilling(userId);
+  const lic = billing.creatorLicenses?.[creatorId];
+  if (!lic) return { ok: false };
+  // On marque active=false mais on garde expiry intact — les jours restants sont préservés
+  lic.active = false;
+  billing.creatorLicenses[creatorId] = lic;
+  saveUserBilling(billing);
+  return { ok: true };
+}
+
+/** Réactive une licence suspendue (si elle n'a pas encore expiré) */
+export function reactivateCreatorLicense(userId: string, creatorId: string): { ok: boolean; error?: string } {
+  const billing = loadUserBilling(userId);
+  const lic = billing.creatorLicenses?.[creatorId];
+  if (!lic) return { ok: false, error: "Aucune licence trouvée" };
+  if (!lic.expiry || new Date(lic.expiry) <= new Date())
+    return { ok: false, error: "Licence expirée — veuillez en acheter une nouvelle" };
+  lic.active = true;
+  billing.creatorLicenses[creatorId] = lic;
   saveUserBilling(billing);
   return { ok: true };
 }
