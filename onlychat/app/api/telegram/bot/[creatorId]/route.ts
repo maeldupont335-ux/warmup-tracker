@@ -227,6 +227,47 @@ async function runScriptEngine(
   return fan;
 }
 
+/* ─── Sélection intelligente du meilleur script ─── */
+async function pickBestScript(
+  availableScripts: Script[],
+  fan: Fan,
+  lastMessage: string,
+  settings: { timezone?: string }
+): Promise<Script | null> {
+  if (availableScripts.length === 0) return null;
+  if (availableScripts.length === 1) return availableScripts[0];
+
+  const tz = "Europe/Paris";
+  const localHour = parseInt(new Date().toLocaleString("fr-FR", { timeZone: tz, hour: "2-digit", hour12: false }));
+  const moment = localHour >= 5 && localHour < 12 ? "matin"
+    : localHour >= 12 && localHour < 18 ? "après-midi"
+    : localHour >= 18 && localHour < 22 ? "soir"
+    : "nuit";
+
+  const scriptList = availableScripts.map((s, i) =>
+    `${i + 1}. "${s.name}" — ${s.description || "Pas de description"}`
+  ).join("\n");
+
+  const prompt = `Tu es un expert en marketing de contenu adulte. Tu dois choisir le meilleur script à envoyer à un fan en ce moment.
+
+Heure actuelle : ${moment} (${localHour}h)
+Dernier message du fan : "${lastMessage}"
+Profil du fan : ${fan.fanProfile || "Inconnu"}
+
+Scripts disponibles :
+${scriptList}
+
+Réponds UNIQUEMENT avec le numéro du script le plus adapté (ex: "2").
+Critères de choix :
+- Heure de la journée (script de soirée le soir, de matin le matin, etc.)
+- Ce que le fan a demandé ou ce qui l'intéresse
+- Le script qui a le plus de chances de convertir selon le contexte`;
+
+  const answer = await chatWithAI(prompt, "Choisis le meilleur script.", []);
+  const num = parseInt(answer.trim().match(/\d+/)?.[0] ?? "1");
+  return availableScripts[Math.max(0, Math.min(num - 1, availableScripts.length - 1))];
+}
+
 /* ─── Mise à jour profil fan ─── */
 async function updateFanProfile(
   creatorId: string,
@@ -331,20 +372,30 @@ async function handleUpdate(creatorId: string, update: Record<string, unknown>) 
       fan.activeScript = { scriptId: keywordScript.id, stepIndex: 0, messagesSinceStep: 999, startedAt: new Date().toISOString() };
     }
 
-    // ── 2. Script "First" — seulement si conditions remplies et fan actif ──
-    if (canLaunchScript && !fan.activeScript && (fan.completedScripts?.length ?? 0) === 0) {
-      const firstScript = activeScripts.find(s => s.first);
-      if (firstScript) {
-        // Warm-up : quelques messages de chauffe avant le script
-        if (!fan.warmupSent) {
+    // ── 2. Lancement de script — seulement si conditions remplies ──
+    if (canLaunchScript && !fan.activeScript) {
+      const completed = fan.completedScripts ?? [];
+      const remaining = activeScripts.filter(s => !completed.includes(s.id));
+
+      let chosenScript: Script | null = null;
+
+      if (completed.length === 0) {
+        // Premier script = toujours celui marqué ⭐ First
+        chosenScript = activeScripts.find(s => s.first) ?? remaining[0] ?? null;
+      } else if (remaining.length > 0) {
+        // Scripts suivants = IA choisit le meilleur selon contexte
+        chosenScript = await pickBestScript(remaining, fan, userText, settings);
+      }
+
+      if (chosenScript) {
+        // Warm-up avant le PREMIER script seulement
+        if (completed.length === 0 && !fan.warmupSent) {
           fan.warmupSent = true;
-          // Sauvegarder avant d'envoyer le warm-up
           const fansWu = loadFans(creator.id);
           const wuIdx = fansWu.findIndex(f => f.telegramId === fanId);
           if (wuIdx >= 0) fansWu[wuIdx] = fan;
           saveFans(creator.id, fansWu);
 
-          // Messages de chauffe générés par l'IA
           const styleProfile = loadCreatorStyleProfile(creator.id);
           const warmupPrompt = buildCreatorPrompt(settings, styleProfile) + `
 Le fan vient de te parler. Tu vas bientôt lui envoyer du contenu exclusif.
@@ -370,13 +421,11 @@ Sois mystérieuse, taquine, donne envie. Format: sépare chaque message par |||`
             }
             await sendText(creator.botToken, chatId, warmupBubbles[i], bizId);
           }
-
-          // Maintenant lance le vrai script
           await new Promise(r => setTimeout(r, 3000));
-          fan.activeScript = { scriptId: firstScript.id, stepIndex: 0, messagesSinceStep: 999, startedAt: new Date().toISOString() };
-        } else {
-          fan.activeScript = { scriptId: firstScript.id, stepIndex: 0, messagesSinceStep: 999, startedAt: new Date().toISOString() };
         }
+
+        fan.activeScript = { scriptId: chosenScript.id, stepIndex: 0, messagesSinceStep: 999, startedAt: new Date().toISOString() };
+        console.log(`[Bot] Script choisi : "${chosenScript.name}" (${completed.length === 0 ? "premier/étoile" : "IA pick"}) pour fan ${fanId}`);
       }
     }
 
