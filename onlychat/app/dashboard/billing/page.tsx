@@ -157,6 +157,30 @@ export default function BillingPage() {
     setL(creatorId, false);
   }
 
+  async function suspendLicense(creatorId: string, creatorName: string) {
+    setL(`sus_${creatorId}`, true); setMsg("");
+    const r = await fetch("/api/billing", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "suspend-license", creatorId }),
+    });
+    const d = await r.json();
+    if (d.ok) { setMsg(`⏸️ Licence suspendue pour ${creatorName} — jours restants conservés`); load(); }
+    else setMsg(`❌ Erreur`);
+    setL(`sus_${creatorId}`, false);
+  }
+
+  async function reactivateLicense(creatorId: string, creatorName: string) {
+    setL(`sus_${creatorId}`, true); setMsg("");
+    const r = await fetch("/api/billing", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "reactivate-license", creatorId }),
+    });
+    const d = await r.json();
+    if (d.ok) { setMsg(`✅ Licence réactivée pour ${creatorName} !`); load(); }
+    else setMsg(`❌ ${d.error}`);
+    setL(`sus_${creatorId}`, false);
+  }
+
   async function toggleAutoRenew(creatorId: string, current: boolean) {
     setL(`ar_${creatorId}`, true);
     await fetch("/api/billing", {
@@ -322,6 +346,10 @@ export default function BillingPage() {
                       <div className="text-xs mt-0.5" style={{ color: days <= 5 ? "#f59e0b" : "#6b7280" }}>
                         Expire dans {days} jour{days !== 1 ? "s" : ""} · {new Date(lic!.expiry!).toLocaleDateString("fr-FR")}
                       </div>
+                    ) : lic?.expiry && new Date(lic.expiry) > new Date() ? (
+                      <div className="text-xs mt-0.5" style={{ color: "#f59e0b" }}>
+                        ⏸ Suspendue · {daysLeft(lic.expiry)}j restants
+                      </div>
                     ) : (
                       <div className="text-xs mt-0.5" style={{ color: "#6b7280" }}>
                         {lic?.expiry ? "Licence expirée" : "Aucune licence assignée"}
@@ -338,6 +366,25 @@ export default function BillingPage() {
                       {lic?.autoRenew ? <ToggleRight size={22} /> : <ToggleLeft size={22} />}
                     </button>
                   </div>
+
+                  {/* Suspendre / Réactiver */}
+                  {active ? (
+                    <button
+                      onClick={() => suspendLicense(c.id, c.name)}
+                      disabled={loading[`sus_${c.id}`]}
+                      className="flex-shrink-0 px-3 py-2 rounded-lg text-xs font-bold"
+                      style={{ background: "rgba(245,158,11,0.15)", color: "#f59e0b", opacity: loading[`sus_${c.id}`] ? 0.6 : 1 }}>
+                      {loading[`sus_${c.id}`] ? "..." : "⏸ Suspendre"}
+                    </button>
+                  ) : lic?.expiry && new Date(lic.expiry) > new Date() ? (
+                    <button
+                      onClick={() => reactivateLicense(c.id, c.name)}
+                      disabled={loading[`sus_${c.id}`]}
+                      className="flex-shrink-0 px-3 py-2 rounded-lg text-xs font-bold"
+                      style={{ background: "rgba(16,185,129,0.15)", color: "#10b981", opacity: loading[`sus_${c.id}`] ? 0.6 : 1 }}>
+                      {loading[`sus_${c.id}`] ? "..." : "▶ Réactiver"}
+                    </button>
+                  ) : null}
 
                   <button
                     onClick={() => assignLicense(c.id, c.name)}
