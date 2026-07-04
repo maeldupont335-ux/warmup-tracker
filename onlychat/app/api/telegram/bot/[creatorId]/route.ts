@@ -221,15 +221,16 @@ async function runScriptEngine(
   // Envoie l'étape
   await sendScriptStep(token, chatId, step, appBase, bizId, userId, fanId, script.id);
 
-  // Si contenu payant + skipFollowupIfPaid décoché → attendre paiement avant d'avancer
-  if (step.priceStars > 0 && !step.skipFollowupIfPaid) {
+  if (step.priceStars > 0) {
+    // Tout média payant → toujours attendre avant de continuer
+    // skipFollowupIfPaid coché   = avancer après 10 min même sans paiement
+    // skipFollowupIfPaid décoché = attendre paiement confirmé, sinon push vente + stop
     active.waitingForPayment = true;
     active.mediaSentAt = new Date().toISOString();
     active.discountOffered = false;
     active.salePushSent = false;
-    // On ne réinitialise PAS messagesSinceStep car on ne change pas d'étape
   } else {
-    // Avance à la prochaine étape (contenu gratuit OU skipFollowupIfPaid coché)
+    // Contenu gratuit → avance immédiatement
     active.stepIndex += 1;
     active.messagesSinceStep = 0;
     active.waitingForPayment = false;
@@ -429,8 +430,26 @@ Ne mentionne pas de chiffres exacts si ça sonne robot, parle de "tarif spécial
           return;
         }
 
-        // Si 10 min passées, pas de réduction possible ou déjà proposée → push vente puis stop
-        if (elapsed >= TEN_MIN && !fan.activeScript.salePushSent) {
+        // skipFollowupIfPaid COCHÉ + 10 min passées → avancer au prochain step sans paiement
+        if (step.skipFollowupIfPaid && elapsed >= TEN_MIN) {
+          fan.activeScript.waitingForPayment = false;
+          fan.activeScript.mediaSentAt = null;
+          fan.activeScript.stepIndex += 1;
+          fan.activeScript.messagesSinceStep = 999;
+          if (fan.activeScript.stepIndex >= (script?.steps.length ?? 0)) {
+            fan.completedScripts = [...(fan.completedScripts ?? []), fan.activeScript.scriptId];
+            fan.lastScriptEndedAt = new Date().toISOString();
+            fan.activeScript = null;
+          }
+          const fans2 = loadFans(creator.id);
+          const idx2 = fans2.findIndex(f => f.telegramId === fanId);
+          if (idx2 >= 0) fans2[idx2] = fan;
+          saveFans(creator.id, fans2);
+          // Continue pour envoyer la réponse IA normale
+        }
+
+        // skipFollowupIfPaid DÉCOCHÉ + 10 min passées → push vente puis stop
+        if (!step.skipFollowupIfPaid && elapsed >= TEN_MIN && fan.activeScript && !fan.activeScript.salePushSent) {
           fan.activeScript.salePushSent = true;
           const salePushPrompt = buildCreatorPrompt(settings, styleProfile) + `
 Le fan n'a pas payé pour le contenu exclusif que tu lui as proposé (${step.priceStars}⭐). Cela fait plus de 10 minutes.
