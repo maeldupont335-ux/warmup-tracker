@@ -488,6 +488,45 @@ Exemple : "Haha t'es sérieux là 😏|||j'aurais pas cru que tu dirais ça|||di
   }
 }
 
+/* ─── Queue de messages par fan (debounce 5s) ─── */
+interface PendingMsg { text: string; update: Record<string, unknown>; receivedAt: number; }
+const fanQueues = new Map<string, PendingMsg[]>();
+const fanTimers = new Map<string, ReturnType<typeof setTimeout>>();
+const DEBOUNCE_MS = 5000; // attendre 5s pour regrouper les messages
+
+function enqueueFanMessage(creatorId: string, fanId: string, text: string, update: Record<string, unknown>) {
+  const key = `${creatorId}_${fanId}`;
+  const queue = fanQueues.get(key) ?? [];
+  queue.push({ text, update, receivedAt: Date.now() });
+  fanQueues.set(key, queue);
+
+  // Réinitialise le timer à chaque nouveau message
+  const existing = fanTimers.get(key);
+  if (existing) clearTimeout(existing);
+
+  const timer = setTimeout(async () => {
+    fanTimers.delete(key);
+    const msgs = fanQueues.get(key) ?? [];
+    fanQueues.delete(key);
+    if (msgs.length === 0) return;
+
+    // Regrouper tous les textes en un seul message
+    const combinedText = msgs.map(m => m.text).join("\n");
+    const firstUpdate = msgs[0].update;
+    const mergedUpdate = { ...firstUpdate };
+    const baseMsg = (firstUpdate.business_message || firstUpdate.message) as Record<string, unknown>;
+    if (baseMsg) {
+      const msgCopy = { ...baseMsg, text: combinedText };
+      if (firstUpdate.business_message) mergedUpdate.business_message = msgCopy;
+      else mergedUpdate.message = msgCopy;
+    }
+
+    await handleUpdate(creatorId, mergedUpdate).catch(err => console.error("[Bot background error]", err));
+  }, DEBOUNCE_MS);
+
+  fanTimers.set(key, timer);
+}
+
 /* ─── Route principale ─── */
 export async function POST(
   req: NextRequest,
@@ -507,9 +546,16 @@ export async function POST(
     try { fs.writeFileSync(seenFile, JSON.stringify(seen)); } catch { /* ignore */ }
   }
 
-  // Répondre IMMÉDIATEMENT à Telegram (évite timeout 25s)
-  // Le traitement se fait en arrière-plan
-  handleUpdate(creatorId, update).catch(err => console.error("[Bot background error]", err));
+  // Extraire fanId pour le debounce
+  const msg = (update.business_message || update.message) as Record<string, unknown> | undefined;
+  const text = msg?.text as string | undefined;
+  if (msg && text && !(msg.from as Record<string, unknown>)?.is_bot) {
+    const fromObj = msg.from as Record<string, unknown> | undefined;
+    const chatId = (msg.chat as Record<string, unknown>)?.id as number;
+    const fanId = String(fromObj?.id ?? chatId);
+    // Mettre en queue avec debounce 5s
+    enqueueFanMessage(creatorId, fanId, text, update);
+  }
 
   return NextResponse.json({ ok: true });
 }
