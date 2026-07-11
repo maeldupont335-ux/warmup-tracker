@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { chatWithAI } from "@/lib/claude";
 import { getOrCreateConversation, saveMessage, getHistory } from "@/lib/conversation-store";
+import { loadLocalHistory, appendLocalHistory } from "@/lib/local-history";
 import { upsertFan, loadFans, saveFans } from "@/app/api/creators/[id]/fans/route";
 import { loadCreatorSettings, buildCreatorPrompt, loadCreatorStyleProfile } from "@/app/api/creators/[id]/settings/route";
 import { loadScripts } from "@/lib/scripts-store";
@@ -635,11 +636,16 @@ async function handleUpdate(creatorId: string, update: Record<string, unknown>) 
 
     /* ── Réponse IA ── */
     {
-      let history: { role: "user" | "assistant"; content: string }[] = [];
+      // Historique local (toujours dispo, pas de dépendance Supabase)
+      const localHist = loadLocalHistory(creator.id, fanId);
+      let history: { role: "user" | "assistant"; content: string }[] = localHist.map(m => ({ role: m.role, content: m.content }));
+
+      // Supabase en parallèle (si dispo, merge pour avoir plus d'historique)
       let conversation;
       try {
         conversation = await getOrCreateConversation("telegram_business", `${creator.id}_${fanId}`, fanUsername || fanName, creator.name);
-        history = await getHistory(conversation.id, 30);
+        const remoteHist = await getHistory(conversation.id, 40);
+        if (remoteHist.length > history.length) history = remoteHist;
       } catch { /* Supabase optionnel */ }
 
       const alreadyAsked = history.filter(h => h.role === "assistant").map(h => h.content).join(" ");
@@ -712,7 +718,7 @@ async function handleUpdate(creatorId: string, update: Record<string, unknown>) 
 
       const reply = await chatWithAI(systemPrompt, userText, history);
 
-      const rawBubbles = reply.includes("|||") ? reply.split("|||") : reply.split(/\n{1,}/);
+      const rawBubbles = reply.includes("|||") ? reply.split("|||") : [reply];
       const bubbles = rawBubbles.map((b: string) => b.trim()).filter((b: string) => b.length > 0).slice(0, 3);
 
       for (let i = 0; i < bubbles.length; i++) {
@@ -726,9 +732,15 @@ async function handleUpdate(creatorId: string, update: Record<string, unknown>) 
         await sendText(creator.botToken, chatId, bubbles[i], bizId);
       }
 
+      // Sauvegarde locale (fiable, synchrone)
+      appendLocalHistory(creator.id, fanId, [
+        { role: "user", content: userText, ts: Date.now() },
+        { role: "assistant", content: bubbles.join(" "), ts: Date.now() },
+      ]);
+      // Sauvegarde Supabase (optionnelle, pour le dashboard)
       if (conversation) {
-        await saveMessage(conversation.id, "user", userText);
-        await saveMessage(conversation.id, "assistant", bubbles.join(" "));
+        saveMessage(conversation.id, "user", userText).catch(() => {});
+        saveMessage(conversation.id, "assistant", bubbles.join(" ")).catch(() => {});
       }
 
       updateFanProfile(creator.id, fanId, fan, userText, history).catch(() => {});
@@ -771,7 +783,9 @@ function enqueueFanMessage(creatorId: string, fanId: string, text: string, updat
     fanQueues.delete(key);
     if (msgs.length === 0) return;
 
-    const combinedText = msgs.map(m => m.text).join("\n");
+    const combinedText = msgs.length > 1
+      ? msgs.map(m => m.text).join(" / ")
+      : msgs[0].text;
     const firstUpdate = msgs[0].update;
     const mergedUpdate = { ...firstUpdate };
     const baseMsg = (firstUpdate.business_message || firstUpdate.message) as Record<string, unknown>;
