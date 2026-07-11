@@ -1,5 +1,19 @@
 "use client";
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useCallback, Component } from "react";
+
+class ErrorBoundary extends Component<{ children: React.ReactNode }, { error: string | null }> {
+  constructor(props: { children: React.ReactNode }) { super(props); this.state = { error: null }; }
+  static getDerivedStateFromError(e: Error) { return { error: e.message + "\n" + e.stack }; }
+  render() {
+    if (this.state.error) return (
+      <div style={{ padding: 40, fontFamily: "monospace", background: "#0b0b12", color: "#f87171", minHeight: "100vh" }}>
+        <h2 style={{ color: "#ef4444" }}>Erreur sur la page bot-docs</h2>
+        <pre style={{ whiteSpace: "pre-wrap", wordBreak: "break-all", background: "#1a0000", padding: 20, borderRadius: 8, fontSize: 12 }}>{this.state.error}</pre>
+      </div>
+    );
+    return this.props.children;
+  }
+}
 
 interface BotTiming {
   paymentTimeoutMin: number;
@@ -171,7 +185,7 @@ function FlowDiagram({ timings }: { timings: BotTiming }) {
 }
 
 /* ── Page principale ── */
-export default function BotDocsPage() {
+function BotDocsPageInner() {
   const [config, setConfig] = useState<BotDocsConfig | null>(null);
   const [editMode, setEditMode] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -363,4 +377,8 @@ export default function BotDocsPage() {
       </main>
     </div>
   );
+}
+
+export default function BotDocsPage() {
+  return <ErrorBoundary><BotDocsPageInner /></ErrorBoundary>;
 }
