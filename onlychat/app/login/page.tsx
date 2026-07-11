@@ -2,7 +2,7 @@
 import { useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { MessageCircle, Eye, EyeOff } from "lucide-react";
+import { Eye, EyeOff, ArrowLeft } from "lucide-react";
 import { createClient } from "@/lib/supabase-browser";
 
 export default function LoginPage() {
@@ -23,7 +23,14 @@ export default function LoginPage() {
   };
 
   return (
-    <div className="min-h-screen flex items-center justify-center px-4" style={{ background: "#0a0a0f" }}>
+    <div className="min-h-screen flex items-center justify-center px-4" style={{ background: "#0a0a0f", position: "relative" }}>
+      {/* Bouton retour page présentation */}
+      <Link href="/" style={{ position: "absolute", top: "20px", left: "20px", display: "flex", alignItems: "center", gap: "6px", color: "#9ca3af", fontSize: "14px", fontWeight: 500, padding: "8px 14px", borderRadius: "10px", background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.08)", textDecoration: "none", transition: "all 0.2s" }}
+        onMouseEnter={e => (e.currentTarget.style.background = "rgba(255,255,255,0.1)")}
+        onMouseLeave={e => (e.currentTarget.style.background = "rgba(255,255,255,0.05)")}>
+        <ArrowLeft size={15} />
+        Retour
+      </Link>
       <div className="w-full max-w-md">
         <div className="text-center mb-8">
           <Link href="/" className="inline-flex items-center gap-2 mb-6">
