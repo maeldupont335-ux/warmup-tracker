@@ -179,7 +179,10 @@ export default function BotDocsPage() {
   const [activeNav, setActiveNav] = useState("flow");
 
   useEffect(() => {
-    fetch("/api/bot-docs").then(r => r.json()).then(d => setConfig(d.config));
+    fetch("/api/bot-docs")
+      .then(r => r.json())
+      .then(d => { if (d.config || d.defaults) setConfig(d.config ?? d.defaults); })
+      .catch(() => {});
   }, []);
 
   const update = useCallback(<K extends keyof BotDocsConfig>(key: K, value: BotDocsConfig[K]) => {
