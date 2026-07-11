@@ -117,8 +117,8 @@ export default function Sidebar() {
           Alertes Telegram
         </button>
         <button onClick={handleLogout}
-          className="w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm transition-all hover:bg-white/5"
-          style={{ color: "#6b7280" }}>
+          className="w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm font-semibold transition-all"
+          style={{ color: "#ef4444", background: "rgba(239,68,68,0.08)", border: "1px solid rgba(239,68,68,0.2)", borderRadius: "12px" }}>
           <LogOut size={16} />
           Déconnexion
         </button>
