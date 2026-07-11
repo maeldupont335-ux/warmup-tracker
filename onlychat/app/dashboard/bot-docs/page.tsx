@@ -39,6 +39,17 @@ interface BotDocsConfig {
   timings: BotTiming;
 }
 
+const DEFAULT_TIMINGS: BotTiming = {
+  paymentTimeoutMin: 10,
+  fastMin: 1, fastMax: 3,
+  normalMin: 4, normalMax: 7,
+  slowMin: 8, slowMax: 13,
+  responseDelayMin: 20, responseDelayMax: 60,
+  typingBeforeSendMs: 8000,
+  warmupDelayMin: 15, warmupDelayMax: 35,
+  interBubbleMin: 4, interBubbleMax: 9,
+};
+
 const NAV = [
   { id: "flow", label: "🗺 Flux du bot" },
   { id: "timings", label: "⏱ Timings" },
@@ -195,7 +206,10 @@ function BotDocsPageInner() {
   useEffect(() => {
     fetch("/api/bot-docs")
       .then(r => r.json())
-      .then(d => { if (d.config || d.defaults) setConfig(d.config ?? d.defaults); })
+      .then(d => {
+        const raw = d.config ?? d.defaults;
+        if (raw) setConfig({ ...raw, timings: { ...DEFAULT_TIMINGS, ...(raw.timings ?? {}) } });
+      })
       .catch(() => {});
   }, []);
 
