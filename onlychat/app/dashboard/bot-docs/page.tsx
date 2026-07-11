@@ -69,9 +69,9 @@ function PromptEditor({
 }
 
 function KeywordEditor({
-  id, label, value, editMode, onChange, color,
+  id, label, value, editMode, onChange, color, hint,
 }: {
-  id: string; label: string; value: string[]; editMode: boolean; onChange: (v: string[]) => void; color: string;
+  id: string; label: string; value: string[]; editMode: boolean; onChange: (v: string[]) => void; color: string; hint?: string;
 }) {
   const text = value.join(", ");
   return (
