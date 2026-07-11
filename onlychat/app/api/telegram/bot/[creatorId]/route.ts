@@ -609,12 +609,20 @@ async function handleUpdate(creatorId: string, update: Record<string, unknown>) 
       const phases = botConfig.phases ?? [];
       const phaseIdx = fan.currentPhaseIndex ?? 0;
       const currentPhase = phases[phaseIdx];
-      if (currentPhase && currentPhase.advanceAfterMessages > 0) {
-        fan.messagesInPhase = (fan.messagesInPhase ?? 0) + 1;
-        if (fan.messagesInPhase >= currentPhase.advanceAfterMessages && phaseIdx + 1 < phases.length) {
+      if (currentPhase && phaseIdx + 1 < phases.length) {
+        const textLower = userText.toLowerCase();
+        const keywordMatch = (currentPhase.triggerKeywords ?? []).some(kw => kw && textLower.includes(kw.toLowerCase()));
+        if (keywordMatch) {
           fan.currentPhaseIndex = phaseIdx + 1;
           fan.messagesInPhase = 0;
-          console.log(`[Bot] Fan ${fanId} → Phase ${fan.currentPhaseIndex + 1} (${phases[fan.currentPhaseIndex]?.name})`);
+          console.log(`[Bot] Fan ${fanId} → Phase ${fan.currentPhaseIndex + 1} via mot-clé`);
+        } else if (currentPhase.advanceAfterMessages > 0) {
+          fan.messagesInPhase = (fan.messagesInPhase ?? 0) + 1;
+          if (fan.messagesInPhase >= currentPhase.advanceAfterMessages) {
+            fan.currentPhaseIndex = phaseIdx + 1;
+            fan.messagesInPhase = 0;
+            console.log(`[Bot] Fan ${fanId} → Phase ${fan.currentPhaseIndex + 1} après ${currentPhase.advanceAfterMessages} messages`);
+          }
         }
       }
     }

@@ -21,10 +21,11 @@ export interface BotTiming {
 
 export interface BotPhase {
   id: string;
-  name: string;           // "Phase 1 — Nouveau client"
-  icon: string;           // emoji
-  prompt: string;         // contexte injecté dans l'IA pendant cette phase
+  name: string;
+  icon: string;
+  prompt: string;
   advanceAfterMessages: number; // 0 = jamais avancer automatiquement
+  triggerKeywords: string[];    // mots qui font avancer vers la phase SUIVANTE immédiatement
 }
 
 export interface BotDocsConfig {
@@ -59,6 +60,7 @@ export const DEFAULT_PHASES: BotPhase[] = [
     icon: "👋",
     prompt: `C'est la toute première conversation avec ce fan. Accueille-le chaleureusement, présente-toi brièvement et crée une connexion naturelle. Pose-lui une question simple sur lui (son prénom, sa journée). Sois naturelle et souriante.`,
     advanceAfterMessages: 5,
+    triggerKeywords: [],
   },
   {
     id: "phase2",
@@ -66,6 +68,7 @@ export const DEFAULT_PHASES: BotPhase[] = [
     icon: "💬",
     prompt: `Tu connais déjà un peu ce fan. Approfondis la relation : parle de toi, de ce que tu fais, de ton quotidien. Montre-toi intéressante et mystérieuse. Continue à apprendre à le connaître. Crée de la complicité.`,
     advanceAfterMessages: 10,
+    triggerKeywords: [],
   },
   {
     id: "phase3",
@@ -73,6 +76,7 @@ export const DEFAULT_PHASES: BotPhase[] = [
     icon: "🔥",
     prompt: `Le fan te connaît bien maintenant. Renforce la relation : rappelle-toi de détails qu'il t'a partagés, sois plus intime et complice. Commence à créer une tension légère et intrigante sans trop en dévoiler.`,
     advanceAfterMessages: 20,
+    triggerKeywords: [],
   },
   {
     id: "phase4",
@@ -80,6 +84,7 @@ export const DEFAULT_PHASES: BotPhase[] = [
     icon: "🎬",
     prompt: `Le fan est fidèle et engagé. Le moment est venu de l'amener vers du contenu exclusif. Crée l'envie naturellement, sois mystérieuse et taquine. Le système de script se déclenchera automatiquement au bon moment.`,
     advanceAfterMessages: 0,
+    triggerKeywords: [],
   },
 ];
 

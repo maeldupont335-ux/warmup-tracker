@@ -43,6 +43,7 @@ interface BotPhase {
   icon: string;
   prompt: string;
   advanceAfterMessages: number;
+  triggerKeywords: string[];
 }
 
 interface BotDocsConfig {
@@ -62,10 +63,10 @@ interface BotDocsConfig {
 
 /* ── Défauts ── */
 const DEFAULT_PHASES: BotPhase[] = [
-  { id: "phase1", name: "Phase 1 — Nouveau client", icon: "👋", prompt: "C'est la toute première conversation avec ce fan. Accueille-le chaleureusement, présente-toi brièvement et crée une connexion naturelle. Pose-lui une question simple sur lui (son prénom, sa journée).", advanceAfterMessages: 5 },
-  { id: "phase2", name: "Phase 2 — Présentation", icon: "💬", prompt: "Tu connais déjà un peu ce fan. Approfondis la relation : parle de toi, de ce que tu fais, de ton quotidien. Montre-toi intéressante et mystérieuse. Continue à apprendre à le connaître.", advanceAfterMessages: 10 },
-  { id: "phase3", name: "Phase 3 — Fidélisation", icon: "🔥", prompt: "Le fan te connaît bien maintenant. Renforce la relation, rappelle-toi de détails qu'il t'a partagés, sois plus intime et complice. Commence à créer une tension légère et intrigante.", advanceAfterMessages: 20 },
-  { id: "phase4", name: "Phase 4 — Lancement script", icon: "🎬", prompt: "Le fan est fidèle et engagé. Le moment est venu de l'amener vers du contenu exclusif. Crée l'envie naturellement, sois mystérieuse et taquine.", advanceAfterMessages: 0 },
+  { id: "phase1", name: "Phase 1 — Nouveau client", icon: "👋", prompt: "C'est la toute première conversation avec ce fan. Accueille-le chaleureusement, présente-toi brièvement et crée une connexion naturelle. Pose-lui une question simple sur lui (son prénom, sa journée).", advanceAfterMessages: 5, triggerKeywords: [] },
+  { id: "phase2", name: "Phase 2 — Présentation", icon: "💬", prompt: "Tu connais déjà un peu ce fan. Approfondis la relation : parle de toi, de ce que tu fais, de ton quotidien. Montre-toi intéressante et mystérieuse. Continue à apprendre à le connaître.", advanceAfterMessages: 10, triggerKeywords: [] },
+  { id: "phase3", name: "Phase 3 — Fidélisation", icon: "🔥", prompt: "Le fan te connaît bien maintenant. Renforce la relation, rappelle-toi de détails qu'il t'a partagés, sois plus intime et complice. Commence à créer une tension légère et intrigante.", advanceAfterMessages: 20, triggerKeywords: [] },
+  { id: "phase4", name: "Phase 4 — Lancement script", icon: "🎬", prompt: "Le fan est fidèle et engagé. Le moment est venu de l'amener vers du contenu exclusif. Crée l'envie naturellement, sois mystérieuse et taquine.", advanceAfterMessages: 0, triggerKeywords: [] },
 ];
 
 const DEFAULT_TIMINGS: BotTiming = {
@@ -331,7 +332,7 @@ function BotDocsPageInner() {
 
   const updatePhase = (i: number, p: BotPhase) => setConfig(c => { if (!c) return c; const phases = [...c.phases]; phases[i] = p; return { ...c, phases }; });
   const deletePhase = (i: number) => setConfig(c => { if (!c) return c; const phases = [...c.phases]; phases.splice(i, 1); return { ...c, phases }; });
-  const addPhase = () => setConfig(c => { if (!c) return c; const n = c.phases.length + 1; return { ...c, phases: [...c.phases, { id: "p" + Date.now(), name: `Phase ${n} — Nouvelle phase`, icon: "⚡", prompt: "", advanceAfterMessages: 10 }] }; });
+  const addPhase = () => setConfig(c => { if (!c) return c; const n = c.phases.length + 1; return { ...c, phases: [...c.phases, { id: "p" + Date.now(), name: `Phase ${n} — Nouvelle phase`, icon: "⚡", prompt: "", advanceAfterMessages: 10, triggerKeywords: [] }] }; });
 
   const reorderSteps = (steps: FlowStep[]) => {
     setConfig(c => c ? { ...c, flowSteps: steps } : c);
@@ -469,14 +470,42 @@ function BotDocsPageInner() {
                   }
                 </div>
 
-                {/* Avancement */}
-                <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-                  <span style={{ fontSize: 12, color: "#6b7280" }}>Passer à la phase suivante après</span>
+                {/* Avancement par messages */}
+                <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 10 }}>
+                  <span style={{ fontSize: 12, color: "#6b7280" }}>Avancer après</span>
                   {editMode
                     ? <input type="number" value={phase.advanceAfterMessages} min={0} max={500} onChange={e => updatePhase(i, { ...phase, advanceAfterMessages: Number(e.target.value) })} style={{ width: 64, padding: "5px 10px", background: "#0d0d18", border: "1px solid #7c3aed55", borderRadius: 7, color: "#a78bfa", fontSize: 14, fontWeight: 700, outline: "none", fontFamily: "ui-monospace,Menlo,monospace" }} />
-                    : <span style={{ color: "#a78bfa", fontWeight: 800, fontSize: 16, fontFamily: "ui-monospace,Menlo,monospace" }}>{phase.advanceAfterMessages}</span>
+                    : <span style={{ color: "#a78bfa", fontWeight: 800, fontSize: 15, fontFamily: "ui-monospace,Menlo,monospace" }}>{phase.advanceAfterMessages}</span>
                   }
-                  <span style={{ fontSize: 12, color: "#6b7280" }}>messages du fan {phase.advanceAfterMessages === 0 ? <strong style={{ color: "#f59e0b" }}>(phase finale — pas d'avancement auto)</strong> : ""}</span>
+                  <span style={{ fontSize: 12, color: "#6b7280" }}>messages {phase.advanceAfterMessages === 0 ? <strong style={{ color: "#f59e0b" }}>— pas d'avancement auto</strong> : ""}</span>
+                </div>
+
+                {/* Mots-clés déclencheurs */}
+                <div>
+                  <div style={{ fontSize: 11, fontWeight: 700, color: "#6b7280", marginBottom: 6, textTransform: "uppercase" as const, letterSpacing: "0.06em" }}>
+                    ⚡ Mots-clés qui font avancer immédiatement
+                  </div>
+                  {editMode ? (
+                    <textarea
+                      value={(phase.triggerKeywords ?? []).join(", ")}
+                      onChange={e => updatePhase(i, { ...phase, triggerKeywords: e.target.value.split(",").map(k => k.trim()).filter(Boolean) })}
+                      placeholder="ex: je suis abonné, j'adore, trop belle (séparés par des virgules)"
+                      rows={2}
+                      style={{ width: "100%", padding: "8px 12px", background: "#0d0d18", border: "1px solid #f59e0b44", borderRadius: 8, color: "#c9c9e8", fontSize: 13, fontFamily: "ui-monospace,Menlo,monospace", resize: "none", outline: "none", boxSizing: "border-box" }}
+                    />
+                  ) : (
+                    <div style={{ display: "flex", flexWrap: "wrap", gap: 6, minHeight: 24 }}>
+                      {(phase.triggerKeywords ?? []).length === 0
+                        ? <span style={{ color: "#4b5563", fontSize: 12, fontStyle: "italic" }}>Aucun mot-clé configuré</span>
+                        : (phase.triggerKeywords ?? []).map(kw => (
+                          <code key={kw} style={{ background: "#f59e0b15", border: "1px solid #f59e0b33", color: "#f59e0b", padding: "2px 8px", borderRadius: 5, fontSize: 12 }}>{kw}</code>
+                        ))
+                      }
+                    </div>
+                  )}
+                  <p style={{ margin: "6px 0 0", fontSize: 11, color: "#4b5563" }}>
+                    Si le fan envoie un de ces mots, le bot passe immédiatement à la phase suivante — sans attendre le compteur de messages.
+                  </p>
                 </div>
 
                 {/* Flèche vers suivante */}
