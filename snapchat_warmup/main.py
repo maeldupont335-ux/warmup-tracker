@@ -17,9 +17,10 @@ logger.add(sys.stderr, level="INFO",
 logger.add("logs/warmup.log", rotation="1 day", retention="7 days", level="DEBUG",
            format="{time:YYYY-MM-DD HH:mm:ss} | {level:<8} | {message}")
 
-import wda
+from appium import webdriver
+from appium.options.ios import XCUITestOptions
 
-from config import WDA_URL, LOW_BATTERY_THRESHOLD, STATE_FILE
+from config import CAPS, APPIUM_SERVER, LOW_BATTERY_THRESHOLD, STATE_FILE
 from warmup_plan import get_plan_for_day
 from scheduler import WarmupScheduler
 from actions.snapchat import SnapchatDriver
@@ -62,6 +63,13 @@ def _advance_day(state: dict) -> dict:
     return state
 
 
+def _create_driver() -> webdriver.Remote:
+    options = XCUITestOptions()
+    for k, v in CAPS.items():
+        options.set_capability(k, v)
+    return webdriver.Remote(APPIUM_SERVER, options=options)
+
+
 def run_session(session_name: str = "manual", force_day: int = None):
     state = load_state()
     if force_day is not None:
@@ -74,12 +82,11 @@ def run_session(session_name: str = "manual", force_day: int = None):
     logger.info(f"Plan: {plan.session_duration[0]}-{plan.session_duration[1]} min")
 
     load_names()
+    driver = None
 
-    client = None
-    snap = None
     try:
-        client = wda.Client(WDA_URL)
-        snap = SnapchatDriver(client)
+        driver = _create_driver()
+        snap = SnapchatDriver(driver)
 
         battery = snap.check_battery()
         if battery < LOW_BATTERY_THRESHOLD:
@@ -88,7 +95,6 @@ def run_session(session_name: str = "manual", force_day: int = None):
 
         snap.open_snapchat()
 
-        # Construction de la liste d'actions
         actions = []
         if plan.spotlight_videos:
             actions.append(("spotlight", random_count(plan.spotlight_videos)))
@@ -102,7 +108,6 @@ def run_session(session_name: str = "manual", force_day: int = None):
             actions.append(("story", 1))
 
         actions = shuffle_actions(actions)
-
         start = datetime.now()
         target_s = random.uniform(*plan.session_duration) * 60
 
@@ -126,20 +131,17 @@ def run_session(session_name: str = "manual", force_day: int = None):
                 logger.error(f"Erreur action '{action_name}': {e}")
             action_delay()
 
-        # Acceptation amis (budget quotidien)
         if plan.accept_friends_per_day and plan.accept_friends_per_day[1] > 0:
             daily_max = random_count(plan.accept_friends_per_day)
             remaining = max(0, daily_max - state["friends_accepted_today"])
             if remaining > 0:
-                n = snap.accept_friend_requests(remaining, is_french_male)
-                state["friends_accepted_today"] += n
+                state["friends_accepted_today"] += snap.accept_friend_requests(remaining, is_french_male)
 
-        # Ajout rapide (par session)
         if plan.quick_add_per_session and plan.quick_add_per_session[1] > 0:
-            n = snap.quick_add_friends(random_count(plan.quick_add_per_session), is_french_male)
-            state["friends_added_today"] += n
+            state["friends_added_today"] += snap.quick_add_friends(
+                random_count(plan.quick_add_per_session), is_french_male
+            )
 
-        # Remplir le temps restant avec de la micro-activité
         while (datetime.now() - start).total_seconds() < target_s:
             snap.micro_activity()
             delay(30, 90)
@@ -157,13 +159,11 @@ def run_session(session_name: str = "manual", force_day: int = None):
 
     except Exception as e:
         logger.error(f"Erreur critique: {e}", exc_info=True)
-        if any(k in str(e).lower() for k in ("connection", "refused", "timeout")):
-            logger.critical("WDA inaccessible — vérifie que tidevice xctest tourne")
         raise
     finally:
-        if snap and snap.s:
+        if driver:
             try:
-                snap.s.close()
+                driver.quit()
             except Exception:
                 pass
 
@@ -183,8 +183,8 @@ def cmd_status():
     print(f"  Démarré le     : {state['start_date'] or '-'}")
     print(f"\n  Plan jour {state['current_day']}:")
     print(f"    Durée          : {plan.session_duration[0]}-{plan.session_duration[1]} min")
-    print(f"    Spotlight      : {plan.spotlight_videos} vidéos")
-    print(f"    Stories        : {plan.stories_friends} amis")
+    print(f"    Spotlight      : {plan.spotlight_videos}")
+    print(f"    Stories        : {plan.stories_friends}")
     print(f"    Accepter/jour  : {plan.accept_friends_per_day}")
     print(f"    Ajout rapide/s : {plan.quick_add_per_session}")
     print(f"    Conversations  : {plan.open_convos}")
@@ -205,7 +205,7 @@ def cmd_reset():
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Snapchat Warm-up — iOS via WDA")
+    parser = argparse.ArgumentParser(description="Snapchat Warm-up — iOS via Appium")
     parser.add_argument("--start", action="store_true", help="Scheduler automatique 2x/jour")
     parser.add_argument("--status", action="store_true", help="Voir l'état")
     parser.add_argument("--session", metavar="now", help="Forcer une session (valeur: now)")

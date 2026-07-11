@@ -36,6 +36,9 @@ yarn-error.log*
 # vercel
 .vercel
 
+# données perso (token OnlyChat + historique de revenus) : jamais commité
+/data/
+
 # typescript
 *.tsbuildinfo
 next-env.d.ts

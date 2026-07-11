@@ -1,5 +1,4 @@
-facebook-wda>=0.4.3
-tidevice>=0.9.0
+appium-python-client>=3.0.0
 apscheduler>=3.10.0
 loguru>=0.7.0
 python-dotenv>=1.0.0

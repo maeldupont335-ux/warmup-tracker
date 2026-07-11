@@ -2,7 +2,9 @@ import random
 import time
 from typing import Callable, Optional
 
-import wda
+from appium import webdriver
+from appium.webdriver.common.appiumby import AppiumBy
+from selenium.common.exceptions import NoSuchElementException, WebDriverException
 from loguru import logger
 
 from config import BUNDLE_ID
@@ -13,9 +15,8 @@ from actions.human import (
 
 
 class SnapchatDriver:
-    def __init__(self, client: wda.Client):
-        self.c = client
-        self.s: Optional[wda.Session] = None
+    def __init__(self, driver: webdriver.Remote):
+        self.driver = driver
         self._w: Optional[int] = None
         self._h: Optional[int] = None
 
@@ -26,15 +27,15 @@ class SnapchatDriver:
     @property
     def W(self) -> int:
         if not self._w:
-            sz = self.c.window_size()
-            self._w, self._h = sz.width, sz.height
+            sz = self.driver.get_window_size()
+            self._w, self._h = sz["width"], sz["height"]
         return self._w
 
     @property
     def H(self) -> int:
         if not self._h:
-            sz = self.c.window_size()
-            self._w, self._h = sz.width, sz.height
+            sz = self.driver.get_window_size()
+            self._w, self._h = sz["width"], sz["height"]
         return self._h
 
     # ------------------------------------------------------------------ #
@@ -42,12 +43,10 @@ class SnapchatDriver:
     # ------------------------------------------------------------------ #
 
     def _tap(self, x: float, y: float):
-        self.s.tap(int(x), int(y))
+        self.driver.execute_script("mobile: tap", {"x": int(x), "y": int(y)})
 
-    def _swipe(self, sx: float, sy: float, ex: float, ey: float, dur: float = None):
-        if dur is None:
-            dur = random_swipe_duration() / 1000.0
-        self.s.swipe(int(sx), int(sy), int(ex), int(ey), dur)
+    def _swipe(self, sx: float, sy: float, ex: float, ey: float, ms: int = None):
+        self.driver.swipe(int(sx), int(sy), int(ex), int(ey), ms or random_swipe_duration())
 
     def _swipe_up(self):
         cx = self.W * 0.5
@@ -57,39 +56,35 @@ class SnapchatDriver:
         cx = self.W * 0.5
         self._swipe(cx, self.H * 0.30, cx, self.H * 0.70)
 
-    def _find(self, **kwargs):
-        """Retourne l'élément ou None."""
-        try:
-            sel = self.s(**kwargs)
-            if sel.exists:
-                return sel.get(timeout=3)
-        except Exception:
-            pass
+    def _find(self, *locators):
+        """Essaie chaque (By, value) dans l'ordre, retourne le premier trouvé."""
+        for by, value in locators:
+            try:
+                return self.driver.find_element(by, value)
+            except (NoSuchElementException, WebDriverException):
+                continue
         return None
 
-    def _find_any(self, *names: str):
-        """Essaie les noms d'accessibilité dans l'ordre."""
+    def _find_name(self, *names: str):
         for name in names:
-            el = self._find(name=name)
+            el = self._find((AppiumBy.ACCESSIBILITY_ID, name))
             if el:
                 return el
         return None
 
     def _back(self):
-        el = self._find_any("back", "Back", "Retour")
+        el = self._find_name("back", "Back", "Retour")
         if el:
-            el.tap()
+            el.click()
         else:
             self._tap(self.W * 0.05, self.H * 0.07)
 
-    def _username_near(self, index: int) -> Optional[str]:
-        """Récupère le texte de la cellule à l'index donné."""
+    def _username_near_button(self, btn) -> Optional[str]:
         try:
-            cells = self.s(className="XCUIElementTypeCell")
-            cell = cells[index].get(timeout=2)
-            texts = cell(className="XCUIElementTypeStaticText")
-            for i in range(texts.count):
-                val = (texts[i].get().label or "").strip()
+            cell = btn.find_element(AppiumBy.XPATH, "./ancestor::XCUIElementTypeCell[1]")
+            texts = cell.find_elements(AppiumBy.CLASS_NAME, "XCUIElementTypeStaticText")
+            for t in texts:
+                val = (t.get_attribute("value") or t.get_attribute("name") or "").strip()
                 if val and len(val) > 1:
                     return val.lower()
         except Exception:
@@ -97,18 +92,21 @@ class SnapchatDriver:
         return None
 
     # ------------------------------------------------------------------ #
-    # Session
+    # Session & device
     # ------------------------------------------------------------------ #
 
     def check_battery(self) -> int:
         try:
-            info = self.c.battery_info()
+            info = self.driver.execute_script("mobile: batteryInfo")
             return int(info.get("level", 1.0) * 100)
         except Exception:
             return 100
 
     def open_snapchat(self):
-        self.s = self.c.session(BUNDLE_ID)
+        try:
+            self.driver.activate_app(BUNDLE_ID)
+        except Exception:
+            pass
         delay(5, 10)
         logger.info("Snapchat ouvert")
 
@@ -117,9 +115,9 @@ class SnapchatDriver:
     # ------------------------------------------------------------------ #
 
     def _go_tab(self, names: list, fallback_x: float):
-        el = self._find_any(*names)
+        el = self._find_name(*names)
         if el:
-            el.tap()
+            el.click()
         else:
             self._tap(self.W * fallback_x, self.H * 0.935)
         delay(1, 3)
@@ -136,9 +134,9 @@ class SnapchatDriver:
     def go_to_add_friends(self):
         self._go_tab(["Profile", "Profil"], 0.10)
         delay(0.8, 2)
-        el = self._find_any("Add Friends", "Ajouter des amis")
+        el = self._find_name("Add Friends", "Ajouter des amis")
         if el:
-            el.tap()
+            el.click()
         delay(1, 3)
 
     # ------------------------------------------------------------------ #
@@ -154,7 +152,6 @@ class SnapchatDriver:
             watch = random_watch_time(8, 45)
             logger.debug(f"  Vidéo {i+1}/{n} — {watch:.1f}s")
 
-            # Parfois revenir en arrière (hésitation humaine)
             if i > 0 and random.random() < 0.10:
                 self._swipe_down()
                 delay(3, 8)
@@ -176,17 +173,14 @@ class SnapchatDriver:
         delay(1, 3)
 
         for i in range(n):
-            # Tap sur les avatars stories en haut de l'écran
             self._tap(self.W * (0.10 + (i % 5) * 0.15), self.H * 0.12)
             delay(0.8, 2)
             time.sleep(random_story_time())
 
             if random.random() < 0.70:
-                # Tap droit pour avancer dans la story
                 self._tap(self.W * 0.75, self.H * 0.50)
                 tap_delay()
             else:
-                # Swipe gauche pour changer d'ami
                 self._swipe(self.W * 0.80, self.H * 0.50, self.W * 0.20, self.H * 0.50)
                 delay(0.5, 1.5)
 
@@ -201,9 +195,9 @@ class SnapchatDriver:
         logger.info(f"Acceptation amis: max {max_count}")
         self.go_to_add_friends()
 
-        el = self._find_any("Added Me", "Mes amis ajoutés")
+        el = self._find_name("Added Me", "Mes amis ajoutés")
         if el:
-            el.tap()
+            el.click()
             delay(1, 3)
 
         accepted = 0
@@ -211,27 +205,29 @@ class SnapchatDriver:
             if accepted >= max_count:
                 break
 
-            sel = self.s(name="Accept")
-            count = sel.count if sel else 0
-            if count == 0:
+            buttons = self.driver.find_elements(
+                AppiumBy.XPATH,
+                "//XCUIElementTypeButton[@name='Accept' or @name='Accept friend request']"
+            )
+            if not buttons:
                 break
 
             progressed = False
-            for idx in range(count):
+            for btn in buttons:
                 if accepted >= max_count:
                     break
-                username = self._username_near(idx)
+                username = self._username_near_button(btn)
                 if username is not None and not name_filter(username):
                     logger.debug(f"Rejeté: {username}")
                     continue
                 try:
-                    sel[idx].get(timeout=2).tap()
+                    btn.click()
                     accepted += 1
                     progressed = True
                     logger.info(f"Accepté: {username or '?'} ({accepted}/{max_count})")
                     delay(3, 15)
                 except Exception as e:
-                    logger.warning(f"Échec acceptation: {e}")
+                    logger.warning(f"Échec: {e}")
 
             if not progressed:
                 self._swipe_up()
@@ -246,9 +242,9 @@ class SnapchatDriver:
         logger.info(f"Ajout rapide: {n}")
         self.go_to_add_friends()
 
-        el = self._find_any("Quick Add", "Ajout rapide")
+        el = self._find_name("Quick Add", "Ajout rapide")
         if el:
-            el.tap()
+            el.click()
             delay(1, 2)
 
         added = 0
@@ -256,27 +252,29 @@ class SnapchatDriver:
             if added >= n:
                 break
 
-            sel = self.s(name="Add")
-            count = sel.count if sel else 0
-            if count == 0:
+            buttons = self.driver.find_elements(
+                AppiumBy.XPATH,
+                "//XCUIElementTypeButton[@name='Add' or @name='Add friend']"
+            )
+            if not buttons:
                 break
 
             progressed = False
-            for idx in range(count):
+            for btn in buttons:
                 if added >= n:
                     break
-                username = self._username_near(idx)
+                username = self._username_near_button(btn)
                 if username is not None and not name_filter(username):
                     logger.debug(f"Sauté: {username}")
                     continue
                 try:
-                    sel[idx].get(timeout=2).tap()
+                    btn.click()
                     added += 1
                     progressed = True
                     logger.info(f"Ajouté: {username or '?'} ({added}/{n})")
                     delay(5, 20)
                 except Exception as e:
-                    logger.warning(f"Échec ajout: {e}")
+                    logger.warning(f"Échec: {e}")
 
             if not progressed or added < n:
                 self._swipe_up()
@@ -295,7 +293,6 @@ class SnapchatDriver:
             delay(1, 2)
             time.sleep(random.uniform(5, 20))
 
-            # Parfois taper dans la zone de texte sans envoyer
             if random.random() < 0.25:
                 self._tap(self.W * 0.50, self.H * 0.93)
                 delay(1, 3)
@@ -313,29 +310,29 @@ class SnapchatDriver:
         self.go_to_camera()
         delay(1, 3)
 
-        shutter = self._find_any("Shutter", "Déclencheur")
+        shutter = self._find_name("Shutter", "Déclencheur")
         if shutter:
-            shutter.tap()
+            shutter.click()
         else:
             self._tap(self.W * 0.50, self.H * 0.83)
         delay(1, 3)
 
-        send_to = self._find_any("Send To", "Envoyer à")
+        send_to = self._find_name("Send To", "Envoyer à")
         if not send_to:
             logger.warning("Bouton Send To introuvable")
             return
-        send_to.tap()
+        send_to.click()
         delay(1, 2)
 
         for i in range(n_recipients):
             self._tap(self.W * 0.50, self.H * (0.25 + i * 0.08))
             delay(0.5, 1.5)
 
-        delay(3, 8)  # Pause avant envoi
+        delay(3, 8)
 
-        send_btn = self._find_any("Send", "Envoyer")
+        send_btn = self._find_name("Send", "Envoyer")
         if send_btn:
-            send_btn.tap()
+            send_btn.click()
         delay(2, 5)
         logger.info("Snap envoyé")
 
@@ -344,33 +341,32 @@ class SnapchatDriver:
         self.go_to_camera()
         delay(1, 3)
 
-        shutter = self._find_any("Shutter", "Déclencheur")
+        shutter = self._find_name("Shutter", "Déclencheur")
         if shutter:
-            shutter.tap()
+            shutter.click()
         else:
             self._tap(self.W * 0.50, self.H * 0.83)
         delay(1, 3)
 
-        send_to = self._find_any("Send To", "Envoyer à")
+        send_to = self._find_name("Send To", "Envoyer à")
         if not send_to:
             logger.warning("Bouton Send To introuvable")
             return
-        send_to.tap()
+        send_to.click()
         delay(1, 2)
 
-        my_story = self._find_any("My Story", "Ma story")
+        my_story = self._find_name("My Story", "Ma story")
         if my_story:
-            my_story.tap()
+            my_story.click()
             delay(1, 2)
 
-        send_btn = self._find_any("Send", "Envoyer")
+        send_btn = self._find_name("Send", "Envoyer")
         if send_btn:
-            send_btn.tap()
+            send_btn.click()
         delay(2, 5)
         logger.info("Story postée")
 
     def micro_activity(self):
-        """Keep-alive entre les actions."""
         if random.random() < 0.5:
             self._swipe_up() if random.random() < 0.5 else self._swipe_down()
         else:

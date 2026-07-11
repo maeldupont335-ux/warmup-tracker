@@ -16,18 +16,37 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 # ── Sessions ──────────────────────────────────────────────────────────────────
-_sessions: dict[str, str] = {}   # token → profile_id
-SESSION_COOKIE = "ss_session"
+SESSION_COOKIE  = "ss_session"
 SESSION_MAX_AGE = 86400 * 7       # 7 jours
+
+def _load_sessions() -> dict[str, dict]:
+    try:
+        raw = json.loads(_SESSIONS_FILE.read_text(encoding="utf-8")) if _SESSIONS_FILE.exists() else {}
+    except Exception:
+        raw = {}
+    now = _time.time()
+    return {t: v for t, v in raw.items() if isinstance(v, dict) and v.get("exp", 0) > now}
+
+def _save_sessions(s: dict) -> None:
+    _SESSIONS_FILE.write_text(json.dumps(s, ensure_ascii=False), encoding="utf-8")
+
+_sessions: dict[str, dict] = _load_sessions()   # token → {pid, exp}
 
 def _new_session(profile_id: str) -> str:
     token = secrets.token_hex(32)
-    _sessions[token] = profile_id
+    _sessions[token] = {"pid": profile_id, "exp": _time.time() + SESSION_MAX_AGE}
+    _save_sessions(_sessions)
     return token
 
 def _get_session_profile(request: Request) -> str | None:
     token = request.cookies.get(SESSION_COOKIE)
-    return _sessions.get(token) if token else None
+    if not token: return None
+    entry = _sessions.get(token)
+    if not entry: return None
+    if entry.get("exp", 0) < _time.time():
+        _sessions.pop(token, None)
+        return None
+    return entry.get("pid")
 
 def _require_auth(request: Request) -> str:
     pid = _get_session_profile(request)
@@ -39,6 +58,7 @@ def _hash_password(pw: str) -> str:
     return hashlib.sha256(pw.strip().encode()).hexdigest()
 
 BASE_DIR      = Path(__file__).parent
+_SESSIONS_FILE = BASE_DIR / "sessions.json"
 # Sur Render : données persistées dans /data si DATA_DIR défini
 _DATA_DIR     = Path(os.environ.get("DATA_DIR", str(BASE_DIR)))
 _DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -109,6 +129,7 @@ _playlists: list[dict] = _load_json(PLAYLIST_FILE, [])
 _clients:      dict[str, object] = {}
 _phone_hashes: dict[str, str]    = {}
 _pending_phone: dict[str, str]   = {}
+_tg_lock = asyncio.Lock()  # Évite les conflits SQLite sur les fichiers .session
 
 async def _get_client(acc_id: str, accounts_list: list | None = None):
     from telethon import TelegramClient
@@ -126,10 +147,11 @@ async def _get_client(acc_id: str, accounts_list: list | None = None):
                 break
     if not acc:
         raise ValueError(f"Compte {acc_id} introuvable dans ce profil")
-    if acc_id not in _clients:
-        _clients[acc_id] = TelegramClient(acc["session_file"], API_ID, API_HASH)
-    c = _clients[acc_id]
-    if not c.is_connected(): await c.connect()
+    async with _tg_lock:
+        if acc_id not in _clients:
+            _clients[acc_id] = TelegramClient(acc["session_file"], API_ID, API_HASH)
+        c = _clients[acc_id]
+        if not c.is_connected(): await c.connect()
     return c
 
 # ── App ───────────────────────────────────────────────────────────────────────
@@ -139,15 +161,17 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], all
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import Response as StarletteResponse
 
-_PUBLIC_PATHS = {"/", "/api/auth/login", "/api/auth/logout", "/api/auth/check"}
+_PUBLIC_PATHS = {"/", "/api/auth/login", "/api/auth/logout", "/api/auth/check", "/api/auth/register"}
 
 class AuthMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         path = request.url.path
-        # Allow public paths, static files, and uploads
+        # Allow public paths, static files, uploads, and avatar images
         if (path in _PUBLIC_PATHS or
             path.startswith("/uploads/") or
-            path.startswith("/static/")):
+            path.startswith("/static/") or
+            path.startswith("/api/social/avatar/") or
+            (path.startswith("/api/accounts/") and path.endswith("/photo"))):
             return await call_next(request)
         # Protect all /api/* routes
         if path.startswith("/api/"):
@@ -170,22 +194,26 @@ app.mount("/uploads", StaticFiles(directory=str(UPLOAD_DIR)), name="uploads")
 # ─────────────────────────────────────────────────────────────────────────────
 @app.get("/api/accounts")
 async def list_accounts():
-    result = []
-    for acc in _accounts:
-        connected = False
+    async def _check(acc):
         try:
-            c = await _get_client(acc["id"])
-            connected = await c.is_user_authorized()
-        except: pass
-        result.append({**acc, "connected": connected})
-    return result
+            c = await asyncio.wait_for(_get_client(acc["id"]), timeout=5)
+            ok = await asyncio.wait_for(c.is_user_authorized(), timeout=5)
+            return {**acc, "connected": ok}
+        except:
+            return {**acc, "connected": False}
+    return await asyncio.gather(*[_check(a) for a in _accounts])
 
 @app.get("/api/accounts/{acc_id}/photo")
 async def get_account_photo(acc_id: str):
-    """Retourne la photo de profil Telegram (JPEG)."""
+    """Retourne la photo de profil Telegram (JPEG), avec cache disque."""
     import io
     from fastapi.responses import Response
-    # Compte inexistant dans le profil actif → 404 silencieux (pas de 500)
+    cache_dir = Path("/opt/storyscheduler/telegram_scraper/avatar_cache")
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    cache_file = cache_dir / f"tg_{acc_id}.jpg"
+    if cache_file.exists() and cache_file.stat().st_size > 0:
+        return Response(content=cache_file.read_bytes(), media_type="image/jpeg",
+                        headers={"Cache-Control": "public, max-age=86400"})
     acc = next((a for a in _accounts if a["id"] == acc_id), None)
     if not acc:
         raise HTTPException(404, "Compte non trouvé dans le profil actif")
@@ -198,8 +226,10 @@ async def get_account_photo(acc_id: str):
         if result is None:
             raise HTTPException(404, "Pas de photo")
         buf.seek(0)
-        return Response(content=buf.read(), media_type="image/jpeg",
-                        headers={"Cache-Control": "public, max-age=3600"})
+        data = buf.read()
+        cache_file.write_bytes(data)
+        return Response(content=data, media_type="image/jpeg",
+                        headers={"Cache-Control": "public, max-age=86400"})
     except HTTPException:
         raise
     except Exception:
@@ -211,6 +241,8 @@ async def accounts_send_code(data: dict):
     if not phone: raise HTTPException(400,"Numéro requis")
     acc_id = uuid.uuid4().hex[:8]
     session_file = str(_get_profile_data_dir() / f"session_story_{acc_id}")
+    # Marqueur pour éviter que _recover_orphan_sessions récupère ce fichier si l'ajout est abandonné
+    Path(session_file + ".pending").touch()
     _pending_phone[acc_id] = phone
     from telethon import TelegramClient
     client = TelegramClient(session_file, API_ID, API_HASH)
@@ -231,8 +263,10 @@ async def accounts_verify_code(data: dict):
         me = await client.get_me()
         name = f"{me.first_name or ''} {me.last_name or ''}".strip()
         display = f"{name} (@{me.username})" if me.username else name
-        acc = {"id":acc_id,"phone":phone,"name":display,"session_file":str(_get_profile_data_dir()/f"session_story_{acc_id}")}
+        sess_path = str(_get_profile_data_dir()/f"session_story_{acc_id}")
+        acc = {"id":acc_id,"phone":phone,"name":display,"session_file":sess_path}
         _accounts.append(acc); _save_json(ACCOUNTS_FILE, _accounts)
+        Path(sess_path + ".pending").unlink(missing_ok=True)
         _pending_phone.pop(acc_id,None); _phone_hashes.pop(acc_id,None)
         return {"ok":True,"acc_id":acc_id,"name":display}
     except Exception as e:
@@ -250,8 +284,10 @@ async def accounts_verify_2fa(data: dict):
         name = f"{me.first_name or ''} {me.last_name or ''}".strip()
         display = f"{name} (@{me.username})" if me.username else name
         phone = _pending_phone.get(acc_id,"")
-        acc = {"id":acc_id,"phone":phone,"name":display,"session_file":str(_get_profile_data_dir()/f"session_story_{acc_id}")}
+        sess_path = str(_get_profile_data_dir()/f"session_story_{acc_id}")
+        acc = {"id":acc_id,"phone":phone,"name":display,"session_file":sess_path}
         _accounts.append(acc); _save_json(ACCOUNTS_FILE, _accounts)
+        Path(sess_path + ".pending").unlink(missing_ok=True)
         _pending_phone.pop(acc_id,None); _phone_hashes.pop(acc_id,None)
         return {"ok":True,"acc_id":acc_id,"name":display}
     except Exception as e:
@@ -434,7 +470,7 @@ async def schedule_stories(req: ScheduleRequest):
 
 @app.get("/api/scheduled")
 async def get_scheduled():
-    return sorted(_scheduled, key=lambda x: x["scheduled_at"])
+    return sorted(_load_json(SCHED_FILE, []), key=lambda x: x["scheduled_at"])
 
 @app.get("/api/telegram/next-dates")
 async def get_telegram_next_dates():
@@ -571,7 +607,7 @@ async def api_stats_views():
 @app.get("/api/stats/history")
 async def api_stats_history():
     """Retourne toutes les stories envoyées avec vues sauvegardées — permanent."""
-    sent = [s for s in _scheduled if s["status"] in ("done","partial")]
+    sent = [s for s in _scheduled if s["status"] in ("done","partial","error")]
     out  = []
     for s in sent:
         accs = []
@@ -588,6 +624,8 @@ async def api_stats_history():
                 "views_at":  res.get("views_updated_at"),
                 "sent_at":   res.get("sent_at"),
             })
+        if not accs and s["status"] == "error":
+            continue  # 100% d'échec → inutile dans les stats
         out.append({
             "id":            s["id"],
             "filename":      s["filename"],
@@ -815,6 +853,97 @@ def _oneup_ig_schedule(media_url: str, is_video: bool, account_id: str, dt_str: 
     except Exception as e:
         return False, str(e)[:200]
 
+def _oneup_fb_schedule(media_url: str, is_video: bool, account_id: str, dt_str: str, caption: str = "", oneup_key: str | None = None, category_id: str | None = None) -> tuple[bool, str]:
+    import requests as _req
+    dt_obj = datetime.fromisoformat(dt_str)
+    dt_fmt = dt_obj.strftime("%Y-%m-%d %H:%M")
+    endpoint = "schedulevideopost" if is_video else "scheduleimagepost"
+    key_media = "video_url" if is_video else "image_url"
+    params = {
+        "apiKey": oneup_key or ONEUP_API_KEY,
+        "category_id": category_id or CATEGORY_ID_FB,
+        "social_network_id": f'["{account_id}"]',
+        "scheduled_date_time": dt_fmt,
+        "content": caption,
+        key_media: media_url,
+    }
+    try:
+        r = _req.post(f"https://www.oneupapp.io/api/{endpoint}", params=params, timeout=30)
+        try:
+            ok = r.status_code in (200, 201) and not r.json().get("error")
+        except Exception:
+            ok = r.status_code in (200, 201)
+        return ok, r.text[:200]
+    except Exception as e:
+        return False, str(e)[:200]
+
+async def _fb_scheduler_loop():
+    """Envoie les posts Facebook programmés — parcourt TOUS les profils à chaque tick."""
+    await asyncio.sleep(20)
+    import re as _re_fb
+    while True:
+        now = datetime.now(PARIS_TZ)
+        try:
+            profs = _load_profiles()
+        except Exception:
+            profs = []
+        for prof in profs:
+            pid = prof["id"]
+            pdir = _get_profile_data_dir(pid)
+            fb_sf = pdir / "facebook_scheduled.json"
+            if not fb_sf.exists():
+                continue
+            try:
+                fb_scheduled  = _load_json(fb_sf, [])
+                fb_accounts   = prof.get("facebook_accounts", [])
+                p_oneup       = prof.get("oneup_api_key", ONEUP_API_KEY)
+                p_cat         = prof.get("category_id_facebook", CATEGORY_ID_FB)
+                p_cn          = prof.get("cloudinary_cloud_name", CLOUDINARY_CLOUD_NAME)
+                p_ck          = prof.get("cloudinary_api_key", CLOUDINARY_API_KEY_CL)
+                p_cs          = prof.get("cloudinary_api_secret", CLOUDINARY_API_SECRET)
+                p_fld         = _re_fb.sub(r"[^A-Za-z0-9_-]", "", prof.get("name") or pid) or pid
+            except Exception:
+                continue
+            for story in list(fb_scheduled):
+                if story["status"] != "pending": continue
+                try:
+                    dt = datetime.fromisoformat(story["scheduled_at"])
+                    if dt.tzinfo is None: dt = dt.replace(tzinfo=PARIS_TZ)
+                    if now < dt: continue
+                except Exception: continue
+                story["status"] = "posting"
+                _save_json(fb_sf, fb_scheduled)
+                fpath = UPLOAD_DIR / story["filename"]
+                if not fpath.exists():
+                    story["status"] = "error"
+                    story["results"] = {"_": {"status": "error", "error": "Fichier introuvable"}}
+                    _save_json(fb_sf, fb_scheduled)
+                    continue
+                loop = asyncio.get_event_loop()
+                is_video = fpath.suffix.lower() in (".mp4", ".mov", ".avi")
+                with concurrent.futures.ThreadPoolExecutor() as pool:
+                    media_url = await loop.run_in_executor(pool, _cloudinary_upload, fpath, is_video, p_cn, p_ck, p_cs, p_fld)
+                if not media_url:
+                    story["status"] = "error"
+                    story["results"] = {"_": {"status": "error", "error": "Upload Cloudinary échoué"}}
+                    _save_json(fb_sf, fb_scheduled)
+                    continue
+                results = {}
+                for n, acc_id in enumerate(story.get("account_ids", [])):
+                    acc = next((a for a in fb_accounts if a["id"] == acc_id), None)
+                    uname = acc["username"] if acc else acc_id
+                    dt_offset = (datetime.fromisoformat(story["scheduled_at"]) + timedelta(minutes=n)).isoformat()
+                    with concurrent.futures.ThreadPoolExecutor() as pool2:
+                        ok, msg = await loop.run_in_executor(
+                            pool2, _oneup_fb_schedule, media_url, is_video, acc_id, dt_offset, story.get("caption", ""), p_oneup, p_cat)
+                    results[acc_id] = {"username": uname, "status": "done" if ok else "error", "msg": msg}
+                story["results"] = results
+                ss = [r["status"] for r in results.values()]
+                story["status"] = "done" if all(s == "done" for s in ss) else "error" if all(s == "error" for s in ss) else "partial"
+                _save_json(fb_sf, fb_scheduled)
+                print(f"[FB][{prof.get('name','?')}] {story['filename']} → {story['status']}", flush=True)
+        await asyncio.sleep(30)
+
 @app.get("/api/stats/live")
 async def api_stats_live():
     """Récupère TOUTES les stories actives de chaque compte Telegram via Telethon
@@ -1001,23 +1130,76 @@ async def _scheduler_loop():
 
 def _recover_orphan_sessions():
     """Réinjecte dans _accounts les fichiers .session du dossier du profil actif uniquement.
-    Ne scanne PAS les autres dossiers pour éviter la contamination inter-profils."""
+    Ignore les sessions marquées .pending (ajout abandonné en cours).
+    Nettoie les fichiers .session abandonnés (marqués .pending depuis >1h)."""
+    import time
     existing_ids = {a["id"] for a in _accounts}
     recovered = 0
-    # Chercher UNIQUEMENT dans le dossier de données du profil actif
     pdir = _get_profile_data_dir()
     for sess_file in sorted(pdir.glob("session_story_*.session")):
         acc_id = sess_file.stem[len("session_story_"):]
-        if acc_id and acc_id not in existing_ids:
-            session_path = str(sess_file.parent / sess_file.stem)
-            _accounts.append({"id": acc_id, "session_file": session_path,
-                               "name": f"Compte {acc_id[:8]}", "phone": "?"})
-            existing_ids.add(acc_id)
-            recovered += 1
-            print(f"[RECOVER] Session orpheline réinjectée : {acc_id}", flush=True)
+        if not acc_id or acc_id in existing_ids:
+            continue
+        pending_marker = sess_file.parent / (sess_file.stem + ".pending")
+        if pending_marker.exists():
+            # Session en cours d'ajout ou abandonnée : nettoyer si >1h
+            age = time.time() - pending_marker.stat().st_mtime
+            if age > 3600:
+                try:
+                    sess_file.unlink(missing_ok=True)
+                    (Path(str(sess_file) + "-journal")).unlink(missing_ok=True)
+                    pending_marker.unlink(missing_ok=True)
+                    print(f"[CLEANUP] Session abandonnée supprimée : {acc_id}", flush=True)
+                except Exception:
+                    pass
+            else:
+                print(f"[SKIP] Session en attente de vérification : {acc_id}", flush=True)
+            continue
+        session_path = str(sess_file.parent / sess_file.stem)
+        _accounts.append({"id": acc_id, "session_file": session_path,
+                           "name": f"Compte {acc_id[:8]}", "phone": "?"})
+        existing_ids.add(acc_id)
+        recovered += 1
+        print(f"[RECOVER] Session orpheline réinjectée : {acc_id}", flush=True)
     if recovered:
         _save_json(ACCOUNTS_FILE, _accounts)
     return recovered
+
+async def _tg_keepalive_loop():
+    """Reconnecte automatiquement les comptes Telegram déconnectés (tous profils)."""
+    from telethon import TelegramClient
+    await asyncio.sleep(60)  # Laisser le démarrage se terminer
+    while True:
+        try:
+            profs = _load_profiles()
+            for prof in profs:
+                pdir = _get_profile_data_dir(prof["id"])
+                accs_file = pdir / "story_accounts.json"
+                if not accs_file.exists():
+                    continue
+                accs = _load_json(accs_file, [])
+                for acc in accs:
+                    acc_id = acc.get("id")
+                    session_file = acc.get("session_file", "")
+                    if not acc_id or not session_file:
+                        continue
+                    if not Path(session_file + ".session").exists():
+                        continue
+                    try:
+                        async with _tg_lock:
+                            if acc_id not in _clients:
+                                _clients[acc_id] = TelegramClient(session_file, API_ID, API_HASH)
+                            c = _clients[acc_id]
+                            if not c.is_connected():
+                                await c.connect()
+                        if c.is_connected() and not await c.is_user_authorized():
+                            print(f"[KEEPALIVE] Session expirée : {acc.get('name', acc_id)} — reconnexion manuelle requise", flush=True)
+                    except Exception as e:
+                        print(f"[KEEPALIVE] {acc_id}: {e}", flush=True)
+        except Exception as e:
+            print(f"[KEEPALIVE] Erreur boucle: {e}", flush=True)
+        await asyncio.sleep(300)  # Vérifier toutes les 5 minutes
+
 
 @app.on_event("startup")
 async def on_startup():
@@ -1050,6 +1232,8 @@ async def on_startup():
     asyncio.create_task(_snapshot_views_loop())
     asyncio.create_task(_snap_scheduler_loop())
     asyncio.create_task(_ig_scheduler_loop())
+    asyncio.create_task(_fb_scheduler_loop())
+    asyncio.create_task(_tg_keepalive_loop())
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  SNAPCHAT — One Up + Cloudinary
@@ -1067,12 +1251,9 @@ _snap_scheduled: list[dict] = _load_json(SNAP_SCHED_FILE, [])
 SNAP_BLOCKED_FILE     = _DATA_DIR / "snap_blocked_until.json"
 def _load_snap_blocked() -> dict: return _load_json(SNAP_BLOCKED_FILE, {})
 def _save_snap_blocked(d: dict): _save_json(SNAP_BLOCKED_FILE, d)
-SNAP_PLANNING_FILE    = _DATA_DIR / "snap_plannings.json"
-_snap_plannings: list[dict] = _load_json(SNAP_PLANNING_FILE, [])
-TG_PLANNING_FILE      = _DATA_DIR / "tg_plannings.json"
-_tg_plannings: list[dict]   = _load_json(TG_PLANNING_FILE, [])
-IG_PLANNING_FILE      = _DATA_DIR / "ig_plannings.json"
-_ig_plannings: list[dict]   = _load_json(IG_PLANNING_FILE, [])
+def _planning_file(platform: str) -> Path:
+    """Returns the planning JSON file path for the active profile."""
+    return _get_profile_data_dir() / f"{platform}_plannings.json"
 
 SNAP_ACCOUNTS = [
     {"username": "la_petite2003",   "id": "24c727b3-1030-40ef-8b69-d1eb279823e2"},
@@ -1085,99 +1266,147 @@ SNAP_ACCOUNTS = [
 
 @app.get("/api/tg/plannings")
 async def get_tg_plannings():
-    return _tg_plannings
+    return _load_json(_planning_file("tg"), [])
 
 @app.post("/api/tg/plannings")
 async def save_tg_planning(req: dict = Body(...)):
-    global _tg_plannings
     name   = req.get("name", "").strip()
     photos = req.get("photos", [])
     if not name:   raise HTTPException(400, "Nom requis")
     if not photos: raise HTTPException(400, "Aucune photo")
     entry = {"id": uuid.uuid4().hex[:8], "name": name, "photos": photos,
              "created_at": datetime.now().isoformat(), "count": len(photos)}
-    _tg_plannings.append(entry)
-    _save_json(TG_PLANNING_FILE, _tg_plannings)
+    f = _planning_file("tg"); plans = _load_json(f, []); plans.append(entry); _save_json(f, plans)
     return entry
 
 @app.delete("/api/tg/plannings/{pid}")
 async def delete_tg_planning(pid: str):
-    global _tg_plannings
-    _tg_plannings = [p for p in _tg_plannings if p["id"] != pid]
-    _save_json(TG_PLANNING_FILE, _tg_plannings)
+    f = _planning_file("tg"); plans = [p for p in _load_json(f, []) if p["id"] != pid]; _save_json(f, plans)
+    return {"ok": True}
+
+@app.patch("/api/tg/plannings/{pid}")
+async def rename_tg_planning(pid: str, req: dict = Body(...)):
+    name = req.get("name", "").strip()
+    if not name: raise HTTPException(400, "Nom requis")
+    f = _planning_file("tg"); plans = _load_json(f, [])
+    for p in plans:
+        if p["id"] == pid: p["name"] = name
+    _save_json(f, plans)
     return {"ok": True}
 
 @app.patch("/api/tg/plannings/reorder")
 async def reorder_tg_plannings(req: dict = Body(...)):
-    global _tg_plannings
     order = {id: i for i, id in enumerate(req.get("ids", []))}
-    _tg_plannings.sort(key=lambda p: order.get(p["id"], 9999))
-    _save_json(TG_PLANNING_FILE, _tg_plannings)
+    f = _planning_file("tg"); plans = _load_json(f, []); plans.sort(key=lambda p: order.get(p["id"], 9999)); _save_json(f, plans)
     return {"ok": True}
 
 @app.get("/api/snap/plannings")
 async def get_snap_plannings():
-    return _snap_plannings
+    return _load_json(_planning_file("snap"), [])
 
 @app.post("/api/snap/plannings")
 async def save_snap_planning(req: dict = Body(...)):
-    global _snap_plannings
-    name   = req.get("name", "").strip()
-    photos = req.get("photos", [])
-    if not name:   raise HTTPException(400, "Nom requis")
-    if not photos: raise HTTPException(400, "Aucune photo")
-    pid = uuid.uuid4().hex[:8]
-    entry = {"id": pid, "name": name, "photos": photos,
-             "created_at": datetime.now().isoformat(), "count": len(photos)}
-    _snap_plannings.append(entry)
-    _save_json(SNAP_PLANNING_FILE, _snap_plannings)
-    return entry
-
-@app.delete("/api/snap/plannings/{pid}")
-async def delete_snap_planning(pid: str):
-    global _snap_plannings
-    _snap_plannings = [p for p in _snap_plannings if p["id"] != pid]
-    _save_json(SNAP_PLANNING_FILE, _snap_plannings)
-    return {"ok": True}
-
-@app.patch("/api/snap/plannings/reorder")
-async def reorder_snap_plannings(req: dict = Body(...)):
-    global _snap_plannings
-    order = {id: i for i, id in enumerate(req.get("ids", []))}
-    _snap_plannings.sort(key=lambda p: order.get(p["id"], 9999))
-    _save_json(SNAP_PLANNING_FILE, _snap_plannings)
-    return {"ok": True}
-
-@app.get("/api/ig/plannings")
-async def get_ig_plannings():
-    return _ig_plannings
-
-@app.post("/api/ig/plannings")
-async def save_ig_planning(req: dict = Body(...)):
-    global _ig_plannings
     name   = req.get("name", "").strip()
     photos = req.get("photos", [])
     if not name:   raise HTTPException(400, "Nom requis")
     if not photos: raise HTTPException(400, "Aucune photo")
     entry = {"id": uuid.uuid4().hex[:8], "name": name, "photos": photos,
              "created_at": datetime.now().isoformat(), "count": len(photos)}
-    _ig_plannings.append(entry)
-    _save_json(IG_PLANNING_FILE, _ig_plannings)
+    f = _planning_file("snap"); plans = _load_json(f, []); plans.append(entry); _save_json(f, plans)
+    return entry
+
+@app.delete("/api/snap/plannings/{pid}")
+async def delete_snap_planning(pid: str):
+    f = _planning_file("snap"); plans = [p for p in _load_json(f, []) if p["id"] != pid]; _save_json(f, plans)
+    return {"ok": True}
+
+@app.patch("/api/snap/plannings/{pid}")
+async def rename_snap_planning(pid: str, req: dict = Body(...)):
+    name = req.get("name", "").strip()
+    if not name: raise HTTPException(400, "Nom requis")
+    f = _planning_file("snap"); plans = _load_json(f, [])
+    for p in plans:
+        if p["id"] == pid: p["name"] = name
+    _save_json(f, plans)
+    return {"ok": True}
+
+@app.patch("/api/snap/plannings/reorder")
+async def reorder_snap_plannings(req: dict = Body(...)):
+    order = {id: i for i, id in enumerate(req.get("ids", []))}
+    f = _planning_file("snap"); plans = _load_json(f, []); plans.sort(key=lambda p: order.get(p["id"], 9999)); _save_json(f, plans)
+    return {"ok": True}
+
+@app.get("/api/ig/plannings")
+async def get_ig_plannings():
+    return _load_json(_planning_file("ig"), [])
+
+@app.post("/api/ig/plannings")
+async def save_ig_planning(req: dict = Body(...)):
+    name   = req.get("name", "").strip()
+    photos = req.get("photos", [])
+    if not name:   raise HTTPException(400, "Nom requis")
+    if not photos: raise HTTPException(400, "Aucune photo")
+    entry = {"id": uuid.uuid4().hex[:8], "name": name, "photos": photos,
+             "created_at": datetime.now().isoformat(), "count": len(photos)}
+    f = _planning_file("ig"); plans = _load_json(f, []); plans.append(entry); _save_json(f, plans)
     return entry
 
 @app.delete("/api/ig/plannings/{pid}")
 async def delete_ig_planning(pid: str):
-    global _ig_plannings
-    _ig_plannings = [p for p in _ig_plannings if p["id"] != pid]
-    _save_json(IG_PLANNING_FILE, _ig_plannings)
+    f = _planning_file("ig"); plans = [p for p in _load_json(f, []) if p["id"] != pid]; _save_json(f, plans)
+    return {"ok": True}
+
+@app.patch("/api/ig/plannings/{pid}")
+async def rename_ig_planning(pid: str, req: dict = Body(...)):
+    name = req.get("name", "").strip()
+    if not name: raise HTTPException(400, "Nom requis")
+    f = _planning_file("ig"); plans = _load_json(f, [])
+    for p in plans:
+        if p["id"] == pid: p["name"] = name
+    _save_json(f, plans)
     return {"ok": True}
 
 @app.patch("/api/ig/plannings/reorder")
 async def reorder_ig_plannings(req: dict = Body(...)):
-    global _ig_plannings
     order = {id: i for i, id in enumerate(req.get("ids", []))}
-    _ig_plannings.sort(key=lambda p: order.get(p["id"], 9999))
-    _save_json(IG_PLANNING_FILE, _ig_plannings)
+    f = _planning_file("ig"); plans = _load_json(f, []); plans.sort(key=lambda p: order.get(p["id"], 9999)); _save_json(f, plans)
+    return {"ok": True}
+
+# ── Facebook Plannings (Médias) ────────────────────────────────────────────────
+@app.get("/api/fb/plannings")
+async def get_fb_plannings_media():
+    return _load_json(_planning_file("fb"), [])
+
+@app.post("/api/fb/plannings")
+async def save_fb_planning(req: dict = Body(...)):
+    name   = req.get("name", "").strip()
+    photos = req.get("photos", [])
+    if not name:   raise HTTPException(400, "Nom requis")
+    if not photos: raise HTTPException(400, "Aucune photo")
+    entry = {"id": uuid.uuid4().hex[:8], "name": name, "photos": photos,
+             "created_at": datetime.now().isoformat(), "count": len(photos)}
+    f = _planning_file("fb"); plans = _load_json(f, []); plans.append(entry); _save_json(f, plans)
+    return entry
+
+@app.delete("/api/fb/plannings/{pid}")
+async def delete_fb_planning(pid: str):
+    f = _planning_file("fb"); plans = [p for p in _load_json(f, []) if p["id"] != pid]; _save_json(f, plans)
+    return {"ok": True}
+
+@app.patch("/api/fb/plannings/{pid}")
+async def rename_fb_planning(pid: str, req: dict = Body(...)):
+    name = req.get("name", "").strip()
+    if not name: raise HTTPException(400, "Nom requis")
+    f = _planning_file("fb"); plans = _load_json(f, [])
+    for p in plans:
+        if p["id"] == pid: p["name"] = name
+    _save_json(f, plans)
+    return {"ok": True}
+
+@app.patch("/api/fb/plannings/reorder")
+async def reorder_fb_plannings(req: dict = Body(...)):
+    order = {id: i for i, id in enumerate(req.get("ids", []))}
+    f = _planning_file("fb"); plans = _load_json(f, []); plans.sort(key=lambda p: order.get(p["id"], 9999)); _save_json(f, plans)
     return {"ok": True}
 
 def _analyze_photo_ia(filepath: Path) -> dict:
@@ -1265,7 +1494,12 @@ def _cloudinary_upload(filepath: Path, is_video: bool, cloud_name: str | None = 
     if r.status_code != 200:
         print(f"[!] Cloudinary {r.status_code} (cloud='{_cn}'): {r.text[:150]}")
         return None
-    return r.json().get("secure_url")
+    url = r.json().get("secure_url") or ""
+    # Forcer le format MP4 pour les vidéos (MOV, AVI, etc. → MP4)
+    if is_video and url:
+        import re as _re_url
+        url = _re_url.sub(r'\.(mov|avi|mkv|m4v|3gp|webm)$', '.mp4', url, flags=_re_url.IGNORECASE)
+    return url or None
 
 def _oneup_schedule(media_url: str, is_video: bool, account_id: str, dt_str: str, oneup_key: str | None = None, category_id: str | None = None) -> tuple[bool, str]:
     import requests as _req
@@ -1297,7 +1531,7 @@ async def get_snap_accounts():
 
 @app.get("/api/snap/scheduled")
 async def get_snap_scheduled():
-    return _snap_scheduled
+    return _load_json(SNAP_SCHED_FILE, [])
 
 @app.delete("/api/snap/scheduled")
 async def delete_all_snap_scheduled():
@@ -1354,6 +1588,11 @@ IG_ACCOUNTS: list[dict] = []  # rempli par _reload_for_profile
 CATEGORY_ID_IG: str = ""
 IG_SCHED_FILE = _DATA_DIR / "instagram_scheduled.json"
 _ig_scheduled: list[dict] = _load_json(IG_SCHED_FILE, [])
+
+FB_ACCOUNTS: list[dict] = []  # rempli par _reload_for_profile
+CATEGORY_ID_FB: str = ""
+FB_SCHED_FILE = _DATA_DIR / "facebook_scheduled.json"
+_fb_scheduled: list[dict] = _load_json(FB_SCHED_FILE, [])
 _VIDEO_EXT = (".mp4", ".mov", ".avi", ".m4v", ".3gp", ".webm")
 SPOTLIGHT_POOL_DIR   = Path(os.environ.get("SPOTLIGHT_POOL_DIR",
     r"C:\Users\MAEL\Downloads\Telegram Desktop\MYM PAULINE\AUTO SPOTLIGHT\3 - A POSTER"))
@@ -1432,13 +1671,11 @@ def _reload_for_profile(profile_id: str):
     global CLOUDINARY_FOLDER
     global SNAP_ACCOUNTS, SPOTLIGHT_POOL_DIR, CATEGORY_ID_SNAP
     global SCHED_FILE, ACCOUNTS_FILE, PLAYLIST_FILE
-    global SNAP_SCHED_FILE, SNAP_BLOCKED_FILE, SNAP_PLANNING_FILE
-    global TG_PLANNING_FILE, SNAP_SPOTLIGHT_FILE, SPOTLIGHT_BLOCKED_FILE
+    global SNAP_SCHED_FILE, SNAP_BLOCKED_FILE, SNAP_SPOTLIGHT_FILE, SPOTLIGHT_BLOCKED_FILE
     global _REVENUE_FILE
-    global _accounts, _scheduled, _playlists, _snap_scheduled, _snap_plannings
-    global _tg_plannings, _snap_spotlight
+    global _accounts, _scheduled, _playlists, _snap_scheduled, _snap_spotlight
     global IG_ACCOUNTS, CATEGORY_ID_IG, IG_SCHED_FILE, _ig_scheduled
-    global IG_PLANNING_FILE, _ig_plannings
+    global FB_ACCOUNTS, CATEGORY_ID_FB, FB_SCHED_FILE, _fb_scheduled
     global _clients, _phone_hashes, _pending_phone
 
     profs = _load_profiles()
@@ -1456,6 +1693,9 @@ def _reload_for_profile(profile_id: str):
     CLOUDINARY_FOLDER = _re_f.sub(r"[^A-Za-z0-9_-]", "", prof.get("name") or profile_id) or profile_id
     if prof.get("spotlight_pool_dir"):
         SPOTLIGHT_POOL_DIR = Path(prof["spotlight_pool_dir"])
+    else:
+        # Dossier pool automatique par profil
+        SPOTLIGHT_POOL_DIR = _get_profile_data_dir(profile_id) / "spotlight_pool"
 
     pdir = _get_profile_data_dir(profile_id)
     SCHED_FILE             = pdir / "scheduled_stories.json"
@@ -1463,8 +1703,6 @@ def _reload_for_profile(profile_id: str):
     PLAYLIST_FILE          = pdir / "story_playlists.json"
     SNAP_SCHED_FILE        = pdir / "snap_scheduled.json"
     SNAP_BLOCKED_FILE      = pdir / "snap_blocked_until.json"
-    SNAP_PLANNING_FILE     = pdir / "snap_plannings.json"
-    TG_PLANNING_FILE       = pdir / "tg_plannings.json"
     SNAP_SPOTLIGHT_FILE    = pdir / "snap_spotlight.json"
     SPOTLIGHT_BLOCKED_FILE = pdir / "spotlight_blocked_until.json"
     _REVENUE_FILE          = pdir / "revenues.json"
@@ -1473,16 +1711,17 @@ def _reload_for_profile(profile_id: str):
     _scheduled     = _load_json(SCHED_FILE,        [])
     _playlists     = _load_json(PLAYLIST_FILE,     [])
     _snap_scheduled= _load_json(SNAP_SCHED_FILE,   [])
-    _snap_plannings= _load_json(SNAP_PLANNING_FILE,[])
-    _tg_plannings  = _load_json(TG_PLANNING_FILE,  [])
     _snap_spotlight= _load_json(SNAP_SPOTLIGHT_FILE,[])
 
     IG_SCHED_FILE    = pdir / "instagram_scheduled.json"
     _ig_scheduled    = _load_json(IG_SCHED_FILE, [])
     IG_ACCOUNTS      = prof.get("instagram_accounts", [])
     CATEGORY_ID_IG   = prof.get("category_id_instagram", "")
-    IG_PLANNING_FILE = pdir / "ig_plannings.json"
-    _ig_plannings    = _load_json(IG_PLANNING_FILE, [])
+
+    FB_SCHED_FILE    = pdir / "facebook_scheduled.json"
+    _fb_scheduled    = _load_json(FB_SCHED_FILE, [])
+    FB_ACCOUNTS      = prof.get("facebook_accounts", [])
+    CATEGORY_ID_FB   = prof.get("category_id_facebook", "")
 
     _clients.clear()
     _phone_hashes.clear()
@@ -1682,7 +1921,42 @@ async def api_auth_login(req: dict = Body(...)):
     _reload_for_profile(pid)
     _save_json(ACTIVE_PROFILE_FILE, {"id": pid})
     token = _new_session(pid)
-    resp = JSONResponse({"ok": True, "profile_id": pid, "profile_name": prof["name"]})
+    resp = JSONResponse({"ok": True, "profile_id": pid, "profile_name": prof["name"], "is_admin": bool(prof.get("is_admin"))})
+    resp.set_cookie(SESSION_COOKIE, token, httponly=True, samesite="lax", max_age=SESSION_MAX_AGE)
+    return resp
+
+@app.post("/api/auth/register")
+async def api_auth_register(req: dict = Body(...)):
+    import uuid
+    name     = req.get("name", "").strip()
+    login    = req.get("login", "").strip().lower()
+    password = req.get("password", "").strip()
+    if not name or not login or not password:
+        raise HTTPException(400, "Nom, identifiant et mot de passe requis")
+    if len(password) < 6:
+        raise HTTPException(400, "Le mot de passe doit faire au moins 6 caractères")
+    profs = _load_profiles()
+    if any(p.get("login", "").strip().lower() == login for p in profs):
+        raise HTTPException(409, "Cet identifiant est déjà utilisé")
+    new_pid = str(uuid.uuid4())
+    new_prof = {
+        "id": new_pid,
+        "owner_id": new_pid,
+        "name": name,
+        "login": login,
+        "password_hash": _hash_password(password),
+        "is_admin": False,
+        "accounts": [],
+        "stories": [],
+        "scheduled": [],
+    }
+    profs.append(new_prof)
+    _save_profiles(profs)
+    pid = new_pid
+    _reload_for_profile(pid)
+    _save_json(ACTIVE_PROFILE_FILE, {"id": pid})
+    token = _new_session(pid)
+    resp = JSONResponse({"ok": True, "profile_id": pid, "profile_name": name, "is_admin": False})
     resp.set_cookie(SESSION_COOKIE, token, httponly=True, samesite="lax", max_age=SESSION_MAX_AGE)
     return resp
 
@@ -1691,6 +1965,7 @@ async def api_auth_logout(request: Request):
     token = request.cookies.get(SESSION_COOKIE)
     if token:
         _sessions.pop(token, None)
+        _save_sessions(_sessions)
     resp = JSONResponse({"ok": True})
     resp.delete_cookie(SESSION_COOKIE)
     return resp
@@ -1703,7 +1978,8 @@ async def api_auth_check(request: Request):
     profs = _load_profiles()
     prof = next((p for p in profs if p["id"] == pid), None)
     name = prof["name"] if prof else pid
-    return {"ok": True, "profile_id": pid, "profile_name": name}
+    is_admin = bool(prof.get("is_admin")) if prof else False
+    return {"ok": True, "profile_id": pid, "profile_name": name, "is_admin": is_admin}
 
 # ── Profiles API ──────────────────────────────────────────────────────────────
 def _hash_pin(pin: str) -> str:
@@ -1714,11 +1990,18 @@ def _hash_pin(pin: str) -> str:
 async def api_get_profiles(request: Request):
     session_pid = _get_session_profile(request)
     profs = _load_profiles()
-    # Non-admins only see their own profile
     if session_pid:
         me = next((p for p in profs if p["id"] == session_pid), None)
-        if me and not me.get("is_admin"):
-            profs = [me]
+        if me:
+            # Premier admin = propriétaire des profils legacy sans owner_id
+            first_admin_id = next((p["id"] for p in profs if p.get("is_admin")), None)
+            def _owns(p):
+                oid = p.get("owner_id")
+                if oid:
+                    return oid == session_pid
+                # Profil legacy sans owner_id → appartient au premier admin
+                return session_pid == first_admin_id
+            profs = [p for p in profs if _owns(p)]
     safe = [{**p,
              "pin_set": bool(p.get("pin_hash")),
              "password_set": bool(p.get("password_hash")),
@@ -1728,11 +2011,13 @@ async def api_get_profiles(request: Request):
     return {"profiles": safe, "active_id": _get_active_profile_id()}
 
 @app.post("/api/profiles")
-async def api_create_profile(req: dict = Body(...)):
+async def api_create_profile(request: Request, req: dict = Body(...)):
+    session_pid = _get_session_profile(request)
     profs  = _load_profiles()
     pid    = str(uuid.uuid4())[:8]
     new_p  = {
         "id":                    pid,
+        "owner_id":              session_pid or pid,
         "name":                  req.get("name", "Nouveau profil").strip(),
         "oneup_api_key":         req.get("oneup_api_key", ""),
         "cloudinary_cloud_name": req.get("cloudinary_cloud_name", ""),
@@ -1777,63 +2062,47 @@ async def api_update_profile(pid: str, req: dict = Body(...)):
         _reload_for_profile(pid)
     return {**profs[idx], "pin_set": bool(profs[idx].get("pin_hash")), "pin_hash": None}
 
+def _oneup_fetch_social_accounts(key: str, platform: str) -> dict[str, dict]:
+    """Récupère les comptes d'une plateforme via l'API OneUp (listsocialaccounts)."""
+    import requests as _req
+    seen: dict[str, dict] = {}
+    platform_types = {
+        "snap": ["snapchat"],
+        "ig":   ["instagram"],
+        "fb":   ["facebook"],
+    }
+    kws = platform_types.get(platform, [platform])
+
+    try:
+        r = _req.get("https://www.oneupapp.io/api/listsocialaccounts",
+                     params={"apiKey": key}, timeout=15)
+        if r.status_code == 200:
+            raw = r.json()
+            items = raw.get("data") or []
+            for a in items:
+                sn = (a.get("social_network_type") or "").lower()
+                if not any(k in sn for k in kws):
+                    continue
+                sid  = str(a.get("social_account_id") or "")
+                name = (a.get("username") or a.get("full_name") or "").strip("@ ")
+                pic  = (a.get("profile_image_url") or a.get("picture_url")
+                        or a.get("avatar_url") or a.get("image_url")
+                        or a.get("profile_picture_url") or a.get("thumbnail") or "")
+                if sid and sid not in seen:
+                    seen[sid] = {"username": name or sid, "id": sid, "picture": pic}
+    except Exception:
+        pass
+
+    return seen
+
+
 @app.get("/api/oneup/snap-accounts")
 async def api_oneup_snap_accounts(oneup_key: str = ""):
-    """Récupère TOUS les comptes Snapchat connectés sur OneUp via l'analytics."""
-    import requests as _req
     key = oneup_key or ONEUP_API_KEY
     if not key:
         raise HTTPException(400, "Clef OneUp manquante")
-
-    seen_ids: dict[str, dict] = {}
-
-    # 1) Analytics sans social_network_id → retourne tous les comptes
-    for preset in ("last_30_days", "last_90_days", "last_7_days"):
-        try:
-            r = _req.get(
-                "https://analyze.oneupapp.io/api/snapchat/posts",
-                params={"apiKey": key, "preset": preset},
-                timeout=20
-            )
-            if r.status_code == 200:
-                data = r.json()
-                # La réponse peut être {accounts:[{social_network_id, name, posts:[]}]}
-                # ou une liste plate de posts
-                accs_block = data.get("accounts") or data.get("social_networks") or []
-                for acc in accs_block:
-                    sid  = str(acc.get("social_network_id") or acc.get("id") or "")
-                    name = (acc.get("name") or acc.get("username") or "").strip("@ ")
-                    if sid and sid not in seen_ids:
-                        seen_ids[sid] = {"username": name, "id": sid}
-                # Aussi chercher dans les posts plats
-                posts = data.get("posts") or data.get("data") or (data if isinstance(data, list) else [])
-                for p in posts:
-                    sid  = str(p.get("social_network_id") or p.get("account_id") or "")
-                    name = (p.get("social_network_name") or p.get("username") or
-                            p.get("account_name") or p.get("name") or "").strip("@ ")
-                    if sid and sid not in seen_ids:
-                        seen_ids[sid] = {"username": name, "id": sid}
-        except Exception:
-            pass
-
-    # 2) Essaie aussi l'analytics par compte connu pour trouver d'autres infos
-    for acc in SNAP_ACCOUNTS:
-        sid = str(acc.get("id",""))
-        if not sid: continue
-        if sid not in seen_ids:
-            seen_ids[sid] = {"username": acc.get("username",""), "id": sid}
-        elif not seen_ids[sid].get("username") and acc.get("username"):
-            seen_ids[sid]["username"] = acc["username"]
-
-    # 3) Si toujours vide, retourne au moins les comptes du profil actif
-    if not seen_ids:
-        for a in SNAP_ACCOUNTS:
-            sid = str(a.get("id",""))
-            if sid:
-                seen_ids[sid] = {"username": a.get("username",""), "id": sid}
-
-    accounts = [a for a in seen_ids.values() if a.get("id")]
-    return {"ok": True, "accounts": accounts, "raw_count": len(accounts)}
+    seen = _oneup_fetch_social_accounts(key, "snap")
+    return {"ok": True, "accounts": [a for a in seen.values() if a.get("id")]}
 
 
 @app.get("/api/instagram/accounts")
@@ -1842,7 +2111,7 @@ async def get_ig_accounts():
 
 @app.get("/api/instagram/scheduled")
 async def get_ig_scheduled():
-    return list(reversed(_ig_scheduled))
+    return list(reversed(_load_json(IG_SCHED_FILE, [])))
 
 @app.delete("/api/instagram/scheduled/{sid}")
 async def delete_ig_scheduled(sid: str):
@@ -1894,41 +2163,165 @@ async def ig_next_dates():
 
 @app.get("/api/oneup/ig-accounts")
 async def api_oneup_ig_accounts(oneup_key: str = ""):
-    """Récupère les comptes Instagram connectés sur OneUp."""
-    import requests as _req
     key = oneup_key or ONEUP_API_KEY
     if not key:
         raise HTTPException(400, "Clef OneUp manquante")
-    seen_ids: dict[str, dict] = {}
-    for preset in ("last_30_days", "last_90_days", "last_7_days"):
+    seen = _oneup_fetch_social_accounts(key, "ig")
+    return {"ok": True, "accounts": [a for a in seen.values() if a.get("id")]}
+
+
+@app.get("/api/facebook/accounts")
+async def get_fb_accounts():
+    return FB_ACCOUNTS
+
+@app.get("/api/facebook/scheduled")
+async def get_fb_scheduled():
+    return list(reversed(_load_json(FB_SCHED_FILE, [])))
+
+@app.delete("/api/facebook/scheduled/{sid}")
+async def delete_fb_scheduled(sid: str):
+    global _fb_scheduled
+    _fb_scheduled = [s for s in _fb_scheduled if s["id"] != sid]
+    _save_json(FB_SCHED_FILE, _fb_scheduled)
+    return {"ok": True}
+
+class FbScheduleRequest(BaseModel):
+    filename: str
+    scheduled_at: str
+    account_ids: list[str]
+    caption: str = ""
+
+@app.post("/api/facebook/schedule")
+async def schedule_fb_post(req: FbScheduleRequest):
+    import uuid as _uuid
+    entry = {
+        "id": _uuid.uuid4().hex[:8],
+        "filename": req.filename,
+        "scheduled_at": req.scheduled_at,
+        "account_ids": req.account_ids,
+        "caption": req.caption,
+        "status": "pending",
+        "results": {},
+        "created_at": datetime.now(PARIS_TZ).isoformat(),
+    }
+    _fb_scheduled.append(entry)
+    _save_json(FB_SCHED_FILE, _fb_scheduled)
+    return {"ok": True, "id": entry["id"]}
+
+@app.get("/api/oneup/fb-accounts")
+async def api_oneup_fb_accounts(oneup_key: str = ""):
+    key = oneup_key or ONEUP_API_KEY
+    if not key:
+        raise HTTPException(400, "Clef OneUp manquante")
+    seen = _oneup_fetch_social_accounts(key, "fb")
+    return {"ok": True, "accounts": [a for a in seen.values() if a.get("id")]}
+
+
+@app.get("/api/social/avatar/{platform}/{username}")
+async def api_social_avatar(platform: str, username: str, uid: str = ""):
+    """Proxy avec cache disque pour les photos de profil des comptes sociaux."""
+    from fastapi.responses import Response as _Resp
+    import requests as _req, hashlib as _hl
+    safe_user = "".join(c for c in username if c.isalnum() or c in "._-")[:60]
+    safe_plat = "".join(c for c in platform if c.isalnum())[:20]
+    safe_uid  = "".join(c for c in uid if c.isdigit())[:30]
+    cache_dir = Path("/opt/storyscheduler/telegram_scraper/avatar_cache")
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    # Use numeric uid for cache key when available (fb/ig) so we don't mix with username cache
+    ck_str = f"{safe_plat}:{safe_uid}" if safe_uid and safe_plat in ("fb", "ig") else f"{safe_plat}:{safe_user}"
+    cache_key = _hl.md5(ck_str.encode()).hexdigest()
+    cache_file = cache_dir / f"{cache_key}.jpg"
+    if cache_file.exists() and cache_file.stat().st_size > 0:
+        return _Resp(content=cache_file.read_bytes(), media_type="image/jpeg",
+                     headers={"Cache-Control": "public, max-age=86400"})
+    sources = []
+    # Facebook Graph API: works for FB pages and IG Business accounts with their numeric ID
+    if safe_uid and safe_plat in ("fb", "ig"):
+        sources.append(f"https://graph.facebook.com/{safe_uid}/picture?type=normal")
+    # unavatar.io works for Snapchat
+    if safe_plat == "snap":
+        sources.append(f"https://unavatar.io/snapchat/{safe_user}")
+    for url in sources:
         try:
-            r = _req.get(
-                "https://analyze.oneupapp.io/api/instagram/posts",
-                params={"apiKey": key, "preset": preset},
-                timeout=20
-            )
-            if r.status_code == 200:
-                data = r.json()
-                accs_block = data.get("accounts") or data.get("social_networks") or []
-                for acc in accs_block:
-                    sid  = str(acc.get("social_network_id") or acc.get("id") or "")
-                    name = (acc.get("name") or acc.get("username") or "").strip("@ ")
-                    if sid and sid not in seen_ids:
-                        seen_ids[sid] = {"username": name, "id": sid}
-                posts = data.get("posts") or data.get("data") or (data if isinstance(data, list) else [])
-                for p in posts:
-                    sid  = str(p.get("social_network_id") or p.get("account_id") or "")
-                    name = (p.get("social_network_name") or p.get("username") or p.get("name") or "").strip("@ ")
-                    if sid and sid not in seen_ids:
-                        seen_ids[sid] = {"username": name, "id": sid}
+            r = _req.get(url, timeout=8, headers={"User-Agent": "Mozilla/5.0"}, allow_redirects=True)
+            if r.status_code == 200 and len(r.content) > 500:
+                cache_file.write_bytes(r.content)
+                return _Resp(content=r.content, media_type="image/jpeg",
+                             headers={"Cache-Control": "public, max-age=86400"})
         except Exception:
-            pass
-    for a in IG_ACCOUNTS:
-        sid = str(a.get("id",""))
-        if sid and sid not in seen_ids:
-            seen_ids[sid] = {"username": a.get("username",""), "id": sid}
-    accounts = [a for a in seen_ids.values() if a.get("id")]
-    return {"ok": True, "accounts": accounts}
+            continue
+    # Fallback: SVG initials avatar (not cached — generated instantly)
+    initials = (safe_user[:2] or "??").upper()
+    color = {"snap": "#f5c518", "ig": "#c084fc", "fb": "#60a5fa"}.get(safe_plat, "#888")
+    svg = (f'<svg xmlns="http://www.w3.org/2000/svg" width="40" height="40" viewBox="0 0 40 40">'
+           f'<circle cx="20" cy="20" r="20" fill="#1a1a2e"/>'
+           f'<text x="20" y="26" text-anchor="middle" font-family="Arial,sans-serif" '
+           f'font-size="15" font-weight="bold" fill="{color}">{initials}</text></svg>')
+    return _Resp(content=svg.encode(), media_type="image/svg+xml",
+                 headers={"Cache-Control": "public, max-age=3600"})
+
+@app.post("/api/social/avatar/{platform}/{username}/set-url")
+async def api_social_avatar_set_url(platform: str, username: str, body: dict = Body(...)):
+    """Télécharge une photo depuis une URL fournie et la met en cache."""
+    from fastapi.responses import Response as _Resp
+    import requests as _req, hashlib as _hl
+    url = (body.get("url") or "").strip()
+    if not url or not url.startswith("http"):
+        raise HTTPException(400, "URL invalide")
+    safe_user = "".join(c for c in username if c.isalnum() or c in "._-")[:60]
+    safe_plat = "".join(c for c in platform if c.isalnum())[:20]
+    safe_uid  = "".join(c for c in (body.get("uid") or "") if c.isdigit())[:30]
+    cache_dir = Path("/opt/storyscheduler/telegram_scraper/avatar_cache")
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    ck_str = f"{safe_plat}:{safe_uid}" if safe_uid and safe_plat in ("fb", "ig") else f"{safe_plat}:{safe_user}"
+    cache_key = _hl.md5(ck_str.encode()).hexdigest()
+    cache_file = cache_dir / f"{cache_key}.jpg"
+    try:
+        r = _req.get(url, timeout=10, headers={"User-Agent": "Mozilla/5.0"}, allow_redirects=True)
+        if r.status_code != 200 or len(r.content) < 200:
+            raise HTTPException(400, f"URL inaccessible ({r.status_code})")
+        cache_file.write_bytes(r.content)
+        return {"ok": True, "size": len(r.content)}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(400, f"Erreur : {e}")
+
+@app.delete("/api/social/avatar/{platform}/{username}")
+async def api_social_avatar_clear(platform: str, username: str):
+    """Vide le cache pour forcer un rechargement."""
+    import hashlib as _hl
+    safe_user = "".join(c for c in username if c.isalnum() or c in "._-")[:60]
+    safe_plat = "".join(c for c in platform if c.isalnum())[:20]
+    cache_dir = Path("/opt/storyscheduler/telegram_scraper/avatar_cache")
+    cache_key = _hl.md5(f"{safe_plat}:{safe_user}".encode()).hexdigest()
+    cache_file = cache_dir / f"{cache_key}.jpg"
+    if cache_file.exists():
+        cache_file.unlink()
+    return {"ok": True}
+
+@app.get("/api/debug/oneup-raw")
+async def api_debug_oneup_raw():
+    """Debug : retourne les réponses brutes des endpoints OneUp pour diagnostiquer."""
+    import requests as _req
+    key = ONEUP_API_KEY
+    results = {}
+    test_urls = [
+        ("listsocialaccounts",    f"https://www.oneupapp.io/api/listsocialaccounts?apiKey={key}"),
+        ("listcategory",          f"https://www.oneupapp.io/api/listcategory?apiKey={key}"),
+        ("listcategoryaccount",   f"https://www.oneupapp.io/api/listcategoryaccount?apiKey={key}&category_id=177234"),
+    ]
+    for name, url in test_urls:
+        try:
+            r = _req.get(url, timeout=15)
+            try:
+                body = r.json()
+            except Exception:
+                body = r.text[:500]
+            results[name] = {"status": r.status_code, "body": body}
+        except Exception as e:
+            results[name] = {"error": str(e)}
+    return results
 
 
 @app.get("/api/profiles/{pid}/telegram-accounts")
@@ -2003,13 +2396,7 @@ async def api_activate_profile(pid: str, req: dict = Body(default={}), request: 
         pin = str(req.get("pin", "")).strip()
         if not pin or _hash_pin(pin) != prof["pin_hash"]:
             raise HTTPException(403, "PIN incorrect")
-    # Déconnecter proprement tous les clients Telethon avant de changer de profil
-    for client in list(_clients.values()):
-        try:
-            if client.is_connected():
-                await client.disconnect()
-        except Exception:
-            pass
+    _clients.clear()  # Libère les anciens clients sans attendre disconnect (keepalive les reconnecte)
     _save_json(ACTIVE_PROFILE_FILE, {"id": pid})
     _reload_for_profile(pid)
     return {"ok": True, "active_id": pid}
@@ -2096,9 +2483,16 @@ async def schedule_spotlight(req: dict = Body(...)):
                 _save_json(SNAP_SPOTLIGHT_FILE, _snap_spotlight); continue
 
             entry["cloudinary_url"] = media_url
+            # Générer URL miniature Cloudinary (so_0 = frame 0, format jpg)
+            thumb_url = media_url
+            import re as _re_th
+            thumb_url = _re_th.sub(r'/upload/', '/upload/so_0,w_120,h_160,c_fill/', thumb_url, count=1)
+            thumb_url = _re_th.sub(r'\.(mp4|mov|avi|mkv|m4v|webm)$', '.jpg', thumb_url, flags=_re_th.IGNORECASE)
+            entry["thumb_url"] = thumb_url
             with concurrent.futures.ThreadPoolExecutor() as pool:
                 ok, msg = await loop.run_in_executor(pool, _oneup_spotlight, media_url, acc_id, dt_str, "")
-            entry["status"] = "done" if ok else "error"
+            # "scheduled" = soumis à OneUp, sera posté à la date prévue
+            entry["status"] = "scheduled" if ok else "error"
             entry["result"] = {"msg": msg}
             _save_json(SNAP_SPOTLIGHT_FILE, _snap_spotlight)
             if ok:
@@ -2213,6 +2607,50 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--t1);font-
 .pin-key:active{transform:scale(.95)}
 .pin-cancel{font-size:.7rem;color:var(--t3);background:none;border:none;cursor:pointer;text-decoration:underline;margin-top:4px}
 /* Docs / Logout buttons */
+/* Documentation page */
+.doc-nav-section{margin-bottom:6px}
+.doc-nav-label{font-size:.65rem;font-weight:800;color:var(--t3);text-transform:uppercase;letter-spacing:.08em;padding:10px 16px 5px}
+.doc-nav-item{display:block;width:100%;text-align:left;padding:7px 16px 7px 22px;background:none;border:none;color:var(--t2);font-size:.8rem;cursor:pointer;border-radius:0;transition:.1s;border-left:2px solid transparent}
+.doc-nav-item:hover{color:var(--t1);background:var(--c1)}
+.doc-nav-item.active{color:var(--purple);border-left-color:var(--purple);background:rgba(124,58,237,.07);font-weight:700}
+.doc-breadcrumb{font-size:.68rem;color:var(--t3);font-weight:600;margin-bottom:10px;letter-spacing:.04em}
+.doc-h1{font-size:1.55rem;font-weight:900;letter-spacing:-.025em;color:var(--t1);margin:0 0 18px;line-height:1.2}
+.doc-h2{font-size:1rem;font-weight:800;color:var(--t1);margin:26px 0 12px;padding-top:6px}
+.doc-p{font-size:.85rem;color:var(--t2);line-height:1.75;margin:0 0 14px}
+.doc-callout{border-radius:10px;padding:13px 16px;font-size:.82rem;line-height:1.65;margin:16px 0}
+.doc-callout.info{background:rgba(124,58,237,.08);border:1px solid rgba(124,58,237,.22);color:#c4b5fd}
+.doc-callout.warn{background:rgba(245,158,11,.07);border:1px solid rgba(245,158,11,.2);color:#fcd34d}
+.doc-steps{display:flex;flex-direction:column;gap:12px;margin:14px 0}
+.doc-step{display:flex;gap:14px;align-items:flex-start}
+.doc-step-num{width:28px;height:28px;border-radius:50%;background:linear-gradient(135deg,#7c3aed,#4f46e5);display:flex;align-items:center;justify-content:center;font-size:.78rem;font-weight:900;color:#fff;flex-shrink:0;margin-top:1px}
+.doc-step strong{font-size:.87rem;color:var(--t1);display:block;margin-bottom:3px}
+.doc-step p{font-size:.8rem;color:var(--t2);margin:0;line-height:1.6}
+.doc-checklist{display:flex;flex-direction:column;gap:8px;margin:12px 0}
+.doc-check-item{display:flex;gap:10px;align-items:flex-start;font-size:.82rem;color:var(--t2);line-height:1.5}
+.doc-check{color:#a78bfa;font-weight:800;flex-shrink:0}
+.doc-grid-2{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;margin:14px 0}
+.doc-feature-card{background:var(--c1);border:1px solid var(--b1);border-radius:12px;padding:16px;display:flex;gap:12px}
+.doc-feature-ico{font-size:1.4rem;flex-shrink:0;line-height:1}
+.doc-feature-card strong{font-size:.85rem;color:var(--t1);display:block;margin-bottom:4px}
+.doc-feature-card p{font-size:.78rem;color:var(--t3);margin:0;line-height:1.55}
+.doc-platform-list{display:flex;flex-direction:column;gap:10px;margin:14px 0}
+.doc-platform{display:flex;gap:14px;align-items:flex-start;background:var(--c1);border:1px solid var(--b1);border-radius:10px;padding:14px}
+.doc-platform strong{font-size:.87rem;color:var(--t1);margin-right:8px}
+.doc-platform p{font-size:.78rem;color:var(--t3);margin:4px 0 0;line-height:1.5}
+.doc-badge{display:inline-block;padding:2px 8px;border-radius:20px;font-size:.62rem;font-weight:700;text-transform:uppercase;letter-spacing:.05em;vertical-align:middle}
+.doc-badge.green{background:rgba(34,197,94,.12);color:#4ade80;border:1px solid rgba(34,197,94,.2)}
+.doc-badge.yellow{background:rgba(245,158,11,.1);color:#fbbf24;border:1px solid rgba(245,158,11,.2)}
+.doc-table{border:1px solid var(--b1);border-radius:10px;overflow:hidden;margin:14px 0;font-size:.8rem}
+.doc-table-row{display:grid;grid-template-columns:1.5fr 1fr 1.5fr;padding:10px 14px;border-bottom:1px solid var(--b1)}
+.doc-table-row:last-child{border-bottom:none}
+.doc-table-head{background:var(--c1);font-weight:700;font-size:.72rem;text-transform:uppercase;letter-spacing:.05em;color:var(--t3)}
+.doc-next-btn-row{margin-top:32px;padding-top:20px;border-top:1px solid var(--b1)}
+.doc-next-btn{background:rgba(124,58,237,.12);border:1px solid rgba(124,58,237,.3);color:#a78bfa;padding:10px 20px;border-radius:9px;cursor:pointer;font-size:.83rem;font-weight:700;transition:.15s}
+.doc-next-btn:hover{background:rgba(124,58,237,.22);color:#c4b5fd}
+.doc-faq-list{display:flex;flex-direction:column;gap:0}
+.doc-faq{border-bottom:1px solid var(--b1);padding:16px 0}
+.doc-faq-q{font-size:.87rem;font-weight:700;color:var(--t1);margin-bottom:8px}
+.doc-faq-a{font-size:.8rem;color:var(--t2);line-height:1.7}
 .sb-util-btns{display:flex;flex-direction:column;gap:3px}
 .sb-util-btn{display:flex;align-items:center;gap:9px;padding:7px 10px;border-radius:var(--r2);background:none;border:none;cursor:pointer;font-size:.73rem;color:var(--t2);width:100%;text-align:left;transition:.1s}
 .sb-util-btn:hover{background:var(--c1);color:var(--t1)}
@@ -2221,8 +2659,20 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--t1);font-
 .sb-util-ico{width:28px;height:28px;border-radius:7px;display:flex;align-items:center;justify-content:center;flex-shrink:0;background:var(--c1)}
 .sb-util-btn.danger .sb-util-ico{background:#1a0505}
 
+/* Plan system */
+.plan-lock-overlay{position:absolute;inset:0;z-index:500;background:rgba(8,8,10,.88);backdrop-filter:blur(6px);display:flex;align-items:center;justify-content:center;flex-direction:column;gap:0}
+.plan-cards-wrap{display:flex;gap:16px;flex-wrap:wrap;justify-content:center;padding:0 24px;max-width:860px}
+.plan-card{background:#0d0d0f;border:1px solid #1c1c22;border-radius:18px;padding:26px 24px;width:230px;flex-shrink:0}
+.plan-card.plan-card-pro{background:linear-gradient(145deg,#13102e,#0f0c22);border-color:#5b4fe8}
+.plan-card .plan-price{font-size:2rem;font-weight:900;letter-spacing:-.04em;color:#fff;margin:8px 0 2px}
+.plan-card .plan-sub{font-size:.75rem;color:#333;margin-bottom:16px;padding-bottom:14px;border-bottom:1px solid #111}
+.plan-card.plan-card-pro .plan-sub{border-bottom-color:rgba(124,58,237,.15);color:#4a4570}
+.plan-card .plan-feat{font-size:.78rem;color:#666;line-height:1.65;margin-bottom:18px}
+.plan-card.plan-card-pro .plan-feat{color:#a78bfa}
+.sb-item.plan-locked{opacity:.35;cursor:not-allowed;position:relative}
+.sb-item.plan-locked::after{content:'🔒';font-size:.6rem;position:absolute;right:10px;top:50%;transform:translateY(-50%)}
 /* Main */
-.main{display:flex;flex-direction:column;overflow:hidden;height:100vh}
+.main{display:flex;flex-direction:column;overflow:hidden;height:100vh;position:relative}
 .topbar{border-bottom:1px solid var(--b1);padding:0 20px;height:62px;display:flex;align-items:center;gap:12px;flex-shrink:0;background:var(--sb)}
 .topbar-title{font-size:1.55rem;font-weight:800;flex:1;letter-spacing:-.02em;color:var(--t1)}
 .topbar-actions{display:flex;gap:6px}
@@ -2268,9 +2718,28 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--t1);font-
 .sdate{font-size:.92rem;font-weight:700;color:var(--t1);margin-bottom:4px;letter-spacing:-.02em}
 .spl{font-size:.82rem;color:var(--purple);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-weight:600}
 .saccs{font-size:.82rem;color:var(--t2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.acc-badge{display:inline-flex;align-items:center;gap:5px;background:rgba(99,102,241,.1);border:1px solid rgba(99,102,241,.25);border-radius:7px;padding:3px 9px;font-size:.73rem;font-weight:600;color:#a5b4fc;cursor:default;position:relative;margin-top:3px}
+.sched-tabs{display:flex;gap:2px;background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.07);border-radius:8px;padding:3px;flex-shrink:0}
+.sched-tab{padding:5px 14px;background:none;border:none;border-radius:6px;color:var(--t3);font-size:.73rem;font-weight:600;cursor:pointer;transition:all .15s;white-space:nowrap;display:flex;align-items:center;gap:5px}
+.sched-tab.sched-tab-act{background:rgba(124,58,237,.3);color:#c4b5fd;box-shadow:0 1px 4px rgba(124,58,237,.2)}
+.accs-panel{background:var(--c2);border:1px solid var(--b1);border-radius:14px;padding:16px;display:flex;flex-direction:column;gap:0}
+.accs-hd{display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;padding-bottom:12px;border-bottom:1px solid var(--b1)}
+.accs-hd-left{display:flex;align-items:center;gap:10px}
+.accs-plat-ico{width:32px;height:32px;border-radius:9px;display:flex;align-items:center;justify-content:center;flex-shrink:0}
+.accs-plat-name{font-size:.92rem;font-weight:800;color:var(--t1);letter-spacing:-.01em}
+.accs-badge{font-size:.65rem;font-weight:700;background:rgba(124,58,237,.18);border:1px solid rgba(124,58,237,.3);color:#a78bfa;border-radius:20px;padding:1px 7px;min-width:18px;text-align:center}
+.accs-btn{background:#111;border:1px solid var(--b2);border-radius:7px;color:var(--t2);cursor:pointer;font-size:.75rem;font-weight:600;padding:5px 10px;transition:.12s;white-space:nowrap}
+.accs-btn:hover{border-color:var(--b1);color:var(--t1)}
+.accs-btn-add{background:rgba(124,58,237,.12);border-color:rgba(124,58,237,.3);color:#a78bfa}
+.accs-btn-add:hover{background:rgba(124,58,237,.22);border-color:rgba(124,58,237,.5);color:#c4b5fd}
+.acc-badge::after{content:attr(data-tooltip);position:absolute;bottom:calc(100% + 7px);left:0;background:#13131f;border:1px solid rgba(99,102,241,.35);border-radius:8px;padding:7px 11px;font-size:.75rem;color:#e2e8f0;white-space:pre;pointer-events:none;opacity:0;transition:opacity .15s;z-index:200;box-shadow:0 4px 16px rgba(0,0,0,.6);line-height:1.6;font-weight:500}
+.acc-badge:hover::after{opacity:1}
 .snote{font-size:.78rem;color:var(--yellow);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:3px}
 .sright{display:flex;flex-direction:column;align-items:flex-end;gap:3px;flex-shrink:0}
 .badge{font-size:.68rem;font-weight:700;padding:4px 8px;border-radius:5px;text-transform:uppercase;white-space:nowrap}
+.badge.be[data-tooltip],.badge.bpar[data-tooltip]{position:relative;cursor:help}
+.badge.be[data-tooltip]::after,.badge.bpar[data-tooltip]::after{content:attr(data-tooltip);position:absolute;bottom:calc(100% + 8px);right:0;background:#1a0a0a;border:1px solid rgba(239,68,68,.4);border-radius:9px;padding:9px 13px;font-size:.72rem;color:#fca5a5;white-space:pre-wrap;pointer-events:none;opacity:0;transition:opacity .15s;z-index:400;box-shadow:0 6px 24px rgba(0,0,0,.8);line-height:1.75;font-weight:500;min-width:180px;max-width:340px;word-break:break-word}
+.badge.be[data-tooltip]:hover::after,.badge.bpar[data-tooltip]:hover::after{opacity:1}
 .bp{background:rgba(245,158,11,.13);color:#f59e0b}
 .bs{background:rgba(59,130,246,.13);color:#60a5fa}
 .bd{background:rgba(34,197,94,.13);color:#4ade80}
@@ -2357,7 +2826,7 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--t1);font-
 /* Account checks */
 .acc-section{margin-top:12px;padding-top:11px;border-top:1px solid var(--b1)}
 .acc-section-lbl{font-size:.65rem;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:var(--t2);margin-bottom:7px}
-.acc-checks{display:flex;flex-direction:column;gap:3px;max-height:105px;overflow-y:auto}
+.acc-checks{display:flex;flex-direction:column;gap:3px;max-height:185px;overflow-y:auto}
 .acc-check{display:flex;align-items:center;gap:7px;padding:5px 8px;border-radius:var(--r2);border:1px solid var(--b1);background:var(--c2);cursor:pointer;transition:.12s}
 .acc-check:hover{border-color:var(--b2)}
 .acc-check.sel{border-color:var(--purple);background:rgba(139,92,246,.07)}
@@ -2368,7 +2837,18 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--t1);font-
 
 /* Account list */
 .acc-list{display:flex;flex-direction:column;gap:5px}
-.acc-item{display:flex;align-items:flex-start;gap:14px;padding:16px;border-radius:12px;background:var(--c2);border:1px solid var(--b1)}
+.acc-item{display:flex;align-items:center;gap:12px;padding:12px 14px;border-radius:10px;background:#0d0d10;border:1px solid var(--b1);margin-bottom:7px;transition:border-color .15s}.acc-item:last-child{margin-bottom:0}.acc-item:hover{border-color:rgba(124,58,237,.25)}
+.acc-item-sm{display:flex;align-items:center;gap:8px;padding:6px 10px;border-radius:8px;background:#0d0d10;border:1px solid var(--b1);margin-bottom:4px;transition:border-color .15s}.acc-item-sm:last-child{margin-bottom:0}.acc-item-sm:hover{border-color:rgba(124,58,237,.25)}
+.acc-avatar-sm{width:30px;height:30px;border-radius:50%;flex-shrink:0;display:flex;align-items:center;justify-content:center;font-size:.75rem;font-weight:800;color:#fff;overflow:hidden;position:relative}
+.acc-avatar-sm img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;border-radius:50%}
+.acc-avatar-wrap-sm{position:relative;width:30px;height:30px;flex-shrink:0}
+.acc-dot-sm{width:7px;height:7px;border-radius:50%;flex-shrink:0;position:absolute;bottom:0px;right:0px;border:1.5px solid var(--c2)}
+.acc-name-sm{font-size:.82rem;font-weight:700;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--t1)}
+.acc-plat-sm{font-size:.65rem;margin-top:1px}
+.acc-desc-sm{font-size:.65rem;color:#555;font-style:italic;margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:pointer}
+.acc-desc-sm:hover{color:var(--purple)}
+.acc-btn-sq{width:26px;height:26px;padding:0;display:flex;align-items:center;justify-content:center;background:#1a1a1a;border:1px solid var(--b2);border-radius:6px;color:var(--t2);cursor:pointer;font-size:13px;transition:.12s;flex-shrink:0}
+.acc-btn-sq:hover{border-color:var(--t1);color:var(--t1)}.acc-btn-sq.del:hover{border-color:#f87171;color:#f87171;background:#1a0a0a}
 .acc-avatar{width:54px;height:54px;border-radius:50%;object-fit:cover;flex-shrink:0;background:linear-gradient(135deg,#1e1b4b,#312e81);display:flex;align-items:center;justify-content:center;font-size:1.4rem;font-weight:800;color:#fff;overflow:hidden}
 .acc-avatar img{width:100%;height:100%;object-fit:cover;border-radius:50%}
 .acc-dot{width:10px;height:10px;border-radius:50%;flex-shrink:0;position:absolute;bottom:1px;right:1px;border:2px solid var(--c2)}
@@ -2492,7 +2972,7 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--t1);font-
 .merr{color:#f87171;font-size:.7rem;margin-top:4px;min-height:14px}
 .mbtns{display:flex;gap:6px;margin-top:12px}
 .mbtns .btn{flex:1}
-.launch-accs,.acc-checks-modal{display:flex;flex-direction:column;gap:4px;max-height:130px;overflow-y:auto;margin-top:4px}
+.launch-accs,.acc-checks-modal{display:flex;flex-direction:column;gap:4px;max-height:185px;overflow-y:auto;margin-top:4px}
 .l-acc{display:flex;align-items:center;gap:7px;padding:5px 8px;border-radius:var(--r2);background:#0a0a0a;border:1px solid var(--b1);cursor:pointer;transition:.12s}
 .l-acc:hover{border-color:var(--b2)}.l-acc.sel{border-color:var(--purple);background:rgba(139,92,246,.07)}
 .l-acc input{accent-color:var(--purple);flex-shrink:0}
@@ -2519,28 +2999,434 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--t1);font-
 <body>
 <!-- Écran de verrouillage — affiché après logout -->
 <div id="loginScreen" style="display:none;position:fixed;inset:0;z-index:99999;background:#0a0b0d;overflow-y:auto">
-  <div style="min-height:100%;display:flex;align-items:center;justify-content:center;padding:40px 20px">
-    <div style="max-width:380px;width:100%">
-      <div style="text-align:center;margin-bottom:40px">
-        <div style="width:64px;height:64px;border-radius:18px;background:linear-gradient(135deg,#7c3aed,#4f46e5);display:flex;align-items:center;justify-content:center;margin:0 auto 16px;font-size:1.8rem">🔐</div>
-        <div style="color:#fff;font-size:1.4rem;font-weight:800;letter-spacing:-.01em">Connexion</div>
-        <div style="color:#555;font-size:.82rem;margin-top:5px">Entrez vos identifiants pour accéder</div>
+
+  <!-- ═══════════════════════════════ LANDING PAGE ═══════════════════════════════ -->
+  <div id="landingPanel" style="display:none;min-height:100vh;color:#fff;font-family:inherit;background:#080809">
+    <style>
+      .lp-btn-primary{background:linear-gradient(135deg,#7c3aed,#4f46e5);border:none;color:#fff;padding:14px 30px;border-radius:12px;cursor:pointer;font-size:.95rem;font-weight:700;box-shadow:0 4px 24px rgba(124,58,237,.4);transition:transform .15s,box-shadow .15s}
+      .lp-btn-primary:hover{transform:translateY(-2px);box-shadow:0 8px 32px rgba(124,58,237,.55)}
+      .lp-btn-ghost{background:rgba(255,255,255,.04);border:1px solid #222;color:#ccc;padding:14px 28px;border-radius:12px;cursor:pointer;font-size:.95rem;transition:all .15s}
+      .lp-btn-ghost:hover{background:rgba(255,255,255,.08);border-color:#444;color:#fff}
+      .lp-feat-card{background:#0d0d0f;border:1px solid #1c1c22;border-radius:18px;padding:28px;transition:border-color .2s,transform .2s}
+      .lp-feat-card:hover{border-color:rgba(124,58,237,.4);transform:translateY(-3px)}
+      .lp-check{color:#a78bfa;font-weight:700}
+      .lp-cross{color:#333}
+      .lp-tag{display:inline-block;background:rgba(124,58,237,.12);border:1px solid rgba(124,58,237,.3);color:#a78bfa;border-radius:20px;padding:5px 14px;font-size:.7rem;font-weight:700;letter-spacing:.06em;text-transform:uppercase;margin-bottom:22px}
+      .lp-section-title{font-size:clamp(1.6rem,3vw,2.2rem);font-weight:900;letter-spacing:-.03em;margin:0 0 10px}
+      .lp-section-sub{color:#555;font-size:.92rem;line-height:1.7}
+      .lp-divider{height:1px;background:linear-gradient(90deg,transparent,#1c1c22,transparent);margin:0}
+      .lp-plat-badge{display:flex;align-items:center;gap:8px;background:#0d0d0f;border:1px solid #1c1c22;border-radius:12px;padding:10px 18px;font-size:.82rem;color:#aaa;transition:border-color .2s}
+      .lp-plat-badge:hover{border-color:rgba(124,58,237,.35);color:#fff}
+      .lp-step-num{width:40px;height:40px;border-radius:50%;background:linear-gradient(135deg,#7c3aed,#4f46e5);display:flex;align-items:center;justify-content:center;font-size:.95rem;font-weight:900;flex-shrink:0}
+      .lp-price-card{background:#0d0d0f;border:1px solid #1c1c22;border-radius:22px;padding:32px}
+      .lp-price-card-pro{background:linear-gradient(145deg,#13102e,#0f0c22);border:1.5px solid #5b4fe8;border-radius:22px;padding:32px;box-shadow:0 0 60px rgba(79,70,229,.15)}
+      .lp-faq-item{border-bottom:1px solid #111;padding:20px 0;cursor:pointer}
+      .lp-testi{background:#0d0d0f;border:1px solid #1c1c22;border-radius:18px;padding:26px}
+      @keyframes lp-float{0%,100%{transform:translateY(0)}50%{transform:translateY(-8px)}}
+      .lp-float{animation:lp-float 4s ease-in-out infinite}
+      @keyframes lp-pulse-glow{0%,100%{box-shadow:0 0 20px rgba(124,58,237,.3)}50%{box-shadow:0 0 40px rgba(124,58,237,.6)}}
+    </style>
+
+    <!-- ── Nav ── -->
+    <nav style="display:flex;align-items:center;justify-content:space-between;padding:16px 5%;border-bottom:1px solid #111;position:sticky;top:0;background:rgba(8,8,9,.93);backdrop-filter:blur(14px);z-index:100">
+      <div style="display:flex;align-items:center;gap:10px">
+        <div style="width:36px;height:36px;border-radius:10px;background:linear-gradient(135deg,#7c3aed,#4f46e5);display:flex;align-items:center;justify-content:center"><svg width="22" height="22" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg"><line x1="16" y1="16" x2="16" y2="5" stroke="white" stroke-width="2.4" stroke-linecap="round"/><line x1="16" y1="16" x2="24.7" y2="11" stroke="white" stroke-width="2.4" stroke-linecap="round"/><line x1="16" y1="16" x2="24.7" y2="21" stroke="white" stroke-width="2.4" stroke-linecap="round"/><line x1="16" y1="16" x2="16" y2="27" stroke="white" stroke-width="2.4" stroke-linecap="round"/><line x1="16" y1="16" x2="7.3" y2="21" stroke="white" stroke-width="2.4" stroke-linecap="round"/><line x1="16" y1="16" x2="7.3" y2="11" stroke="white" stroke-width="2.4" stroke-linecap="round"/><circle cx="16" cy="5" r="2.5" fill="white"/><circle cx="24.7" cy="11" r="2.5" fill="white"/><circle cx="24.7" cy="21" r="2.5" fill="white"/><circle cx="16" cy="27" r="2.5" fill="white"/><circle cx="7.3" cy="21" r="2.5" fill="white"/><circle cx="7.3" cy="11" r="2.5" fill="white"/><circle cx="16" cy="16" r="2.8" fill="white"/></svg></div>
+        <span style="font-weight:900;font-size:1.1rem;letter-spacing:-.03em">Story<span style="color:#a78bfa">Scheduler</span></span>
       </div>
-      <form id="loginForm" onsubmit="return false" style="display:flex;flex-direction:column;gap:14px">
-        <div>
-          <label style="font-size:.75rem;font-weight:600;color:#888;text-transform:uppercase;letter-spacing:.06em;display:block;margin-bottom:6px">Identifiant</label>
-          <input id="loginUsername" type="text" autocomplete="username" placeholder="Votre identifiant" style="width:100%;padding:13px 14px;background:#111;border:1px solid #222;border-radius:10px;color:#fff;font-size:.9rem;outline:none;box-sizing:border-box;transition:border-color .15s" onfocus="this.style.borderColor='#7c3aed'" onblur="this.style.borderColor='#222'">
+      <div style="display:flex;align-items:center;gap:24px">
+        <a onclick="document.getElementById('lp-features').scrollIntoView({behavior:'smooth'})" style="font-size:.82rem;color:#666;cursor:pointer;transition:color .15s" onmouseover="this.style.color='#fff'" onmouseout="this.style.color='#666'">Fonctionnalités</a>
+        <a onclick="document.getElementById('lp-pricing').scrollIntoView({behavior:'smooth'})" style="font-size:.82rem;color:#666;cursor:pointer;transition:color .15s" onmouseover="this.style.color='#fff'" onmouseout="this.style.color='#666'">Tarifs</a>
+        <a onclick="document.getElementById('lp-faq').scrollIntoView({behavior:'smooth'})" style="font-size:.82rem;color:#666;cursor:pointer;transition:color .15s" onmouseover="this.style.color='#fff'" onmouseout="this.style.color='#666'">FAQ</a>
+      </div>
+      <div style="display:flex;gap:8px">
+        <button onclick="_showLogin()" class="lp-btn-ghost" style="padding:9px 18px;font-size:.82rem;border-radius:9px">Se connecter</button>
+        <button onclick="_showRegister()" class="lp-btn-primary" style="padding:9px 18px;font-size:.82rem;border-radius:9px">Commencer →</button>
+      </div>
+    </nav>
+
+    <!-- ── Hero ── -->
+    <div style="position:relative;overflow:hidden">
+      <div style="position:absolute;inset:0;background:radial-gradient(ellipse 80% 60% at 50% -10%,rgba(124,58,237,.18),transparent);pointer-events:none"></div>
+      <div style="text-align:center;padding:90px 5% 70px;max-width:820px;margin:0 auto;position:relative">
+        <div class="lp-tag">✨ AUTOMATISATION MULTI-PLATEFORMES</div>
+        <h1 style="font-size:clamp(2.2rem,5.5vw,3.6rem);font-weight:900;line-height:1.08;margin:0 0 22px;letter-spacing:-.035em">Publie sur tous tes réseaux<br><span style="background:linear-gradient(135deg,#a78bfa,#7c3aed,#60a5fa);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text">sans lever le petit doigt</span></h1>
+        <p style="font-size:1.08rem;color:#5a5a6e;max-width:560px;margin:0 auto 40px;line-height:1.75">Programme tes stories et posts Telegram, Snapchat, Instagram et Facebook des semaines à l'avance. L'auto-scheduling choisit les créneaux pour toi — 24h/24, 7j/7.</p>
+        <div style="display:flex;gap:12px;justify-content:center;flex-wrap:wrap;margin-bottom:52px">
+          <button onclick="_showRegister()" class="lp-btn-primary" style="font-size:1rem;padding:15px 34px">Créer mon compte gratuitement →</button>
+          <button onclick="_showLogin()" class="lp-btn-ghost" style="font-size:1rem;padding:15px 28px">J'ai déjà un compte</button>
         </div>
-        <div>
-          <label style="font-size:.75rem;font-weight:600;color:#888;text-transform:uppercase;letter-spacing:.06em;display:block;margin-bottom:6px">Mot de passe</label>
-          <div style="position:relative">
-            <input id="loginPassword" type="password" autocomplete="current-password" placeholder="Votre mot de passe" style="width:100%;padding:13px 42px 13px 14px;background:#111;border:1px solid #222;border-radius:10px;color:#fff;font-size:.9rem;outline:none;box-sizing:border-box;transition:border-color .15s" onfocus="this.style.borderColor='#7c3aed'" onblur="this.style.borderColor='#222'">
-            <button type="button" onclick="const i=document.getElementById('loginPassword');i.type=i.type==='password'?'text':'password'" style="position:absolute;right:12px;top:50%;transform:translateY(-50%);background:none;border:none;color:#555;cursor:pointer;font-size:.85rem;padding:4px">👁</button>
+        <div style="display:flex;justify-content:center;gap:10px;flex-wrap:wrap">
+          <div class="lp-plat-badge"><svg width="20" height="20" viewBox="0 0 240 240" style="flex-shrink:0"><defs><radialGradient id="tgGlp" cx="50%" cy="15%" r="90%"><stop offset="0%" stop-color="#37AEE2"/><stop offset="100%" stop-color="#1E96C8"/></radialGradient></defs><circle cx="120" cy="120" r="120" fill="url(#tgGlp)"/><path fill="#fff" d="M20.665 100.68c49.238-21.462 82.064-35.607 98.477-42.437 46.905-19.52 56.629-22.918 62.959-23.04 1.396-.024 4.52.322 6.547 1.97 1.707 1.389 2.177 3.262 2.405 4.576.229 1.315.512 4.306.284 6.647-2.548 26.78-13.558 91.763-19.161 121.77-2.369 12.696-7.038 16.951-11.561 17.36-9.826.906-17.294-6.492-26.828-12.73-14.913-9.766-23.33-15.844-37.82-25.386-16.718-11.016-5.882-17.068 3.638-26.978 2.49-2.583 45.749-41.925 46.575-45.503.104-.447.201-2.113-1.28-2.994-1.481-.88-3.666-.577-5.243-.339-2.233.336-37.78 24.014-106.64 70.58-10.091 6.929-19.232 10.308-27.424 10.132-9.025-.193-26.383-5.108-39.284-9.306-15.832-5.148-28.405-7.875-27.324-16.619.565-4.561 6.867-9.225 18.905-14.003z"/></svg> Telegram</div>
+          <div class="lp-plat-badge"><svg width="20" height="20" viewBox="0 0 48 48" style="flex-shrink:0;border-radius:22%"><rect width="48" height="48" rx="9" fill="#FFFC00"/><path fill="white" d="M24 7c-5.3 0-9.5 4.1-9.5 9.2v1.4c-1 .3-2.2.6-3 .6h-.5c-.11-.02-.2.07-.17.18.28.7 1.46 1.37 2.24 1.65.07.02.13.09.14.17.38 1.76 1.08 3.23 2.1 4.35-1.33.75-2.66 1.55-2.66 2.92 0 .98.84 1.73 2.57 2.18.17.05.3.18.31.35.21.98.58 1.91 1.06 2.47-.47.2-.9.4-.9.7 0 .54.83 1.03 2.33 1.03h1.25c.82.76 1.94 1.22 3.3 1.22s2.48-.46 3.3-1.22h1.25c1.5 0 2.33-.49 2.33-1.03 0-.3-.43-.5-.9-.7.48-.56.85-1.49 1.06-2.47.01-.17.14-.3.31-.35 1.73-.45 2.57-1.2 2.57-2.18 0-1.37-1.33-2.17-2.66-2.92 1.02-1.12 1.72-2.59 2.1-4.35.01-.08.07-.15.14-.17.78-.28 1.96-.95 2.24-1.65.03-.11-.06-.2-.17-.18h-.05c-.78 0-1.9-.27-3-.6v-1.4C33.5 11.1 29.3 7 24 7z"/></svg> Snapchat</div>
+          <div class="lp-plat-badge"><svg width="20" height="20" viewBox="0 0 100 100" style="flex-shrink:0;border-radius:22%"><defs><radialGradient id="lpIgG2" cx="30%" cy="110%" r="140%"><stop offset="0%" stop-color="#ffd600"/><stop offset="10%" stop-color="#ff7a00"/><stop offset="50%" stop-color="#ff0069"/><stop offset="75%" stop-color="#d300c5"/><stop offset="100%" stop-color="#7638fa"/></radialGradient></defs><rect width="100" height="100" rx="22" fill="url(#lpIgG2)"/><rect x="12" y="12" width="76" height="76" rx="16" fill="none" stroke="white" stroke-width="6.5"/><circle cx="50" cy="50" r="18" fill="none" stroke="white" stroke-width="6.5"/><circle cx="71" cy="29" r="5" fill="white"/></svg> Instagram</div>
+          <div class="lp-plat-badge"><svg width="20" height="20" viewBox="0 0 100 100" style="flex-shrink:0;border-radius:22%"><rect width="100" height="100" rx="22" fill="#1877F2"/><path fill="#fff" d="M62.5 53h-8.8v30.3H40.2V53H34V41.2h6.2v-7.4c0-8.6 3.6-13.8 13.4-13.8 3.9 0 8.4.4 8.4.4v9.2h-4.7c-3.5 0-4.7 2.2-4.7 4.5v7.1h9.3L60.5 53z"/></svg> Facebook</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── Stats bar ── -->
+    <div class="lp-divider"></div>
+    <div style="background:#0a0a0c;padding:28px 5%">
+      <div style="max-width:900px;margin:0 auto;display:flex;justify-content:space-around;flex-wrap:wrap;gap:20px">
+        <div style="text-align:center">
+          <div style="font-size:1.9rem;font-weight:900;letter-spacing:-.04em;background:linear-gradient(135deg,#a78bfa,#7c3aed);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text">10 000+</div>
+          <div style="font-size:.75rem;color:#444;margin-top:4px;font-weight:600;text-transform:uppercase;letter-spacing:.08em">Stories publiées</div>
+        </div>
+        <div style="text-align:center">
+          <div style="font-size:1.9rem;font-weight:900;letter-spacing:-.04em;background:linear-gradient(135deg,#a78bfa,#7c3aed);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text">4</div>
+          <div style="font-size:.75rem;color:#444;margin-top:4px;font-weight:600;text-transform:uppercase;letter-spacing:.08em">Plateformes supportées</div>
+        </div>
+        <div style="text-align:center">
+          <div style="font-size:1.9rem;font-weight:900;letter-spacing:-.04em;background:linear-gradient(135deg,#a78bfa,#7c3aed);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text">99.9%</div>
+          <div style="font-size:.75rem;color:#444;margin-top:4px;font-weight:600;text-transform:uppercase;letter-spacing:.08em">Uptime garanti</div>
+        </div>
+        <div style="text-align:center">
+          <div style="font-size:1.9rem;font-weight:900;letter-spacing:-.04em;background:linear-gradient(135deg,#a78bfa,#7c3aed);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text">3h+</div>
+          <div style="font-size:.75rem;color:#444;margin-top:4px;font-weight:600;text-transform:uppercase;letter-spacing:.08em">Économisées / semaine</div>
+        </div>
+      </div>
+    </div>
+    <div class="lp-divider"></div>
+
+    <!-- ── Comment ça marche ── -->
+    <div style="padding:80px 5%;max-width:960px;margin:0 auto">
+      <div style="text-align:center;margin-bottom:56px">
+        <div class="lp-tag">COMMENT ÇA MARCHE</div>
+        <h2 class="lp-section-title">3 étapes, c'est tout</h2>
+        <p class="lp-section-sub" style="max-width:440px;margin:0 auto">Pas de configuration complexe. Tu es opérationnel en moins de 5 minutes.</p>
+      </div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:24px">
+        <div style="display:flex;flex-direction:column;gap:16px;padding:28px;background:#0d0d0f;border:1px solid #1c1c22;border-radius:18px">
+          <div style="display:flex;align-items:center;gap:14px">
+            <div class="lp-step-num">1</div>
+            <div style="font-weight:800;font-size:1rem">Connecte tes comptes</div>
+          </div>
+          <p style="font-size:.85rem;color:#4a4a5a;line-height:1.7;margin:0">Ajoute tes comptes Telegram, Snapchat, Instagram et Facebook. La connexion est sécurisée et ne prend que quelques secondes par compte.</p>
+        </div>
+        <div style="display:flex;flex-direction:column;gap:16px;padding:28px;background:#0d0d0f;border:1px solid #1c1c22;border-radius:18px">
+          <div style="display:flex;align-items:center;gap:14px">
+            <div class="lp-step-num">2</div>
+            <div style="font-weight:800;font-size:1rem">Upload tes médias</div>
+          </div>
+          <p style="font-size:.85rem;color:#4a4a5a;line-height:1.7;margin:0">Crée des playlists avec tes photos et vidéos. Organise ton contenu une fois, réutilise-le sur toutes tes plateformes en un clic.</p>
+        </div>
+        <div style="display:flex;flex-direction:column;gap:16px;padding:28px;background:#0d0d0f;border:1px solid #1c1c22;border-radius:18px">
+          <div style="display:flex;align-items:center;gap:14px">
+            <div class="lp-step-num">3</div>
+            <div style="font-weight:800;font-size:1rem">L'IA publie à ta place</div>
+          </div>
+          <p style="font-size:.85rem;color:#4a4a5a;line-height:1.7;margin:0">Active l'auto-scheduling et oublie. StoryScheduler choisit les créneaux, publie tes stories et te notifie. Tu n'as plus qu'à suivre les stats.</p>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── Features ── -->
+    <div id="lp-features" style="background:#050506;border-top:1px solid #111;border-bottom:1px solid #111;padding:80px 5%">
+      <div style="max-width:1000px;margin:0 auto">
+        <div style="text-align:center;margin-bottom:56px">
+          <div class="lp-tag">FONCTIONNALITÉS</div>
+          <h2 class="lp-section-title">Tout ce dont tu as besoin</h2>
+          <p class="lp-section-sub" style="max-width:440px;margin:0 auto">Un outil complet pensé pour les créateurs sérieux et les agences.</p>
+        </div>
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:16px">
+          <div class="lp-feat-card">
+            <div style="width:44px;height:44px;border-radius:12px;background:rgba(124,58,237,.12);border:1px solid rgba(124,58,237,.2);display:flex;align-items:center;justify-content:center;font-size:1.3rem;margin-bottom:16px">📅</div>
+            <div style="font-weight:800;font-size:.95rem;margin-bottom:8px;color:#e5e5f0">Auto-scheduling intelligent</div>
+            <div style="font-size:.8rem;color:#3a3a4a;line-height:1.65">Détecte automatiquement le prochain créneau libre pour chaque plateforme. Zéro conflit, zéro doublons.</div>
+          </div>
+          <div class="lp-feat-card">
+            <div style="width:44px;height:44px;border-radius:12px;background:rgba(124,58,237,.12);border:1px solid rgba(124,58,237,.2);display:flex;align-items:center;justify-content:center;font-size:1.3rem;margin-bottom:16px">📚</div>
+            <div style="font-weight:800;font-size:.95rem;margin-bottom:8px;color:#e5e5f0">Bibliothèque de médias</div>
+            <div style="font-size:.8rem;color:#3a3a4a;line-height:1.65">Crée des playlists réutilisables et déploie-les sur toutes tes plateformes d'un seul clic.</div>
+          </div>
+          <div class="lp-feat-card">
+            <div style="width:44px;height:44px;border-radius:12px;background:rgba(124,58,237,.12);border:1px solid rgba(124,58,237,.2);display:flex;align-items:center;justify-content:center;font-size:1.3rem;margin-bottom:16px">👥</div>
+            <div style="font-weight:800;font-size:.95rem;margin-bottom:8px;color:#e5e5f0">Multi-profils isolés</div>
+            <div style="font-size:.8rem;color:#3a3a4a;line-height:1.65">Gère plusieurs créateurs depuis un seul dashboard. Chaque profil a ses comptes, playlists et stats séparés.</div>
+          </div>
+          <div class="lp-feat-card">
+            <div style="width:44px;height:44px;border-radius:12px;background:rgba(124,58,237,.12);border:1px solid rgba(124,58,237,.2);display:flex;align-items:center;justify-content:center;font-size:1.3rem;margin-bottom:16px">⚡</div>
+            <div style="font-weight:800;font-size:.95rem;margin-bottom:8px;color:#e5e5f0">Publication instantanée</div>
+            <div style="font-size:.8rem;color:#3a3a4a;line-height:1.65">Upload via Cloudinary, publication via OneUp. Tes médias sont traités et envoyés sans aucune intervention.</div>
+          </div>
+          <div class="lp-feat-card">
+            <div style="width:44px;height:44px;border-radius:12px;background:rgba(124,58,237,.12);border:1px solid rgba(124,58,237,.2);display:flex;align-items:center;justify-content:center;font-size:1.3rem;margin-bottom:16px">📊</div>
+            <div style="font-weight:800;font-size:.95rem;margin-bottom:8px;color:#e5e5f0">Stats & revenus en temps réel</div>
+            <div style="font-size:.8rem;color:#3a3a4a;line-height:1.65">Visualise tes revenus, le nombre de posts envoyés, le taux d'erreur et les graphiques par plateforme.</div>
+          </div>
+          <div class="lp-feat-card">
+            <div style="width:44px;height:44px;border-radius:12px;background:rgba(124,58,237,.12);border:1px solid rgba(124,58,237,.2);display:flex;align-items:center;justify-content:center;font-size:1.3rem;margin-bottom:16px">🔄</div>
+            <div style="font-weight:800;font-size:.95rem;margin-bottom:8px;color:#e5e5f0">Spotlight Snapchat automatique</div>
+            <div style="font-size:.8rem;color:#3a3a4a;line-height:1.65">Pool de vidéos tournant en boucle sur tes comptes Snapchat. Un compte, +1 min, en automatique.</div>
+          </div>
+          <div class="lp-feat-card">
+            <div style="width:44px;height:44px;border-radius:12px;background:rgba(124,58,237,.12);border:1px solid rgba(124,58,237,.2);display:flex;align-items:center;justify-content:center;font-size:1.3rem;margin-bottom:16px">🔐</div>
+            <div style="font-weight:800;font-size:.95rem;margin-bottom:8px;color:#e5e5f0">Accès par PIN sécurisé</div>
+            <div style="font-size:.8rem;color:#3a3a4a;line-height:1.65">Chaque profil est protégé par un PIN. Idéal pour les agences qui gèrent plusieurs créateurs.</div>
+          </div>
+          <div class="lp-feat-card">
+            <div style="width:44px;height:44px;border-radius:12px;background:rgba(124,58,237,.12);border:1px solid rgba(124,58,237,.2);display:flex;align-items:center;justify-content:center;font-size:1.3rem;margin-bottom:16px">📡</div>
+            <div style="font-weight:800;font-size:.95rem;margin-bottom:8px;color:#e5e5f0">Monitoring en direct</div>
+            <div style="font-size:.8rem;color:#3a3a4a;line-height:1.65">Suis tes stories actives en temps réel avec les miniatures, le nombre de vues et le statut de chaque publication.</div>
           </div>
         </div>
-        <div id="loginErr" style="color:#f87171;font-size:.78rem;min-height:18px;text-align:center"></div>
-        <button type="submit" id="loginBtn" onclick="_doLogin()" style="padding:14px;background:linear-gradient(135deg,#7c3aed,#4f46e5);border:none;border-radius:10px;color:#fff;font-size:.95rem;font-weight:700;cursor:pointer;transition:opacity .15s;margin-top:4px" onmouseover="this.style.opacity='.88'" onmouseout="this.style.opacity='1'">Se connecter</button>
-      </form>
+      </div>
+    </div>
+
+    <!-- ── Pricing ── -->
+    <div id="lp-pricing" style="padding:80px 5%">
+      <div style="max-width:940px;margin:0 auto">
+        <div style="text-align:center;margin-bottom:56px">
+          <div class="lp-tag">TARIFS</div>
+          <h2 class="lp-section-title">Simple et transparent</h2>
+          <p class="lp-section-sub" style="max-width:380px;margin:0 auto">Sans engagement. Annulable à tout moment. Pas de surprise.</p>
+        </div>
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:20px;align-items:start">
+
+          <!-- Starter -->
+          <div class="lp-price-card">
+            <div style="font-size:.68rem;font-weight:800;letter-spacing:.1em;color:#555;text-transform:uppercase;margin-bottom:16px">STARTER</div>
+            <div style="font-size:2.6rem;font-weight:900;letter-spacing:-.04em;margin-bottom:2px;color:#fff">15€<span style="font-size:.95rem;font-weight:400;color:#333">/mois</span></div>
+            <div style="color:#333;font-size:.8rem;margin-bottom:28px;border-bottom:1px solid #111;padding-bottom:20px">Pour démarrer seul</div>
+            <div style="display:flex;flex-direction:column;gap:12px;margin-bottom:30px">
+              <div style="display:flex;gap:10px;align-items:flex-start;font-size:.82rem;color:#888"><span class="lp-check">✓</span> <strong style="color:#ccc">10 comptes</strong> Telegram/Snapchat</div>
+              <div style="display:flex;gap:10px;align-items:flex-start;font-size:.82rem;color:#888"><span class="lp-check">✓</span> Telegram + Snapchat</div>
+              <div style="display:flex;gap:10px;align-items:flex-start;font-size:.82rem;color:#888"><span class="lp-check">✓</span> 50 médias en bibliothèque</div>
+              <div style="display:flex;gap:10px;align-items:flex-start;font-size:.82rem;color:#888"><span class="lp-check">✓</span> Auto-scheduling</div>
+              <div style="display:flex;gap:10px;align-items:flex-start;font-size:.82rem;color:#2a2a2a"><span class="lp-cross">✗</span> Instagram / Facebook</div>
+              <div style="display:flex;gap:10px;align-items:flex-start;font-size:.82rem;color:#2a2a2a"><span class="lp-cross">✗</span> Statistiques avancées</div>
+              <div style="display:flex;gap:10px;align-items:flex-start;font-size:.82rem;color:#2a2a2a"><span class="lp-cross">✗</span> Spotlight Snapchat</div>
+            </div>
+            <button onclick="_showRegister()" class="lp-btn-ghost" style="width:100%;padding:12px;font-size:.88rem;font-weight:700;border-radius:10px">Commencer</button>
+          </div>
+
+          <!-- Pro -->
+          <div class="lp-price-card-pro" style="position:relative">
+            <div style="position:absolute;top:-13px;left:50%;transform:translateX(-50%);background:linear-gradient(135deg,#7c3aed,#4f46e5);border-radius:20px;padding:5px 16px;font-size:.65rem;font-weight:800;letter-spacing:.07em;color:#fff;white-space:nowrap">⭐ LE PLUS POPULAIRE</div>
+            <div style="font-size:.68rem;font-weight:800;letter-spacing:.1em;color:#a78bfa;text-transform:uppercase;margin-bottom:16px">PRO</div>
+            <div style="font-size:2.6rem;font-weight:900;letter-spacing:-.04em;margin-bottom:2px;color:#fff">39€<span style="font-size:.95rem;font-weight:400;color:#5550a0">/mois</span></div>
+            <div style="color:#4a4570;font-size:.8rem;margin-bottom:28px;border-bottom:1px solid rgba(124,58,237,.15);padding-bottom:20px">Pour les créateurs actifs</div>
+            <div style="display:flex;flex-direction:column;gap:12px;margin-bottom:30px">
+              <div style="display:flex;gap:10px;align-items:flex-start;font-size:.82rem;color:#c4b5fd"><span style="color:#a78bfa;font-weight:700">✓</span> <strong style="color:#e9d5ff">25 comptes</strong> toutes plateformes</div>
+              <div style="display:flex;gap:10px;align-items:flex-start;font-size:.82rem;color:#c4b5fd"><span style="color:#a78bfa;font-weight:700">✓</span> Telegram + Snapchat + IG + FB</div>
+              <div style="display:flex;gap:10px;align-items:flex-start;font-size:.82rem;color:#c4b5fd"><span style="color:#a78bfa;font-weight:700">✓</span> Bibliothèque illimitée</div>
+              <div style="display:flex;gap:10px;align-items:flex-start;font-size:.82rem;color:#c4b5fd"><span style="color:#a78bfa;font-weight:700">✓</span> Auto-scheduling avancé</div>
+              <div style="display:flex;gap:10px;align-items:flex-start;font-size:.82rem;color:#c4b5fd"><span style="color:#a78bfa;font-weight:700">✓</span> Statistiques & suivi des revenus</div>
+              <div style="display:flex;gap:10px;align-items:flex-start;font-size:.82rem;color:#c4b5fd"><span style="color:#a78bfa;font-weight:700">✓</span> Spotlight Snapchat automatique</div>
+              <div style="display:flex;gap:10px;align-items:flex-start;font-size:.82rem;color:#c4b5fd"><span style="color:#a78bfa;font-weight:700">✓</span> Monitoring en temps réel</div>
+            </div>
+            <button onclick="_showRegister()" class="lp-btn-primary" style="width:100%;padding:13px;font-size:.88rem;border-radius:10px">Choisir Pro →</button>
+          </div>
+
+          <!-- Business -->
+          <div class="lp-price-card">
+            <div style="font-size:.68rem;font-weight:800;letter-spacing:.1em;color:#555;text-transform:uppercase;margin-bottom:16px">BUSINESS</div>
+            <div style="font-size:2.6rem;font-weight:900;letter-spacing:-.04em;margin-bottom:2px;color:#fff">239€<span style="font-size:.95rem;font-weight:400;color:#333">/mois</span></div>
+            <div style="color:#333;font-size:.8rem;margin-bottom:28px;border-bottom:1px solid #111;padding-bottom:20px">Pour les agences & studios</div>
+            <div style="display:flex;flex-direction:column;gap:12px;margin-bottom:30px">
+              <div style="display:flex;gap:10px;align-items:flex-start;font-size:.82rem;color:#888"><span class="lp-check">✓</span> <strong style="color:#ccc">Comptes illimités</strong></div>
+              <div style="display:flex;gap:10px;align-items:flex-start;font-size:.82rem;color:#888"><span class="lp-check">✓</span> Toutes plateformes</div>
+              <div style="display:flex;gap:10px;align-items:flex-start;font-size:.82rem;color:#888"><span class="lp-check">✓</span> Bibliothèque illimitée</div>
+              <div style="display:flex;gap:10px;align-items:flex-start;font-size:.82rem;color:#888"><span class="lp-check">✓</span> Accès API prioritaire</div>
+              <div style="display:flex;gap:10px;align-items:flex-start;font-size:.82rem;color:#888"><span class="lp-check">✓</span> Support dédié 7j/7</div>
+              <div style="display:flex;gap:10px;align-items:flex-start;font-size:.82rem;color:#888"><span class="lp-check">✓</span> Onboarding personnalisé</div>
+              <div style="display:flex;gap:10px;align-items:flex-start;font-size:.82rem;color:#888"><span class="lp-check">✓</span> SLA 99.9% uptime garanti</div>
+            </div>
+            <button onclick="_showRegister()" class="lp-btn-ghost" style="width:100%;padding:12px;font-size:.88rem;font-weight:700;border-radius:10px">Nous contacter</button>
+          </div>
+
+        </div>
+        <p style="text-align:center;margin-top:24px;font-size:.75rem;color:#252530">Sans carte bancaire pour commencer · Annulable à tout moment · Paiement 100% sécurisé</p>
+      </div>
+    </div>
+
+    <!-- ── Testimonials ── -->
+    <div style="background:#050506;border-top:1px solid #111;border-bottom:1px solid #111;padding:80px 5%">
+      <div style="max-width:960px;margin:0 auto">
+        <div style="text-align:center;margin-bottom:56px">
+          <div class="lp-tag">TÉMOIGNAGES</div>
+          <h2 class="lp-section-title">Ce qu'ils en disent</h2>
+        </div>
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:18px">
+          <div class="lp-testi">
+            <div style="color:#f59e0b;font-size:.95rem;margin-bottom:14px;letter-spacing:3px">★★★★★</div>
+            <p style="color:#888;font-size:.85rem;line-height:1.8;margin:0 0 20px;font-style:italic">"Depuis que j'utilise StoryScheduler, je programme mes stories à l'avance et j'économise au moins 3h par semaine. L'auto-scheduling est une révolution !"</p>
+            <div style="display:flex;align-items:center;gap:12px">
+              <div style="width:36px;height:36px;border-radius:50%;background:linear-gradient(135deg,#7c3aed,#ec4899);display:flex;align-items:center;justify-content:center;font-size:.9rem;font-weight:800;color:#fff;flex-shrink:0">P</div>
+              <div>
+                <div style="font-weight:800;font-size:.82rem;color:#ddd">Pauline M.</div>
+                <div style="font-size:.72rem;color:#333;margin-top:2px">Créatrice de contenu · Snapchat</div>
+              </div>
+            </div>
+          </div>
+          <div class="lp-testi">
+            <div style="color:#f59e0b;font-size:.95rem;margin-bottom:14px;letter-spacing:3px">★★★★★</div>
+            <p style="color:#888;font-size:.85rem;line-height:1.8;margin:0 0 20px;font-style:italic">"La gestion multi-profils est parfaite pour notre agence. On gère 8 créatrices depuis un seul dashboard sans jamais mélanger les contenus."</p>
+            <div style="display:flex;align-items:center;gap:12px">
+              <div style="width:36px;height:36px;border-radius:50%;background:linear-gradient(135deg,#1877F2,#42A5F5);display:flex;align-items:center;justify-content:center;font-size:.9rem;font-weight:800;color:#fff;flex-shrink:0">S</div>
+              <div>
+                <div style="font-weight:800;font-size:.82rem;color:#ddd">Sarah K.</div>
+                <div style="font-size:.72rem;color:#333;margin-top:2px">Responsable agence · Instagram & FB</div>
+              </div>
+            </div>
+          </div>
+          <div class="lp-testi">
+            <div style="color:#f59e0b;font-size:.95rem;margin-bottom:14px;letter-spacing:3px">★★★★★</div>
+            <p style="color:#888;font-size:.85rem;line-height:1.8;margin:0 0 20px;font-style:italic">"J'ai multiplié ma fréquence de publication par 4 grâce aux playlists. Je prépare tout le dimanche et ça tourne toute la semaine. Indispensable."</p>
+            <div style="display:flex;align-items:center;gap:12px">
+              <div style="width:36px;height:36px;border-radius:50%;background:linear-gradient(135deg,#2CA5E0,#1a6b99);display:flex;align-items:center;justify-content:center;font-size:.9rem;font-weight:800;color:#fff;flex-shrink:0">L</div>
+              <div>
+                <div style="font-weight:800;font-size:.82rem;color:#ddd">Lucas T.</div>
+                <div style="font-size:.72rem;color:#333;margin-top:2px">Creator Manager · Telegram</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── FAQ ── -->
+    <div id="lp-faq" style="padding:80px 5%;max-width:760px;margin:0 auto">
+      <div style="text-align:center;margin-bottom:56px">
+        <div class="lp-tag">FAQ</div>
+        <h2 class="lp-section-title">Questions fréquentes</h2>
+      </div>
+      <div id="lpFaqList">
+        <div class="lp-faq-item" onclick="lpToggleFaq(this)">
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:16px">
+            <span style="font-weight:700;font-size:.9rem;color:#ddd">C'est quoi StoryScheduler exactement ?</span>
+            <span style="color:#7c3aed;font-size:1.1rem;flex-shrink:0;transition:transform .2s" class="lp-faq-icon">+</span>
+          </div>
+          <div class="lp-faq-body" style="display:none;margin-top:14px;font-size:.83rem;color:#444;line-height:1.75">StoryScheduler est une plateforme SaaS d'automatisation de publication de stories et posts sur Telegram, Snapchat, Instagram et Facebook. Tu uploades tes médias, tu configures tes comptes, et le système publie automatiquement au bon moment — même quand tu dors.</div>
+        </div>
+        <div class="lp-faq-item" onclick="lpToggleFaq(this)">
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:16px">
+            <span style="font-weight:700;font-size:.9rem;color:#ddd">Est-ce que c'est sécurisé pour mes comptes ?</span>
+            <span style="color:#7c3aed;font-size:1.1rem;flex-shrink:0;transition:transform .2s" class="lp-faq-icon">+</span>
+          </div>
+          <div class="lp-faq-body" style="display:none;margin-top:14px;font-size:.83rem;color:#444;line-height:1.75">Oui. Les connexions Telegram passent par l'API officielle Telethon. Instagram et Facebook utilisent l'API OneUp certifiée Meta. Aucun mot de passe n'est stocké en clair — tout est chiffré. Tes credentials ne sont jamais partagés avec des tiers.</div>
+        </div>
+        <div class="lp-faq-item" onclick="lpToggleFaq(this)">
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:16px">
+            <span style="font-weight:700;font-size:.9rem;color:#ddd">Combien de comptes puis-je connecter ?</span>
+            <span style="color:#7c3aed;font-size:1.1rem;flex-shrink:0;transition:transform .2s" class="lp-faq-icon">+</span>
+          </div>
+          <div class="lp-faq-body" style="display:none;margin-top:14px;font-size:.83rem;color:#444;line-height:1.75">Il n'y a pas de limite au nombre de comptes par plateforme. Tu peux connecter autant de comptes Telegram, Snapchat, Instagram et Facebook que tu veux dans chaque profil. Seul le nombre de profils créateurs est limité selon ton plan.</div>
+        </div>
+        <div class="lp-faq-item" onclick="lpToggleFaq(this)">
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:16px">
+            <span style="font-weight:700;font-size:.9rem;color:#ddd">Comment fonctionne l'auto-scheduling ?</span>
+            <span style="color:#7c3aed;font-size:1.1rem;flex-shrink:0;transition:transform .2s" class="lp-faq-icon">+</span>
+          </div>
+          <div class="lp-faq-body" style="display:none;margin-top:14px;font-size:.83rem;color:#444;line-height:1.75">Quand tu ajoutes un média à programmer, le système analyse ton calendrier existant et choisit automatiquement la prochaine date libre disponible. Tu n'as jamais à saisir d'heure manuellement. Les publications se font à intervalles réguliers pour maximiser l'engagement.</div>
+        </div>
+        <div class="lp-faq-item" onclick="lpToggleFaq(this)">
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:16px">
+            <span style="font-weight:700;font-size:.9rem;color:#ddd">Puis-je annuler à tout moment ?</span>
+            <span style="color:#7c3aed;font-size:1.1rem;flex-shrink:0;transition:transform .2s" class="lp-faq-icon">+</span>
+          </div>
+          <div class="lp-faq-body" style="display:none;margin-top:14px;font-size:.83rem;color:#444;line-height:1.75">Oui, sans engagement et sans frais de résiliation. Tu peux annuler ton abonnement à n'importe quel moment depuis ton dashboard. Tes données sont conservées 30 jours après l'annulation.</div>
+        </div>
+        <div class="lp-faq-item" onclick="lpToggleFaq(this)" style="border-bottom:none">
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:16px">
+            <span style="font-weight:700;font-size:.9rem;color:#ddd">Quelle est la différence entre les plans ?</span>
+            <span style="color:#7c3aed;font-size:1.1rem;flex-shrink:0;transition:transform .2s" class="lp-faq-icon">+</span>
+          </div>
+          <div class="lp-faq-body" style="display:none;margin-top:14px;font-size:.83rem;color:#444;line-height:1.75">Le plan Starter (29€) couvre 2 profils avec Telegram et Snapchat uniquement. Le plan Pro (49€) débloque toutes les plateformes (Instagram, Facebook), les statistiques avancées, le Spotlight Snapchat et 5 profils. Le plan Business (99€) est pour les agences avec des profils illimités et un support dédié.</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── CTA Footer ── -->
+    <div style="position:relative;overflow:hidden;background:linear-gradient(135deg,#0d0b20,#0a0818,#0d0b20);border-top:1px solid #1a1737;padding:80px 5%;text-align:center">
+      <div style="position:absolute;inset:0;background:radial-gradient(ellipse 60% 80% at 50% 120%,rgba(124,58,237,.2),transparent);pointer-events:none"></div>
+      <div style="position:relative">
+        <div class="lp-tag" style="margin-bottom:24px">PRÊT À DÉMARRER ?</div>
+        <h2 style="font-size:clamp(1.8rem,4vw,2.8rem);font-weight:900;margin:0 0 16px;letter-spacing:-.035em;line-height:1.1">Publie en pilote automatique<br><span style="background:linear-gradient(135deg,#a78bfa,#7c3aed);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text">dès aujourd'hui</span></h2>
+        <p style="color:#3a3a50;margin-bottom:40px;font-size:.95rem;max-width:440px;margin-left:auto;margin-right:auto;line-height:1.7">Rejoins des centaines de créateurs qui font confiance à StoryScheduler pour publier leur contenu 24h/24.</p>
+        <button onclick="_showRegister()" class="lp-btn-primary" style="font-size:1.05rem;padding:16px 42px">Créer mon compte gratuitement →</button>
+        <div style="margin-top:16px;font-size:.75rem;color:#1e1e2e">Sans carte bancaire · Sans engagement · Annulable à tout moment</div>
+        <div style="margin-top:52px;padding-top:32px;border-top:1px solid #111;display:flex;justify-content:center;align-items:center;gap:32px;flex-wrap:wrap">
+          <div style="display:flex;align-items:center;gap:8px;font-size:.8rem;color:#252535"><span style="font-size:1rem">📅</span> StoryScheduler</div>
+          <div style="font-size:.75rem;color:#1c1c28">© 2025 StoryScheduler · Tous droits réservés</div>
+          <div style="display:flex;gap:20px">
+            <span style="font-size:.75rem;color:#1c1c28;cursor:pointer" onmouseover="this.style.color='#555'" onmouseout="this.style.color='#1c1c28'">Mentions légales</span>
+            <span style="font-size:.75rem;color:#1c1c28;cursor:pointer" onmouseover="this.style.color='#555'" onmouseout="this.style.color='#1c1c28'">CGU</span>
+            <span style="font-size:.75rem;color:#1c1c28;cursor:pointer" onmouseover="this.style.color='#555'" onmouseout="this.style.color='#1c1c28'">Contact</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <!-- ══════════════════════════════════════════════════════════════════════════════ -->
+
+  <div id="loginFormWrapper" style="min-height:100%;display:flex;align-items:center;justify-content:center;padding:40px 20px">
+    <div style="max-width:380px;width:100%">
+
+      <!-- === PANNEAU CONNEXION === -->
+      <div id="loginPanel">
+        <div style="text-align:center;margin-bottom:40px">
+          <div style="width:64px;height:64px;border-radius:18px;background:linear-gradient(135deg,#7c3aed,#4f46e5);display:flex;align-items:center;justify-content:center;margin:0 auto 16px"><svg width="38" height="38" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg"><line x1="16" y1="16" x2="16" y2="5" stroke="white" stroke-width="2.4" stroke-linecap="round"/><line x1="16" y1="16" x2="24.7" y2="11" stroke="white" stroke-width="2.4" stroke-linecap="round"/><line x1="16" y1="16" x2="24.7" y2="21" stroke="white" stroke-width="2.4" stroke-linecap="round"/><line x1="16" y1="16" x2="16" y2="27" stroke="white" stroke-width="2.4" stroke-linecap="round"/><line x1="16" y1="16" x2="7.3" y2="21" stroke="white" stroke-width="2.4" stroke-linecap="round"/><line x1="16" y1="16" x2="7.3" y2="11" stroke="white" stroke-width="2.4" stroke-linecap="round"/><circle cx="16" cy="5" r="2.5" fill="white"/><circle cx="24.7" cy="11" r="2.5" fill="white"/><circle cx="24.7" cy="21" r="2.5" fill="white"/><circle cx="16" cy="27" r="2.5" fill="white"/><circle cx="7.3" cy="21" r="2.5" fill="white"/><circle cx="7.3" cy="11" r="2.5" fill="white"/><circle cx="16" cy="16" r="2.8" fill="white"/></svg></div>
+          <div style="color:#fff;font-size:1.4rem;font-weight:800;letter-spacing:-.01em">Connexion</div>
+          <div style="color:#555;font-size:.82rem;margin-top:5px">Entrez vos identifiants pour accéder</div>
+        </div>
+        <form id="loginForm" onsubmit="return false" style="display:flex;flex-direction:column;gap:14px">
+          <div>
+            <label style="font-size:.75rem;font-weight:600;color:#888;text-transform:uppercase;letter-spacing:.06em;display:block;margin-bottom:6px">Identifiant</label>
+            <input id="loginUsername" name="username" type="text" autocomplete="username" placeholder="Votre identifiant" style="width:100%;padding:13px 14px;background:#111;border:1px solid #222;border-radius:10px;color:#fff;font-size:.9rem;outline:none;box-sizing:border-box;transition:border-color .15s" onfocus="this.style.borderColor='#7c3aed'" onblur="this.style.borderColor='#222'">
+          </div>
+          <div>
+            <label style="font-size:.75rem;font-weight:600;color:#888;text-transform:uppercase;letter-spacing:.06em;display:block;margin-bottom:6px">Mot de passe</label>
+            <div style="position:relative">
+              <input id="loginPassword" name="password" type="password" autocomplete="current-password" placeholder="Votre mot de passe" style="width:100%;padding:13px 42px 13px 14px;background:#111;border:1px solid #222;border-radius:10px;color:#fff;font-size:.9rem;outline:none;box-sizing:border-box;transition:border-color .15s" onfocus="this.style.borderColor='#7c3aed'" onblur="this.style.borderColor='#222'">
+              <button type="button" onclick="const i=document.getElementById('loginPassword');i.type=i.type==='password'?'text':'password'" style="position:absolute;right:12px;top:50%;transform:translateY(-50%);background:none;border:none;color:#555;cursor:pointer;font-size:.85rem;padding:4px">👁</button>
+            </div>
+          </div>
+          <div id="loginErr" style="color:#f87171;font-size:.78rem;min-height:18px;text-align:center"></div>
+          <button type="submit" id="loginBtn" onclick="_doLogin()" style="padding:14px;background:linear-gradient(135deg,#7c3aed,#4f46e5);border:none;border-radius:10px;color:#fff;font-size:.95rem;font-weight:700;cursor:pointer;transition:opacity .15s;margin-top:4px" onmouseover="this.style.opacity='.88'" onmouseout="this.style.opacity='1'">Se connecter</button>
+        </form>
+        <div style="text-align:center;margin-top:18px">
+          <span style="color:#444;font-size:.8rem">Pas encore de compte ?</span>
+          <button onclick="_showLanding()" style="background:none;border:none;color:#8b5cf6;font-size:.8rem;font-weight:600;cursor:pointer;margin-left:6px;text-decoration:underline;padding:0">Créer un compte</button>
+        </div>
+      </div>
+
+      <!-- === PANNEAU INSCRIPTION === -->
+      <div id="registerPanel" style="display:none">
+        <div style="text-align:center;margin-bottom:32px">
+          <div style="width:64px;height:64px;border-radius:18px;background:linear-gradient(135deg,#7c3aed,#4f46e5);display:flex;align-items:center;justify-content:center;margin:0 auto 16px"><svg width="38" height="38" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg"><line x1="16" y1="16" x2="16" y2="5" stroke="white" stroke-width="2.4" stroke-linecap="round"/><line x1="16" y1="16" x2="24.7" y2="11" stroke="white" stroke-width="2.4" stroke-linecap="round"/><line x1="16" y1="16" x2="24.7" y2="21" stroke="white" stroke-width="2.4" stroke-linecap="round"/><line x1="16" y1="16" x2="16" y2="27" stroke="white" stroke-width="2.4" stroke-linecap="round"/><line x1="16" y1="16" x2="7.3" y2="21" stroke="white" stroke-width="2.4" stroke-linecap="round"/><line x1="16" y1="16" x2="7.3" y2="11" stroke="white" stroke-width="2.4" stroke-linecap="round"/><circle cx="16" cy="5" r="2.5" fill="white"/><circle cx="24.7" cy="11" r="2.5" fill="white"/><circle cx="24.7" cy="21" r="2.5" fill="white"/><circle cx="16" cy="27" r="2.5" fill="white"/><circle cx="7.3" cy="21" r="2.5" fill="white"/><circle cx="7.3" cy="11" r="2.5" fill="white"/><circle cx="16" cy="16" r="2.8" fill="white"/></svg></div>
+          <div style="color:#fff;font-size:1.4rem;font-weight:800;letter-spacing:-.01em">Créer un compte</div>
+          <div style="color:#555;font-size:.82rem;margin-top:5px">Nouveau compte pour accéder au dashboard</div>
+        </div>
+        <form id="registerForm" onsubmit="return false" style="display:flex;flex-direction:column;gap:14px">
+          <div>
+            <label style="font-size:.75rem;font-weight:600;color:#888;text-transform:uppercase;letter-spacing:.06em;display:block;margin-bottom:6px">Nom affiché</label>
+            <input id="regName" name="name" type="text" autocomplete="name" placeholder="Ex: LOUNA" style="width:100%;padding:13px 14px;background:#111;border:1px solid #222;border-radius:10px;color:#fff;font-size:.9rem;outline:none;box-sizing:border-box;transition:border-color .15s" onfocus="this.style.borderColor='#7c3aed'" onblur="this.style.borderColor='#222'">
+          </div>
+          <div>
+            <label style="font-size:.75rem;font-weight:600;color:#888;text-transform:uppercase;letter-spacing:.06em;display:block;margin-bottom:6px">Identifiant (email)</label>
+            <input id="regLogin" name="email" type="email" autocomplete="email" placeholder="email@exemple.com" style="width:100%;padding:13px 14px;background:#111;border:1px solid #222;border-radius:10px;color:#fff;font-size:.9rem;outline:none;box-sizing:border-box;transition:border-color .15s" onfocus="this.style.borderColor='#7c3aed'" onblur="this.style.borderColor='#222'">
+          </div>
+          <div>
+            <label style="font-size:.75rem;font-weight:600;color:#888;text-transform:uppercase;letter-spacing:.06em;display:block;margin-bottom:6px">Mot de passe</label>
+            <div style="position:relative">
+              <input id="regPassword" name="new-password" type="password" autocomplete="new-password" placeholder="Au moins 6 caractères" style="width:100%;padding:13px 42px 13px 14px;background:#111;border:1px solid #222;border-radius:10px;color:#fff;font-size:.9rem;outline:none;box-sizing:border-box;transition:border-color .15s" onfocus="this.style.borderColor='#7c3aed'" onblur="this.style.borderColor='#222'">
+              <button type="button" onclick="const i=document.getElementById('regPassword');i.type=i.type==='password'?'text':'password'" style="position:absolute;right:12px;top:50%;transform:translateY(-50%);background:none;border:none;color:#555;cursor:pointer;font-size:.85rem;padding:4px">👁</button>
+            </div>
+          </div>
+          <div>
+            <label style="font-size:.75rem;font-weight:600;color:#888;text-transform:uppercase;letter-spacing:.06em;display:block;margin-bottom:6px">Confirmer le mot de passe</label>
+            <input id="regConfirm" type="password" autocomplete="new-password" placeholder="Répétez le mot de passe" style="width:100%;padding:13px 14px;background:#111;border:1px solid #222;border-radius:10px;color:#fff;font-size:.9rem;outline:none;box-sizing:border-box;transition:border-color .15s" onfocus="this.style.borderColor='#7c3aed'" onblur="this.style.borderColor='#222'">
+          </div>
+          <div id="registerErr" style="color:#f87171;font-size:.78rem;min-height:18px;text-align:center"></div>
+          <button type="submit" id="registerBtn" onclick="_doRegister()" style="padding:14px;background:linear-gradient(135deg,#7c3aed,#4f46e5);border:none;border-radius:10px;color:#fff;font-size:.95rem;font-weight:700;cursor:pointer;transition:opacity .15s;margin-top:4px" onmouseover="this.style.opacity='.88'" onmouseout="this.style.opacity='1'">Créer le compte</button>
+        </form>
+        <div style="text-align:center;margin-top:18px">
+          <span style="color:#444;font-size:.8rem">Déjà un compte ?</span>
+          <button onclick="_showLogin()" style="background:none;border:none;color:#8b5cf6;font-size:.8rem;font-weight:600;cursor:pointer;margin-left:6px;text-decoration:underline;padding:0">Se connecter</button>
+        </div>
+      </div>
+
     </div>
   </div>
 </div>
@@ -2549,18 +3435,24 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--t1);font-
 document.addEventListener('DOMContentLoaded', async function(){
   try{
     const r = await fetch('/api/auth/check');
-    if(!r.ok){
-      _showLoginScreenRaw();
-    }
-  } catch(e){
-    _showLoginScreenRaw();
-  }
+    if(!r.ok){ _showLoginScreenRaw(); return; }
+    const d = await r.json().catch(()=>({}));
+    _sessionIsAdmin = !!d.is_admin;
+    const appEl=document.querySelector('.app');
+    if(appEl)appEl.style.display='';
+    reloadAllData();
+    loadProfiles();
+  } catch(e){ _showLoginScreenRaw(); }
 });
 function _showLoginScreenRaw(){
   const ls=document.getElementById('loginScreen');
   const app=document.querySelector('.app');
   if(ls){ls.style.display='block';}
   if(app){app.style.display='none';}
+  const lp=document.getElementById('landingPanel');
+  const lw=document.getElementById('loginFormWrapper');
+  if(lp)lp.style.display='block';
+  if(lw)lw.style.display='none';
 }
 // Enter key support
 document.addEventListener('keydown',function(e){
@@ -2569,7 +3461,7 @@ document.addEventListener('keydown',function(e){
   }
 });
 </script>
-<div class="app">
+<div class="app" style="display:none">
   <aside class="sidebar">
     <div class="sb-logo">
       <div class="sb-logo-icon">
@@ -2599,9 +3491,10 @@ document.addEventListener('keydown',function(e){
       <button class="sb-item" data-page="snapchat"><span class="sb-item-ico"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2C9.1 2 6.8 4.2 6.8 6.9v1c-.72.22-1.52.42-2.04.42-.1 0-.2 0-.3-.02-.09-.01-.16.06-.13.14.22.55 1.14 1.06 1.75 1.28.05.02.09.07.1.12.29 1.37.83 2.52 1.61 3.35-1.16.66-2.79 1.37-2.79 2.6 0 .87.73 1.52 2.23 1.9.14.04.24.15.27.28.16.75.45 1.47.82 1.9-.28.12-.68.24-.68.6 0 .41.51.63 1.43.63h.76c.63.58 1.49.95 2.54.95s1.91-.37 2.54-.95h.76c.92 0 1.43-.22 1.43-.63 0-.36-.4-.48-.68-.6.37-.43.66-1.15.82-1.9.03-.13.13-.24.27-.28 1.5-.38 2.23-1.03 2.23-1.9 0-1.23-1.63-1.94-2.79-2.6.78-.83 1.32-1.98 1.61-3.35.01-.05.05-.1.1-.12.61-.22 1.53-.73 1.75-1.28.03-.08-.04-.15-.13-.14-.1.02-.2.02-.3.02-.52 0-1.32-.2-2.04-.42v-1C17.2 4.2 14.9 2 12 2z"/></svg></span>Snapchat<span class="sb-badge" id="badgeSnap" style="display:none">0</span></button>
       <button class="sb-item" data-page="instagram"><span class="sb-item-ico"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="2" width="20" height="20" rx="5"/><circle cx="12" cy="12" r="4.5"/><circle cx="17.5" cy="6.5" r="1" fill="currentColor" stroke="none"/></svg></span>Instagram</button>
       <button class="sb-item sb-item-soon" onclick="showComingSoon('Threads')"><span class="sb-item-ico"><svg width="16" height="16" viewBox="0 0 192 192" fill="currentColor"><path d="M141.537 88.988c-.829-.394-1.67-.776-2.52-1.141-1.483-27.307-16.403-42.94-41.457-43.1h-.333c-14.986 0-27.449 6.397-35.12 17.037l13.779 9.452c5.73-8.695 14.724-10.548 21.347-10.548h.228c8.25.053 14.474 2.451 18.503 7.129 2.932 3.405 4.893 8.111 5.864 14.05-7.314-1.243-15.224-1.625-23.68-1.14-23.82 1.372-39.134 15.265-38.105 34.569.521 9.792 5.399 18.216 13.734 23.719 7.047 4.652 16.124 6.927 25.557 6.412 12.458-.683 22.231-5.436 29.049-14.127 5.178-6.6 8.453-15.153 9.899-25.93 5.937 3.583 10.337 8.298 12.767 13.966 4.132 9.635 4.373 25.468-8.546 38.376-11.319 11.308-24.925 16.2-45.488 16.351-22.809-.169-40.06-7.484-51.275-21.742C30.7 152.633 25.272 133.35 25.07 108.667c.202-24.683 5.63-43.967 16.132-57.318C52.418 37.081 69.668 29.766 92.477 29.597c23.226.171 41.127 7.698 53.212 22.39 5.937 7.286 10.393 16.35 13.322 27.038l16.148-4.308C171.72 61.637 166.307 50.71 158.941 41.65 143.812 23.283 121.978 13.87 93.845 13.676h-.333C65.248 13.87 43.658 23.318 29.154 41.755 16.248 58.162 9.59 81 9.366 109.617l-.001.05.001.05c.224 28.617 6.882 51.447 19.788 67.854 14.504 18.437 36.094 27.885 64.169 28.079h.333c24.96-.173 42.554-6.884 57.048-21.353 18.963-18.734 18.392-42.52 12.142-57.28-4.661-10.929-13.685-19.402-24.723-24.379l.413.35zM98.44 129.507c-10.44.588-21.286-4.098-21.821-14.135-.394-7.442 5.298-15.746 22.464-16.735 1.966-.113 3.895-.168 5.79-.168 6.235 0 12.068.606 17.371 1.765-1.978 24.702-13.58 28.713-23.804 29.273z"/></svg></span>Threads<span style="font-size:.52rem;background:linear-gradient(135deg,#833ab4,#fd1d1d,#fcb045);color:#fff;padding:1px 5px;border-radius:4px;margin-left:5px;font-weight:700">SOON</span></button>
+      <button class="sb-item" data-page="facebook"><span class="sb-item-ico"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M24 12.073c0-6.627-5.373-12-12-12s-12 5.373-12 12c0 5.99 4.388 10.954 10.125 11.854v-8.385H7.078v-3.47h3.047V9.43c0-3.007 1.792-4.669 4.533-4.669 1.312 0 2.686.235 2.686.235v2.953H15.83c-1.491 0-1.956.925-1.956 1.874v2.25h3.328l-.532 3.47h-2.796v8.385C19.612 23.027 24 18.062 24 12.073z"/></svg></span>Facebook</button>
       <button class="sb-item" data-page="playlists"><span class="sb-item-ico"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg></span>Médias</button>
       <button class="sb-item" data-page="stats"><span class="sb-item-ico"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg></span>Statistiques</button>
-      <button class="sb-item" data-page="revenue"><span class="sb-item-ico"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><text x="3" y="18" font-size="18" font-family="system-ui,sans-serif" font-weight="900">$</text></svg></span>Revenus</button>
+      <button class="sb-item" data-page="revenue"><span class="sb-item-ico"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><text x="12" y="18" font-size="18" font-family="system-ui,sans-serif" font-weight="900" text-anchor="middle">$</text></svg></span>Revenus</button>
       <div class="sb-sep"></div>
       <button class="sb-item" data-page="accounts"><span class="sb-item-ico"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="8" r="4"/><path d="M4 20c0-3.866 3.582-7 8-7s8 3.134 8 7"/></svg></span>Comptes<span class="sb-badge" id="badgeAccounts" style="display:none">0</span></button>
     </nav>
@@ -2623,7 +3516,11 @@ document.addEventListener('keydown',function(e){
         </div>
       </div>
       <div class="sb-util-btns">
-        <button class="sb-util-btn" onclick="window.open('https://docs.oneupapp.io','_blank')">
+        <button class="sb-util-btn" onclick="openSubModal()" id="sbSubBtn">
+          <div class="sb-util-ico" style="background:rgba(124,58,237,.18)"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="1" y="4" width="22" height="16" rx="2"/><line x1="1" y1="10" x2="23" y2="10"/></svg></div>
+          <span id="sbSubLabel">Mon abonnement</span>
+        </button>
+        <button class="sb-util-btn" onclick="switchToDocs()">
           <div class="sb-util-ico"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg></div>
           Docs
         </button>
@@ -2635,6 +3532,41 @@ document.addEventListener('keydown',function(e){
       <div class="sb-status"><div class="sb-dot" id="sbDot"></div><span id="sbText">Chargement…</span></div>
     </div>
   </aside>
+
+  <!-- Subscription modal -->
+  <div class="pin-modal" id="subModal" onclick="if(event.target===this)this.classList.remove('open')">
+    <div class="pin-box" onclick="event.stopPropagation()" style="width:540px;max-width:96vw;max-height:90vh;overflow-y:auto;padding:32px 28px">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:24px">
+        <div style="font-size:1.25rem;font-weight:900;letter-spacing:-.02em">💳 Mon abonnement</div>
+        <button onclick="document.getElementById('subModal').classList.remove('open')" style="background:none;border:none;color:var(--t3);cursor:pointer;font-size:1.2rem;padding:4px">✕</button>
+      </div>
+      <div id="subCurrentPlan" style="background:#0d0d0f;border:1px solid #1c1c22;border-radius:14px;padding:20px;margin-bottom:20px">
+        <div style="font-size:.65rem;font-weight:700;text-transform:uppercase;letter-spacing:.1em;color:#555;margin-bottom:10px">Forfait actuel</div>
+        <div style="display:flex;align-items:center;gap:12px">
+          <div id="subPlanBadge" style="font-size:1.8rem"></div>
+          <div>
+            <div id="subPlanName" style="font-size:1.1rem;font-weight:800;color:var(--t1)">—</div>
+            <div id="subPlanPrice" style="font-size:.82rem;color:var(--t2);margin-top:2px">—</div>
+          </div>
+        </div>
+        <div id="subPlanFeats" style="margin-top:14px;display:flex;flex-wrap:wrap;gap:6px"></div>
+      </div>
+      <div id="subAdminSection" style="display:none;margin-bottom:20px">
+        <div style="font-size:.65rem;font-weight:700;text-transform:uppercase;letter-spacing:.1em;color:#555;margin-bottom:10px">Modifier le forfait (admin)</div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
+          <button onclick="subSetPlan('')" id="subBtnNone" style="flex:1;min-width:100px;padding:10px 8px;border-radius:10px;border:1px solid #333;background:#111;color:#888;font-size:.78rem;font-weight:700;cursor:pointer;transition:.15s">🔒 Aucun</button>
+          <button onclick="subSetPlan('starter')" id="subBtnStarter" style="flex:1;min-width:100px;padding:10px 8px;border-radius:10px;border:1px solid #333;background:#111;color:#a78bfa;font-size:.78rem;font-weight:700;cursor:pointer;transition:.15s">⚡ Starter<br><span style="font-size:.65rem;font-weight:400;color:#666">15€/mois</span></button>
+          <button onclick="subSetPlan('pro')" id="subBtnPro" style="flex:1;min-width:100px;padding:10px 8px;border-radius:10px;border:1px solid #5b4fe8;background:linear-gradient(145deg,#13102e,#0f0c22);color:#a78bfa;font-size:.78rem;font-weight:700;cursor:pointer;transition:.15s">🚀 Pro<br><span style="font-size:.65rem;font-weight:400;color:#888">39€/mois</span></button>
+          <button onclick="subSetPlan('business')" id="subBtnBusiness" style="flex:1;min-width:100px;padding:10px 8px;border-radius:10px;border:1px solid #333;background:#111;color:#60a5fa;font-size:.78rem;font-weight:700;cursor:pointer;transition:.15s">🏢 Business<br><span style="font-size:.65rem;font-weight:400;color:#666">239€/mois</span></button>
+        </div>
+        <div id="subSaveStatus" style="margin-top:8px;font-size:.75rem;min-height:18px;text-align:center"></div>
+      </div>
+      <div id="subUserSection" style="text-align:center;padding:16px 0">
+        <div style="font-size:.85rem;color:var(--t2);margin-bottom:12px">Pour changer de forfait, contacte l'administrateur.</div>
+        <a href="mailto:admin@only-chat.ai" style="display:inline-block;padding:10px 22px;background:linear-gradient(135deg,#7c3aed,#4f46e5);border-radius:10px;color:#fff;font-size:.85rem;font-weight:700;text-decoration:none">✉️ Contacter l'admin</a>
+      </div>
+    </div>
+  </div>
 
   <!-- Coming soon modal -->
   <div class="pin-modal" id="comingSoonModal" onclick="this.classList.remove('open')">
@@ -2695,11 +3627,40 @@ document.addEventListener('keydown',function(e){
   </div>
 
   <div class="main">
+    <!-- Plan paywall overlay (shown when no plan active) -->
+    <div id="planPaywall" class="plan-lock-overlay" style="display:none">
+      <div style="text-align:center;margin-bottom:28px">
+        <div style="font-size:2rem;margin-bottom:10px">🔒</div>
+        <div style="font-size:1.2rem;font-weight:900;color:#fff;letter-spacing:-.02em">Aucun forfait actif</div>
+        <div style="font-size:.83rem;color:#444;margin-top:6px;max-width:380px">Ce profil n'a pas encore de forfait. Contacte l'administrateur pour activer l'accès.</div>
+      </div>
+      <div class="plan-cards-wrap">
+        <div class="plan-card">
+          <div style="font-size:.62rem;font-weight:800;letter-spacing:.1em;color:#555;text-transform:uppercase">STARTER</div>
+          <div class="plan-price">15€<span style="font-size:.8rem;font-weight:400;color:#333">/mois</span></div>
+          <div class="plan-sub">Telegram + Snapchat</div>
+          <div class="plan-feat">✓ 10 comptes<br>✓ 50 médias<br>✓ Auto-scheduling<br>✗ Instagram/Facebook<br>✗ Statistiques</div>
+        </div>
+        <div class="plan-card plan-card-pro" style="position:relative">
+          <div style="position:absolute;top:-10px;left:50%;transform:translateX(-50%);background:linear-gradient(135deg,#7c3aed,#4f46e5);border-radius:20px;padding:3px 12px;font-size:.6rem;font-weight:800;color:#fff;white-space:nowrap">⭐ POPULAIRE</div>
+          <div style="font-size:.62rem;font-weight:800;letter-spacing:.1em;color:#a78bfa;text-transform:uppercase">PRO</div>
+          <div class="plan-price" style="background:linear-gradient(135deg,#a78bfa,#7c3aed);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text">39€<span style="font-size:.8rem;font-weight:400;-webkit-text-fill-color:#5550a0">/mois</span></div>
+          <div class="plan-sub">Toutes plateformes</div>
+          <div class="plan-feat">✓ 25 comptes<br>✓ Bibliothèque illimitée<br>✓ Stats & Revenus<br>✓ Spotlight Snapchat<br>✓ Instagram + Facebook</div>
+        </div>
+        <div class="plan-card">
+          <div style="font-size:.62rem;font-weight:800;letter-spacing:.1em;color:#555;text-transform:uppercase">BUSINESS</div>
+          <div class="plan-price">239€<span style="font-size:.8rem;font-weight:400;color:#333">/mois</span></div>
+          <div class="plan-sub">Agences & Studios</div>
+          <div class="plan-feat">✓ Comptes illimités<br>✓ Toutes plateformes<br>✓ Support dédié 7j/7<br>✓ Onboarding perso<br>✓ SLA 99.9%</div>
+        </div>
+      </div>
+      <div style="margin-top:22px;font-size:.75rem;color:#222;text-align:center">Contacte ton administrateur pour activer un forfait · Stripe bientôt disponible</div>
+    </div>
     <div class="topbar">
       <div class="topbar-title" id="topTitle">Programmer</div>
       <div class="topbar-actions">
         <button class="btn btn-sm" id="btnClone" style="display:none">+ Compte</button>
-        <button class="btn btn-sm btn-primary" id="btnAddAcc" onclick="openPlatformPicker()">+ Ajouter un compte</button>
       </div>
     </div>
 
@@ -2789,22 +3750,67 @@ document.addEventListener('keydown',function(e){
             </div>
           </div>
 
-          <!-- Historique -->
-          <div class="panel" style="margin-top:12px">
-            <div class="panel-hd">
-              <div class="panel-title">📋 Historique Instagram</div>
-              <button class="btn btn-xs" id="igBtnRefresh" onclick="loadIgScheduled()">🔄</button>
-            </div>
-            <div id="igSlist"><div class="empty"><div class="empty-ico">📸</div>Aucun post programmé</div></div>
+                  </div>
+
+<!-- PAGE : Facebook -->
+        <div class="page" id="page-facebook">
+          <div class="metrics" style="margin-bottom:12px">
+            <div class="metric"><div class="metric-val" id="fbMPending">—</div><div class="metric-lbl">En attente</div></div>
+            <div class="metric"><div class="metric-val" id="fbMDone">—</div><div class="metric-lbl">Publiées</div></div>
+            <div class="metric"><div class="metric-val" id="fbMErr">—</div><div class="metric-lbl">Erreurs</div></div>
+            <div class="metric"><div class="metric-val" id="fbMAccounts">—</div><div class="metric-lbl">Comptes</div></div>
           </div>
+
+          <div class="panel">
+            <div class="panel-hd">
+              <div class="panel-title" style="background:linear-gradient(135deg,#1877F2,#42A5F5);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text">📘 Programmer des Posts Facebook</div>
+            </div>
+            <div class="uz" id="fbUz" style="border-color:#1877F230">
+              <input type="file" id="fbFi" accept="image/*,video/*" multiple>
+              <div class="uz-ico">📘</div>
+              <div class="uz-txt"><b>Photos / vidéos</b> — upload via Cloudinary → OneUp</div>
+            </div>
+            <div style="display:flex;justify-content:flex-end;margin-bottom:8px">
+              <button class="btn btn-xs" id="fbBtnSavePl" style="background:#1a1a2e;border-color:#1877F2;color:#60a5fa" disabled>💾 Sauvegarder dans Médias</button>
+            </div>
+            <div class="plist" id="fbPlist"></div>
+            <div class="no-p" id="fbNoP">Aucune photo ajoutée</div>
+            <div style="margin:10px 0;background:#0d0d0d;border:1px solid #1e1e1e;border-radius:8px;padding:10px 12px">
+              <div style="font-size:.68rem;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:#555;margin-bottom:8px">⏰ Heure de programmation</div>
+              <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+                <label style="display:flex;align-items:center;gap:6px;font-size:.75rem;cursor:pointer">
+                  <input type="radio" name="fbDateMode" value="auto" checked id="fbDateAuto"> Prochaine date libre
+                </label>
+                <label style="display:flex;align-items:center;gap:6px;font-size:.75rem;cursor:pointer">
+                  <input type="radio" name="fbDateMode" value="manual" id="fbDateManual"> Manuel
+                </label>
+                <input type="datetime-local" id="fbDateInput" style="display:none;background:var(--c1);border:1px solid var(--b2);color:var(--t1);border-radius:5px;padding:4px 8px;font-size:.72rem;color-scheme:dark">
+              </div>
+            </div>
+            <div style="margin:8px 0">
+              <input id="fbCaption" class="acc-desc-inp" style="margin-top:0;font-size:.82rem;padding:8px 11px" placeholder="Texte du post (optionnel)…">
+            </div>
+            <div class="acc-section">
+              <div class="acc-section-lbl">Pages / comptes qui reçoivent le post :</div>
+              <div class="acc-checks" id="fbAccChecks"><div class="no-acc-warn">Chargement…</div></div>
+            </div>
+            <div style="display:flex;gap:6px;margin-top:12px">
+              <button class="btn btn-danger" id="fbBtnSchedule" disabled style="flex:1;background:linear-gradient(135deg,#1877F2,#42A5F5);border:none;color:#fff">📘 Programmer (+1 min/compte)</button>
+              <button class="btn" id="fbBtnClear">🗑</button>
+            </div>
+            <div style="margin-top:8px;padding:7px 10px;background:rgba(24,119,242,.06);border:1px solid rgba(24,119,242,.2);border-radius:6px;font-size:.67rem;color:#aaa">
+              ✅ Cloudinary → One Up · +1 min entre chaque compte
+            </div>
+          </div>
+
         </div>
 
         <!-- PAGE : Playlists / Médias -->
         <div class="page" id="page-playlists">
 
-          <!-- VUE LISTE : 3 colonnes TG / Snap / IG -->
+          <!-- VUE LISTE : 4 colonnes TG / Snap / IG / FB -->
           <div id="mediaListView">
-            <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:14px">
+            <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:14px">
               <!-- Colonne Telegram -->
               <div>
                 <div style="display:flex;align-items:center;gap:8px;margin-bottom:14px;padding-bottom:10px;border-bottom:1px solid var(--b1)">
@@ -2832,6 +3838,15 @@ document.addEventListener('keydown',function(e){
                 </div>
                 <div id="igMediaCol"><div style="color:var(--t3);font-size:.8rem;padding:10px 0">Aucune playlist</div></div>
               </div>
+              <!-- Colonne Facebook -->
+              <div>
+                <div style="display:flex;align-items:center;gap:8px;margin-bottom:14px;padding-bottom:10px;border-bottom:1px solid var(--b1)">
+                  <svg width="28" height="28" viewBox="0 0 24 24"><rect width="24" height="24" rx="6" fill="#1877F2"/><path fill="#fff" d="M15.12 12.78h-2.1v7.22h-3V12.78H8.5V10.1h1.52V8.38C10.02 6.4 11.1 5 13.38 5c.97 0 2 .1 2 .1v2.2h-1.13c-.84 0-1.13.52-1.13 1.08V10.1h2.23l-.23 2.68z"/></svg>
+                  <span style="font-weight:800;font-size:1rem;letter-spacing:-.01em;color:var(--t1)">Facebook</span>
+                  <button class="btn btn-xs" style="margin-left:auto;background:rgba(24,119,242,.12);border-color:rgba(24,119,242,.5);color:#60a5fa" onclick="openCreatePlaylist('fb')">+ Nouvelle</button>
+                </div>
+                <div id="fbMediaCol"><div style="color:var(--t3);font-size:.8rem;padding:10px 0">Aucune playlist</div></div>
+              </div>
             </div>
           </div>
 
@@ -2839,7 +3854,7 @@ document.addEventListener('keydown',function(e){
           <div id="mediaDetailView" style="display:none">
             <div style="display:flex;align-items:center;gap:8px;margin-bottom:14px;flex-wrap:wrap">
               <button class="btn btn-sm" id="mdBtnBack">← Retour</button>
-              <div style="font-weight:700;font-size:.88rem" id="mdTitle">—</div>
+              <div style="font-weight:700;font-size:.88rem;cursor:pointer;display:flex;align-items:center;gap:5px;user-select:none" id="mdTitle" title="Cliquer pour renommer">—<span style="font-size:.7rem;opacity:.4;font-weight:400">✏️</span></div>
               <span id="mdBadge" style="font-size:.65rem;padding:2px 8px;border-radius:20px;font-weight:700">—</span>
               <div style="margin-left:auto;display:flex;gap:6px;flex-wrap:wrap">
                 <label class="btn btn-xs" style="cursor:pointer;background:#1a1a2e;border-color:#6366f1;color:#a5b4fc">
@@ -3016,7 +4031,6 @@ document.addEventListener('keydown',function(e){
                 <button class="btn btn-sm" id="btnRefreshStats"><span class="btn-ico">🔄</span> Actualiser</button>
               </div>
             </div>
-            <div style="font-size:.7rem;color:var(--t2);margin-bottom:10px" id="statsNote">Vues disponibles 24h après publication — limite Telegram.</div>
             <div id="statsList"><div class="empty"><div class="empty-ico">📊</div>Clique sur Actualiser</div></div>
           </div>
         </div>
@@ -3046,7 +4060,7 @@ document.addEventListener('keydown',function(e){
                 <div class="uz-ico">&#x1F47B;</div>
                 <div class="uz-txt"><b>Photos / vidéos</b> — converties auto en 9:16 portrait</div>
               </div>
-              <div style="display:flex;justify-content:flex-end;margin-bottom:8px">
+              <div style="display:flex;justify-content:flex-end;margin-top:10px;margin-bottom:8px">
                 <button class="btn btn-xs" id="snapBtnSavePl" style="background:#1a1a2e;border-color:#6366f1;color:#a5b4fc" disabled>&#x1F4BE; Sauvegarder dans Médias</button>
               </div>
 
@@ -3098,21 +4112,28 @@ document.addEventListener('keydown',function(e){
               <!-- Dossiers locaux → pool VPS -->
               <div style="margin-bottom:12px;background:#0a0a0a;border:1px solid #1e1e1e;border-radius:8px;padding:10px 12px">
                 <div style="font-size:.75rem;font-weight:700;color:var(--t2);margin-bottom:8px">&#x1F4C2; Dossiers locaux</div>
+                <div style="font-size:.62rem;color:#f5c518;background:rgba(245,197,24,.08);border:1px solid rgba(245,197,24,.2);border-radius:5px;padding:5px 8px;margin-bottom:8px">
+                  &#x26A0;&#xFE0F; Dans la boîte de dialogue : navigue jusqu'au dossier voulu, puis clique <b>Sélectionner le dossier</b> (ne clique pas sur les fichiers à l'intérieur).
+                </div>
                 <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:6px">
                   <div>
-                    <div style="font-size:.62rem;color:#888;margin-bottom:3px">📥 3 - A POSTER (source)</div>
+                    <div style="font-size:.62rem;color:#888;margin-bottom:3px">📥 A POSTER (source)</div>
                     <button class="btn btn-xs" id="splPickSrc" style="width:100%;font-size:.68rem;padding:6px 8px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">
                       📁 Choisir dossier source
                     </button>
+                    <button class="btn btn-xs" id="splPickFiles" style="width:100%;font-size:.62rem;padding:4px 8px;margin-top:3px;opacity:.7">
+                      🎬 Sélectionner des vidéos
+                    </button>
                   </div>
                   <div>
-                    <div style="font-size:.62rem;color:#888;margin-bottom:3px">📤 4 - DEJA POSTEES (dest.)</div>
+                    <div style="font-size:.62rem;color:#888;margin-bottom:3px">📤 DEJA POSTEES (dest.)</div>
                     <button class="btn btn-xs" id="splPickDst" style="width:100%;font-size:.68rem;padding:6px 8px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" disabled>
                       📁 Choisir dossier dest.
                     </button>
                   </div>
                 </div>
                 <div id="splFolderStatus" style="font-size:.66rem;color:#aaa;min-height:14px"></div>
+                <div id="splDebugInfo" style="font-size:.6rem;color:#666;margin-top:4px;display:none"></div>
               </div>
               <button class="btn" id="splBtnSchedule" disabled style="width:100%;margin-top:4px;background:#f5c518;border-color:#f5c518;color:#000;font-weight:700;padding:11px">
                 &#x1F3AC; Programmer les Spotlight
@@ -3187,38 +4208,515 @@ document.addEventListener('keydown',function(e){
 
         <!-- PAGE : Comptes -->
         <div class="page" id="page-accounts">
-          <!-- Telegram -->
-          <div class="panel" style="margin-bottom:14px">
-            <div class="panel-hd">
-              <div class="panel-title" style="display:flex;align-items:center;gap:8px">
-                <svg width="18" height="18" viewBox="0 0 240 240"><circle cx="120" cy="120" r="120" fill="#2CA5E0"/><path fill="#fff" d="M20.665 100.68c49.238-21.462 82.064-35.607 98.477-42.437 46.905-19.52 56.629-22.918 62.959-23.04 1.396-.024 4.52.322 6.547 1.97 1.707 1.389 2.177 3.262 2.405 4.576.229 1.315.512 4.306.284 6.647-2.548 26.78-13.558 91.763-19.161 121.77-2.369 12.696-7.038 16.951-11.561 17.36-9.826.906-17.294-6.492-26.828-12.73-14.913-9.766-23.33-15.844-37.82-25.386-16.718-11.016-5.882-17.068 3.638-26.978 2.49-2.583 45.749-41.925 46.575-45.503.104-.447.201-2.113-1.28-2.994-1.481-.88-3.666-.577-5.243-.339-2.233.336-37.78 24.014-106.64 70.58-10.091 6.929-19.232 10.308-27.424 10.132-9.025-.193-26.383-5.108-39.284-9.306-15.832-5.148-28.405-7.875-27.324-16.619.565-4.561 6.867-9.225 18.905-14.003z"/></svg>
-                Comptes Telegram
-              </div>
-              <button class="btn btn-xs" id="btnReconnectAll" onclick="reconnectAllDisconnected()" style="font-size:.72rem;padding:5px 10px;background:rgba(124,58,237,.15);border:1px solid rgba(124,58,237,.35);color:#a78bfa">🔄 Reconnecter tout</button>
-            </div>
-            <div class="acc-list" id="accList"><div class="no-acc">Aucun compte</div></div>
+          <!-- Clef API OneUp -->
+          <div style="display:flex;align-items:center;gap:10px;background:rgba(124,58,237,.08);border:1px solid rgba(124,58,237,.22);border-radius:10px;padding:12px 16px;margin-bottom:14px">
+            <span style="font-size:.85rem;color:var(--fg2);white-space:nowrap;font-weight:600">🔑 Clef API OneUp</span>
+            <input id="acsOneupKey" type="password" placeholder="Colle ta clef API OneUp ici…" style="flex:1;background:#1a1a1a;border:1px solid #333;border-radius:7px;padding:7px 10px;color:var(--fg);font-size:.85rem">
+            <button class="btn btn-xs" onclick="(()=>{const i=document.getElementById('acsOneupKey');i.type=i.type==='password'?'text':'password'})()" title="Afficher/masquer" style="white-space:nowrap">👁</button>
+            <button class="btn btn-xs" onclick="navigator.clipboard.readText().then(t=>{document.getElementById('acsOneupKey').value=t.trim();toast('✅ Clef collée','ok');}).catch(()=>alert('Autorise le presse-papiers dans le navigateur.'))" title="Coller" style="white-space:nowrap">📋 Coller</button>
+            <button class="btn btn-xs" style="background:var(--purple);color:#fff;white-space:nowrap" onclick="(async()=>{const v=document.getElementById('acsOneupKey').value.trim();if(!v)return toast('Entre une clef','err');const pid=_activeProfileId;if(!pid)return;const r=await fetch('/api/profiles/'+pid,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({oneup_api_key:v})});if(r.ok)toast('✅ Clef sauvegardée','ok');else toast('Erreur sauvegarde','err');})()">💾 Sauvegarder</button>
           </div>
-          <!-- Snapchat -->
-          <div class="panel" style="margin-bottom:14px">
-            <div class="panel-hd">
-              <div class="panel-title" style="display:flex;align-items:center;gap:8px">
-                <svg width="18" height="18" viewBox="0 0 48 48"><rect width="48" height="48" rx="9" fill="#FFFC00"/><path fill="#000" d="M24 7c-5.3 0-9.5 4.1-9.5 9.2v1.4c-1 .3-2.2.6-3 .6h-.5c-.11-.02-.2.07-.17.18.28.7 1.46 1.37 2.24 1.65.07.02.13.09.14.17.38 1.76 1.08 3.23 2.1 4.35-1.33.75-2.66 1.55-2.66 2.92 0 .98.84 1.73 2.57 2.18.17.05.3.18.31.35.21.98.58 1.91 1.06 2.47-.47.2-.9.4-.9.7 0 .54.83 1.03 2.33 1.03h1.25c.82.76 1.94 1.22 3.3 1.22s2.48-.46 3.3-1.22h1.25c1.5 0 2.33-.49 2.33-1.03 0-.3-.43-.5-.9-.7.48-.56.85-1.49 1.06-2.47.01-.17.14-.3.31-.35 1.73-.45 2.57-1.2 2.57-2.18 0-1.37-1.33-2.17-2.66-2.92 1.02-1.12 1.72-2.59 2.1-4.35.01-.08.07-.15.14-.17.78-.28 1.96-.95 2.24-1.65.03-.11-.06-.2-.17-.18h-.05c-.78 0-1.9-.27-3-.6v-1.4C33.5 11.1 29.3 7 24 7z"/></svg>
-                Comptes Snapchat
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
+
+            <!-- Telegram -->
+            <div class="accs-panel">
+              <div class="accs-hd">
+                <div class="accs-hd-left">
+                  <div class="accs-plat-ico" style="background:rgba(44,165,224,.15)"><svg width="16" height="16" viewBox="0 0 240 240"><circle cx="120" cy="120" r="120" fill="#2CA5E0"/><path fill="#fff" d="M20.665 100.68c49.238-21.462 82.064-35.607 98.477-42.437 46.905-19.52 56.629-22.918 62.959-23.04 1.396-.024 4.52.322 6.547 1.97 1.707 1.389 2.177 3.262 2.405 4.576.229 1.315.512 4.306.284 6.647-2.548 26.78-13.558 91.763-19.161 121.77-2.369 12.696-7.038 16.951-11.561 17.36-9.826.906-17.294-6.492-26.828-12.73-14.913-9.766-23.33-15.844-37.82-25.386-16.718-11.016-5.882-17.068 3.638-26.978 2.49-2.583 45.749-41.925 46.575-45.503.104-.447.201-2.113-1.28-2.994-1.481-.88-3.666-.577-5.243-.339-2.233.336-37.78 24.014-106.64 70.58-10.091 6.929-19.232 10.308-27.424 10.132-9.025-.193-26.383-5.108-39.284-9.306-15.832-5.148-28.405-7.875-27.324-16.619.565-4.561 6.867-9.225 18.905-14.003z"/></svg></div>
+                  <span class="accs-plat-name">Telegram</span>
+                  <span class="accs-badge" id="acsBadgeTg">0</span>
+                </div>
+                <div style="display:flex;gap:6px">
+                  <button class="accs-btn" id="btnReconnectAll" onclick="reconnectAllDisconnected()" title="Reconnecter les déconnectés">🔄</button>
+                  <button class="accs-btn accs-btn-add" id="btnAddAcc" onclick="openAuthModal()">+ Ajouter</button>
+                </div>
               </div>
-              <button class="btn btn-xs" onclick="loadSnapAccounts().then(_renderSnapIgAccounts)" style="font-size:.72rem;padding:5px 10px;background:rgba(245,197,24,.1);border:1px solid rgba(245,197,24,.3);color:#f5c518">⟳ Rafraîchir</button>
+              <div class="acc-list" id="accList"><div class="no-acc">Aucun compte</div></div>
             </div>
-            <div id="snapAccListPage"><div style="color:var(--t3);font-size:.78rem;padding:8px 0">Chargement…</div></div>
+
+            <!-- Snapchat -->
+            <div class="accs-panel">
+              <div class="accs-hd">
+                <div class="accs-hd-left">
+                  <div class="accs-plat-ico" style="background:rgba(255,252,0,.12)"><svg width="16" height="16" viewBox="0 0 48 48"><rect width="48" height="48" rx="9" fill="#FFFC00"/><path fill="#000" d="M24 7c-5.3 0-9.5 4.1-9.5 9.2v1.4c-1 .3-2.2.6-3 .6h-.5c-.11-.02-.2.07-.17.18.28.7 1.46 1.37 2.24 1.65.07.02.13.09.14.17.38 1.76 1.08 3.23 2.1 4.35-1.33.75-2.66 1.55-2.66 2.92 0 .98.84 1.73 2.57 2.18.17.05.3.18.31.35.21.98.58 1.91 1.06 2.47-.47.2-.9.4-.9.7 0 .54.83 1.03 2.33 1.03h1.25c.82.76 1.94 1.22 3.3 1.22s2.48-.46 3.3-1.22h1.25c1.5 0 2.33-.49 2.33-1.03 0-.3-.43-.5-.9-.7.48-.56.85-1.49 1.06-2.47.01-.17.14-.3.31-.35 1.73-.45 2.57-1.2 2.57-2.18 0-1.37-1.33-2.17-2.66-2.92 1.02-1.12 1.72-2.59 2.1-4.35.01-.08.07-.15.14-.17.78-.28 1.96-.95 2.24-1.65.03-.11-.06-.2-.17-.18h-.05c-.78 0-1.9-.27-3-.6v-1.4C33.5 11.1 29.3 7 24 7z"/></svg></div>
+                  <span class="accs-plat-name">Snapchat</span>
+                  <span class="accs-badge" id="acsBadgeSnap">0</span>
+                </div>
+                <button class="accs-btn accs-btn-add" onclick="_openAddSocialModal('snap')">+ Ajouter</button>
+              </div>
+              <div class="acc-list" id="snapAccListPage"><div class="no-acc">Aucun compte</div></div>
+            </div>
+
+            <!-- Instagram -->
+            <div class="accs-panel">
+              <div class="accs-hd">
+                <div class="accs-hd-left">
+                  <div class="accs-plat-ico" style="background:rgba(131,58,180,.15)"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#c084fc" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="2" width="20" height="20" rx="5"/><circle cx="12" cy="12" r="4.5"/><circle cx="17.5" cy="6.5" r="1" fill="#c084fc" stroke="none"/></svg></div>
+                  <span class="accs-plat-name">Instagram</span>
+                  <span class="accs-badge" id="acsBadgeIg">0</span>
+                </div>
+                <button class="accs-btn accs-btn-add" onclick="_openAddSocialModal('ig')">+ Ajouter</button>
+              </div>
+              <div class="acc-list" id="igAccListPage"><div class="no-acc">Aucun compte</div></div>
+            </div>
+
+            <!-- Facebook -->
+            <div class="accs-panel">
+              <div class="accs-hd">
+                <div class="accs-hd-left">
+                  <div class="accs-plat-ico" style="background:rgba(24,119,242,.15)"><svg width="16" height="16" viewBox="0 0 24 24" fill="#1877F2"><path d="M24 12.073c0-6.627-5.373-12-12-12s-12 5.373-12 12c0 5.99 4.388 10.954 10.125 11.854v-8.385H7.078v-3.47h3.047V9.43c0-3.007 1.792-4.669 4.533-4.669 1.312 0 2.686.235 2.686.235v2.953H15.83c-1.491 0-1.956.925-1.956 1.874v2.25h3.328l-.532 3.47h-2.796v8.385C19.612 23.027 24 18.062 24 12.073z"/></svg></div>
+                  <span class="accs-plat-name">Facebook</span>
+                  <span class="accs-badge" id="acsBadgeFb">0</span>
+                </div>
+                <button class="accs-btn accs-btn-add" onclick="_openAddSocialModal('fb')">+ Ajouter</button>
+              </div>
+              <div class="acc-list" id="fbAccListPage"><div class="no-acc">Aucun compte</div></div>
+            </div>
+
           </div>
-          <!-- Instagram -->
-          <div class="panel">
-            <div class="panel-hd">
-              <div class="panel-title" style="display:flex;align-items:center;gap:8px">
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="color:#c084fc"><rect x="2" y="2" width="20" height="20" rx="5"/><circle cx="12" cy="12" r="4.5"/><circle cx="17.5" cy="6.5" r="1" fill="currentColor" stroke="none"/></svg>
-                Comptes Instagram
+        </div>
+
+        <!-- PAGE : Documentation -->
+        <div class="page" id="page-docs" style="padding:0;overflow:hidden">
+          <div style="display:flex;height:100%;overflow:hidden">
+
+            <!-- ── Doc sidebar ── -->
+            <div id="docSidebar" style="width:226px;flex-shrink:0;border-right:1px solid var(--b1);overflow-y:auto;padding:20px 0;background:var(--bg)">
+              <div style="padding:0 16px 14px;font-size:.65rem;font-weight:800;letter-spacing:.1em;color:var(--t3);text-transform:uppercase">Documentation</div>
+
+              <div class="doc-nav-section">
+                <div class="doc-nav-label">🚀 Démarrage</div>
+                <button class="doc-nav-item active" data-doc="intro" onclick="showDoc('intro',this)">Introduction</button>
+                <button class="doc-nav-item" data-doc="account" onclick="showDoc('account',this)">Créer un compte</button>
+                <button class="doc-nav-item" data-doc="profile" onclick="showDoc('profile',this)">Configurer son profil</button>
               </div>
-              <button class="btn btn-xs" onclick="loadIgAccounts().then(_renderSnapIgAccounts)" style="font-size:.72rem;padding:5px 10px;background:rgba(192,132,252,.1);border:1px solid rgba(192,132,252,.3);color:#c084fc">⟳ Rafraîchir</button>
+
+              <div class="doc-nav-section">
+                <div class="doc-nav-label">🔗 Comptes</div>
+                <button class="doc-nav-item" data-doc="tg-connect" onclick="showDoc('tg-connect',this)">Connecter Telegram</button>
+                <button class="doc-nav-item" data-doc="snap-connect" onclick="showDoc('snap-connect',this)">Connecter Snapchat</button>
+                <button class="doc-nav-item" data-doc="ig-connect" onclick="showDoc('ig-connect',this)">Connecter Instagram/FB</button>
+              </div>
+
+              <div class="doc-nav-section">
+                <div class="doc-nav-label">📅 Publication</div>
+                <button class="doc-nav-item" data-doc="scheduling" onclick="showDoc('scheduling',this)">Auto-scheduling</button>
+                <button class="doc-nav-item" data-doc="playlists" onclick="showDoc('playlists',this)">Playlists & médias</button>
+                <button class="doc-nav-item" data-doc="publishing" onclick="showDoc('publishing',this)">Publier une story</button>
+              </div>
+
+              <div class="doc-nav-section">
+                <div class="doc-nav-label">📊 Stats & Revenus</div>
+                <button class="doc-nav-item" data-doc="stats" onclick="showDoc('stats',this)">Statistiques</button>
+                <button class="doc-nav-item" data-doc="revenue" onclick="showDoc('revenue',this)">Suivi des revenus</button>
+              </div>
+
+              <div class="doc-nav-section">
+                <div class="doc-nav-label">⚡ Avancé</div>
+                <button class="doc-nav-item" data-doc="spotlight" onclick="showDoc('spotlight',this)">Spotlight Snapchat</button>
+                <button class="doc-nav-item" data-doc="multiprofile" onclick="showDoc('multiprofile',this)">Multi-profils</button>
+                <button class="doc-nav-item" data-doc="oneup" onclick="showDoc('oneup',this)">Clef API OneUp</button>
+              </div>
+
+              <div class="doc-nav-section">
+                <div class="doc-nav-label">❓ Support</div>
+                <button class="doc-nav-item" data-doc="faq" onclick="showDoc('faq',this)">FAQ</button>
+                <button class="doc-nav-item" data-doc="legal" onclick="showDoc('legal',this)">Mentions légales</button>
+                <button class="doc-nav-item" data-doc="cgu" onclick="showDoc('cgu',this)">CGU</button>
+              </div>
             </div>
-            <div id="igAccListPage"><div style="color:var(--t3);font-size:.78rem;padding:8px 0">Chargement…</div></div>
+
+            <!-- ── Doc content ── -->
+            <div id="docContent" style="flex:1;overflow-y:auto;padding:36px 48px;max-width:860px">
+
+              <!-- intro -->
+              <div class="doc-section active" id="doc-intro">
+                <div class="doc-breadcrumb">🚀 Démarrage</div>
+                <h1 class="doc-h1">Bienvenue sur StoryScheduler</h1>
+                <div class="doc-callout info">
+                  <strong>StoryScheduler</strong> est une plateforme d'automatisation de publication de stories et posts sur <strong>Telegram, Snapchat, Instagram et Facebook</strong>. Configure tes comptes une fois, et le système publie pour toi — 24h/24, 7j/7.
+                </div>
+                <h2 class="doc-h2">Ce que tu peux faire</h2>
+                <div class="doc-grid-2">
+                  <div class="doc-feature-card"><div class="doc-feature-ico">📅</div><div><strong>Auto-scheduling</strong><p>Le système choisit automatiquement le prochain créneau libre pour publier sans conflit.</p></div></div>
+                  <div class="doc-feature-card"><div class="doc-feature-ico">📚</div><div><strong>Playlists de médias</strong><p>Organise tes photos/vidéos en playlists et déploie-les en un clic sur toutes tes plateformes.</p></div></div>
+                  <div class="doc-feature-card"><div class="doc-feature-ico">👥</div><div><strong>Multi-profils</strong><p>Gère plusieurs créateurs depuis un seul dashboard, chaque profil complètement isolé.</p></div></div>
+                  <div class="doc-feature-card"><div class="doc-feature-ico">📊</div><div><strong>Stats & Revenus</strong><p>Visualise tes publications, vues et revenus en temps réel avec des graphiques.</p></div></div>
+                </div>
+                <h2 class="doc-h2">Plateformes supportées</h2>
+                <div class="doc-platform-list">
+                  <div class="doc-platform"><span style="font-size:1.4rem">✈️</span><div><strong>Telegram</strong><span class="doc-badge green">Complet</span><p>Stories, publication automatique, multi-comptes, monitoring en direct.</p></div></div>
+                  <div class="doc-platform"><span style="font-size:1.4rem">👻</span><div><strong>Snapchat</strong><span class="doc-badge green">Complet</span><p>Stories + Spotlight automatique via API OneUp.</p></div></div>
+                  <div class="doc-platform"><span style="font-size:1.4rem">📸</span><div><strong>Instagram</strong><span class="doc-badge yellow">Via OneUp</span><p>Reels et stories programmés via l'API officielle OneUp/Meta.</p></div></div>
+                  <div class="doc-platform"><span style="font-size:1.4rem">📘</span><div><strong>Facebook</strong><span class="doc-badge yellow">Via OneUp</span><p>Posts et stories programmés via l'API officielle OneUp/Meta.</p></div></div>
+                </div>
+                <div class="doc-next-btn-row">
+                  <button class="doc-next-btn" onclick="showDoc('account',document.querySelector('[data-doc=account]'))">Créer un compte →</button>
+                </div>
+              </div>
+
+              <!-- account -->
+              <div class="doc-section" id="doc-account" style="display:none">
+                <div class="doc-breadcrumb">🚀 Démarrage</div>
+                <h1 class="doc-h1">Créer un compte</h1>
+                <div class="doc-callout info">La création de compte est réservée aux personnes autorisées. Si tu n'as pas encore accès, contacte l'administrateur de ta plateforme.</div>
+                <h2 class="doc-h2">Étapes</h2>
+                <div class="doc-steps">
+                  <div class="doc-step"><div class="doc-step-num">1</div><div><strong>Accède à la page d'accueil</strong><p>Ouvre le site et clique sur <em>Créer un compte</em> ou <em>Commencer</em> dans le menu.</p></div></div>
+                  <div class="doc-step"><div class="doc-step-num">2</div><div><strong>Remplis le formulaire</strong><p>Saisis un nom affiché, un identifiant de connexion et un mot de passe (minimum 8 caractères).</p></div></div>
+                  <div class="doc-step"><div class="doc-step-num">3</div><div><strong>Confirmation</strong><p>Une fois le compte créé, tu es automatiquement connecté et redirigé vers le dashboard.</p></div></div>
+                </div>
+                <div class="doc-callout warn">⚠️ Ton identifiant et mot de passe sont sensibles. Ne les partage jamais. En cas de perte, contacte l'administrateur.</div>
+                <div class="doc-next-btn-row">
+                  <button class="doc-next-btn" onclick="showDoc('profile',document.querySelector('[data-doc=profile]'))">Configurer son profil →</button>
+                </div>
+              </div>
+
+              <!-- profile -->
+              <div class="doc-section" id="doc-profile" style="display:none">
+                <div class="doc-breadcrumb">🚀 Démarrage</div>
+                <h1 class="doc-h1">Configurer son profil</h1>
+                <p class="doc-p">Chaque compte utilisateur peut gérer plusieurs <strong>profils créateurs</strong>. Un profil regroupe tous tes comptes réseaux sociaux, playlists et paramètres de façon isolée.</p>
+                <h2 class="doc-h2">Créer un profil</h2>
+                <div class="doc-steps">
+                  <div class="doc-step"><div class="doc-step-num">1</div><div><strong>Ouvre le menu profil</strong><p>Clique sur ton avatar en bas à gauche de la sidebar pour ouvrir le menu de profils.</p></div></div>
+                  <div class="doc-step"><div class="doc-step-num">2</div><div><strong>Nouveau profil</strong><p>Clique sur <em>＋ Nouveau profil</em>. Saisis un nom et un PIN de sécurité (4 chiffres).</p></div></div>
+                  <div class="doc-step"><div class="doc-step-num">3</div><div><strong>Switcher de profil</strong><p>Depuis le menu profil, clique sur n'importe quel profil pour switcher. Le PIN te sera demandé.</p></div></div>
+                </div>
+                <div class="doc-callout info">💡 Chaque profil a ses propres comptes, playlists et statistiques. Parfait pour gérer plusieurs créateurs depuis un seul dashboard.</div>
+                <div class="doc-next-btn-row">
+                  <button class="doc-next-btn" onclick="showDoc('tg-connect',document.querySelector('[data-doc=tg-connect]'))">Connecter Telegram →</button>
+                </div>
+              </div>
+
+              <!-- tg-connect -->
+              <div class="doc-section" id="doc-tg-connect" style="display:none">
+                <div class="doc-breadcrumb">🔗 Comptes</div>
+                <h1 class="doc-h1">Connecter Telegram</h1>
+                <p class="doc-p">StoryScheduler publie via les comptes Telegram officiels grâce à l'API Telegram (Telethon). La connexion se fait par numéro de téléphone et code SMS.</p>
+                <div class="doc-callout warn">⚠️ Utilise uniquement des comptes Telegram qui t'appartiennent légalement. La publication automatisée doit respecter les <a href="https://telegram.org/tos" target="_blank" style="color:var(--purple)">Conditions d'utilisation Telegram</a>.</div>
+                <h2 class="doc-h2">Ajouter un compte</h2>
+                <div class="doc-steps">
+                  <div class="doc-step"><div class="doc-step-num">1</div><div><strong>Va dans Comptes</strong><p>Clique sur <em>Comptes</em> dans la sidebar, section Telegram → <em>+ Ajouter</em>.</p></div></div>
+                  <div class="doc-step"><div class="doc-step-num">2</div><div><strong>Saisis le numéro</strong><p>Entre le numéro de téléphone au format international (ex: +33612345678).</p></div></div>
+                  <div class="doc-step"><div class="doc-step-num">3</div><div><strong>Code de vérification</strong><p>Telegram t'envoie un code SMS ou via l'app. Saisis-le dans la fenêtre qui s'ouvre.</p></div></div>
+                  <div class="doc-step"><div class="doc-step-num">4</div><div><strong>2FA (si activée)</strong><p>Si tu as activé la vérification en 2 étapes, saisis ton mot de passe Telegram.</p></div></div>
+                  <div class="doc-step"><div class="doc-step-num">5</div><div><strong>Compte connecté ✓</strong><p>Le compte apparaît dans la liste avec un indicateur vert. Il est prêt pour la programmation.</p></div></div>
+                </div>
+                <h2 class="doc-h2">Reconnecter un compte déconnecté</h2>
+                <p class="doc-p">Si un compte se déconnecte (session expirée), un indicateur rouge s'affiche. Clique sur 🔄 à côté du compte pour relancer le processus de connexion.</p>
+                <div class="doc-next-btn-row">
+                  <button class="doc-next-btn" onclick="showDoc('snap-connect',document.querySelector('[data-doc=snap-connect]'))">Connecter Snapchat →</button>
+                </div>
+              </div>
+
+              <!-- snap-connect -->
+              <div class="doc-section" id="doc-snap-connect" style="display:none">
+                <div class="doc-breadcrumb">🔗 Comptes</div>
+                <h1 class="doc-h1">Connecter Snapchat</h1>
+                <p class="doc-p">La connexion Snapchat et la publication de stories passent par <strong>l'API OneUp</strong>. Tu dois avoir une clef API OneUp valide et y avoir connecté tes comptes Snapchat.</p>
+                <div class="doc-callout info">ℹ️ OneUp est un outil tiers officiel partenaire de Snapchat. La publication via OneUp est conforme aux <a href="https://snap.com/en-US/terms" target="_blank" style="color:var(--purple)">CGU Snapchat</a>.</div>
+                <h2 class="doc-h2">Prérequis</h2>
+                <div class="doc-checklist">
+                  <div class="doc-check-item"><span class="doc-check">✓</span> Avoir un compte OneUp actif avec une clef API</div>
+                  <div class="doc-check-item"><span class="doc-check">✓</span> Avoir connecté tes comptes Snapchat dans OneUp</div>
+                  <div class="doc-check-item"><span class="doc-check">✓</span> Avoir sauvegardé ta clef API dans la page Comptes</div>
+                </div>
+                <h2 class="doc-h2">Ajouter un compte Snapchat</h2>
+                <div class="doc-steps">
+                  <div class="doc-step"><div class="doc-step-num">1</div><div><strong>Configure ta clef API</strong><p>Dans la page Comptes, colle ta clef API OneUp dans le champ dédié et clique Sauvegarder.</p></div></div>
+                  <div class="doc-step"><div class="doc-step-num">2</div><div><strong>Ajouter un compte</strong><p>Dans la section Snapchat → <em>+ Ajouter</em>. Tu peux importer automatiquement depuis OneUp ou entrer l'ID manuellement.</p></div></div>
+                  <div class="doc-step"><div class="doc-step-num">3</div><div><strong>Prêt</strong><p>Le compte Snapchat apparaît dans la liste. Il peut maintenant recevoir des stories programmées.</p></div></div>
+                </div>
+                <div class="doc-next-btn-row">
+                  <button class="doc-next-btn" onclick="showDoc('ig-connect',document.querySelector('[data-doc=ig-connect]'))">Connecter Instagram/FB →</button>
+                </div>
+              </div>
+
+              <!-- ig-connect -->
+              <div class="doc-section" id="doc-ig-connect" style="display:none">
+                <div class="doc-breadcrumb">🔗 Comptes</div>
+                <h1 class="doc-h1">Connecter Instagram & Facebook</h1>
+                <p class="doc-p">Instagram et Facebook utilisent également <strong>l'API OneUp</strong>, qui s'appuie sur l'API officielle Meta Business. La publication est 100% conforme aux règles Meta.</p>
+                <div class="doc-callout info">ℹ️ Seuls les comptes <strong>Instagram Business</strong> ou <strong>Creator</strong> peuvent être connectés. Les comptes personnels ne sont pas supportés par l'API Meta.</div>
+                <h2 class="doc-h2">Procédure</h2>
+                <div class="doc-steps">
+                  <div class="doc-step"><div class="doc-step-num">1</div><div><strong>Clef API OneUp</strong><p>Assure-toi d'avoir configuré ta clef API OneUp dans la page Comptes.</p></div></div>
+                  <div class="doc-step"><div class="doc-step-num">2</div><div><strong>Ajouter le compte</strong><p>Instagram → <em>+ Ajouter</em> ou Facebook → <em>+ Ajouter</em>. Utilise l'import automatique OneUp pour récupérer tes comptes déjà connectés.</p></div></div>
+                  <div class="doc-step"><div class="doc-step-num">3</div><div><strong>Créer du contenu</strong><p>Navigue vers Instagram ou Facebook dans la sidebar pour programmer tes posts.</p></div></div>
+                </div>
+                <div class="doc-next-btn-row">
+                  <button class="doc-next-btn" onclick="showDoc('scheduling',document.querySelector('[data-doc=scheduling]'))">Auto-scheduling →</button>
+                </div>
+              </div>
+
+              <!-- scheduling -->
+              <div class="doc-section" id="doc-scheduling" style="display:none">
+                <div class="doc-breadcrumb">📅 Publication</div>
+                <h1 class="doc-h1">Auto-scheduling</h1>
+                <p class="doc-p">L'auto-scheduling est la fonctionnalité principale de StoryScheduler. Au lieu de saisir manuellement une date et heure, le système calcule automatiquement le prochain créneau disponible.</p>
+                <h2 class="doc-h2">Comment ça fonctionne</h2>
+                <div class="doc-callout info">Le système analyse ton calendrier de publications existant et ajoute la prochaine story/post <strong>immédiatement après la dernière programmée</strong>, en respectant un intervalle minimal configurable.</div>
+                <h2 class="doc-h2">Avantages</h2>
+                <div class="doc-checklist">
+                  <div class="doc-check-item"><span class="doc-check">✓</span> Aucun conflit d'horaire entre tes publications</div>
+                  <div class="doc-check-item"><span class="doc-check">✓</span> Zéro saisie manuelle de date/heure</div>
+                  <div class="doc-check-item"><span class="doc-check">✓</span> Fonctionne pour Telegram, Snapchat, Instagram et Facebook</div>
+                  <div class="doc-check-item"><span class="doc-check">✓</span> Peut programmer des séries entières de médias en quelques clics</div>
+                </div>
+                <h2 class="doc-h2">Programmer via une playlist</h2>
+                <div class="doc-steps">
+                  <div class="doc-step"><div class="doc-step-num">1</div><div><strong>Va sur la plateforme</strong><p>Clique sur Telegram, Snapchat, Instagram ou Facebook dans la sidebar.</p></div></div>
+                  <div class="doc-step"><div class="doc-step-num">2</div><div><strong>Sélectionne une playlist</strong><p>Choisis une playlist dans le panneau gauche, puis coche les comptes de destination.</p></div></div>
+                  <div class="doc-step"><div class="doc-step-num">3</div><div><strong>Programmer</strong><p>Clique sur <em>Programmer</em>. L'auto-scheduling calcule les créneaux et ajoute toutes les stories en file.</p></div></div>
+                </div>
+                <div class="doc-next-btn-row">
+                  <button class="doc-next-btn" onclick="showDoc('playlists',document.querySelector('[data-doc=playlists]'))">Playlists & médias →</button>
+                </div>
+              </div>
+
+              <!-- playlists -->
+              <div class="doc-section" id="doc-playlists" style="display:none">
+                <div class="doc-breadcrumb">📅 Publication</div>
+                <h1 class="doc-h1">Playlists & médias</h1>
+                <p class="doc-p">Les playlists sont des collections de médias (photos, vidéos) que tu peux créer, organiser et déployer sur toutes tes plateformes.</p>
+                <h2 class="doc-h2">Créer une playlist</h2>
+                <div class="doc-steps">
+                  <div class="doc-step"><div class="doc-step-num">1</div><div><strong>Va dans Médias</strong><p>Clique sur <em>Médias</em> dans la sidebar.</p></div></div>
+                  <div class="doc-step"><div class="doc-step-num">2</div><div><strong>Nouvelle playlist</strong><p>Clique sur <em>+ Nouvelle playlist</em>. Donne-lui un nom clair.</p></div></div>
+                  <div class="doc-step"><div class="doc-step-num">3</div><div><strong>Ajouter des médias</strong><p>Upload tes fichiers (JPG, PNG, MP4…). Chaque fichier est traité et stocké.</p></div></div>
+                  <div class="doc-step"><div class="doc-step-num">4</div><div><strong>Réorganiser</strong><p>Glisse-dépose les médias pour changer leur ordre de publication.</p></div></div>
+                </div>
+                <h2 class="doc-h2">Formats acceptés</h2>
+                <div class="doc-table">
+                  <div class="doc-table-row doc-table-head"><span>Format</span><span>Type</span><span>Plateformes</span></div>
+                  <div class="doc-table-row"><span>JPG, PNG, WEBP</span><span>Image</span><span>Toutes</span></div>
+                  <div class="doc-table-row"><span>MP4, MOV</span><span>Vidéo</span><span>Snapchat (Spotlight), TG</span></div>
+                </div>
+                <div class="doc-next-btn-row">
+                  <button class="doc-next-btn" onclick="showDoc('publishing',document.querySelector('[data-doc=publishing]'))">Publier une story →</button>
+                </div>
+              </div>
+
+              <!-- publishing -->
+              <div class="doc-section" id="doc-publishing" style="display:none">
+                <div class="doc-breadcrumb">📅 Publication</div>
+                <h1 class="doc-h1">Publier une story</h1>
+                <p class="doc-p">Tu peux programmer une story immédiatement ou la laisser à l'auto-scheduling. Voici le flux complet.</p>
+                <h2 class="doc-h2">Workflow de publication Telegram</h2>
+                <div class="doc-steps">
+                  <div class="doc-step"><div class="doc-step-num">1</div><div><strong>Sélectionne les comptes</strong><p>Dans Telegram, coche les comptes Telegram sur lesquels publier.</p></div></div>
+                  <div class="doc-step"><div class="doc-step-num">2</div><div><strong>Choisis la playlist</strong><p>Sélectionne la playlist contenant tes médias.</p></div></div>
+                  <div class="doc-step"><div class="doc-step-num">3</div><div><strong>Programme</strong><p>Clique sur <em>Programmer</em>. Les stories apparaissent dans le panneau droit sous <em>Programmées</em>.</p></div></div>
+                  <div class="doc-step"><div class="doc-step-num">4</div><div><strong>Publication automatique</strong><p>Le daemon vérifie toutes les minutes les stories à publier et les envoie à l'heure prévue.</p></div></div>
+                </div>
+                <div class="doc-callout info">💡 Après publication, les stories passent dans l'onglet <strong>Publiées</strong> du panneau droit avec un timestamp et statut.</div>
+                <div class="doc-next-btn-row">
+                  <button class="doc-next-btn" onclick="showDoc('stats',document.querySelector('[data-doc=stats]'))">Statistiques →</button>
+                </div>
+              </div>
+
+              <!-- stats -->
+              <div class="doc-section" id="doc-stats" style="display:none">
+                <div class="doc-breadcrumb">📊 Stats & Revenus</div>
+                <h1 class="doc-h1">Statistiques</h1>
+                <p class="doc-p">Le dashboard Statistiques centralise toutes les données de publication de ton profil actif.</p>
+                <h2 class="doc-h2">Ce que tu vois</h2>
+                <div class="doc-grid-2">
+                  <div class="doc-feature-card"><div class="doc-feature-ico">📈</div><div><strong>Graphique journalier</strong><p>Vues par jour sur les 7/30/90 derniers jours ou depuis le début.</p></div></div>
+                  <div class="doc-feature-card"><div class="doc-feature-ico">🔢</div><div><strong>Compteurs globaux</strong><p>Total de vues, stories envoyées et taux d'erreur.</p></div></div>
+                  <div class="doc-feature-card"><div class="doc-feature-ico">📡</div><div><strong>En direct</strong><p>Monitoring des stories actives en ce moment, avec miniatures et nombre de vues live.</p></div></div>
+                  <div class="doc-feature-card"><div class="doc-feature-ico">📋</div><div><strong>Détail des stories</strong><p>Liste de toutes les stories publiées avec date, compte et statut.</p></div></div>
+                </div>
+                <div class="doc-callout warn">ℹ️ Les vues Telegram sont mises à jour en temps réel. Les vues Snapchat/Instagram peuvent prendre 24h à apparaître selon les APIs.</div>
+                <div class="doc-next-btn-row">
+                  <button class="doc-next-btn" onclick="showDoc('revenue',document.querySelector('[data-doc=revenue]'))">Suivi des revenus →</button>
+                </div>
+              </div>
+
+              <!-- revenue -->
+              <div class="doc-section" id="doc-revenue" style="display:none">
+                <div class="doc-breadcrumb">📊 Stats & Revenus</div>
+                <h1 class="doc-h1">Suivi des revenus</h1>
+                <p class="doc-p">La section Revenus te permet d'enregistrer et visualiser tes revenus issus de ta création de contenu.</p>
+                <h2 class="doc-h2">Ajouter un revenu</h2>
+                <div class="doc-steps">
+                  <div class="doc-step"><div class="doc-step-num">1</div><div><strong>Va dans Revenus</strong><p>Clique sur $ Revenus dans la sidebar.</p></div></div>
+                  <div class="doc-step"><div class="doc-step-num">2</div><div><strong>Saisir le montant</strong><p>Entre la date, la plateforme source et le montant en euros.</p></div></div>
+                  <div class="doc-step"><div class="doc-step-num">3</div><div><strong>Visualiser</strong><p>Le graphique se met à jour automatiquement avec le cumul journalier.</p></div></div>
+                </div>
+                <div class="doc-callout info">💡 Ces données sont stockées localement sur le serveur et ne sont jamais partagées avec des tiers.</div>
+                <div class="doc-next-btn-row">
+                  <button class="doc-next-btn" onclick="showDoc('spotlight',document.querySelector('[data-doc=spotlight]'))">Spotlight Snapchat →</button>
+                </div>
+              </div>
+
+              <!-- spotlight -->
+              <div class="doc-section" id="doc-spotlight" style="display:none">
+                <div class="doc-breadcrumb">⚡ Avancé</div>
+                <h1 class="doc-h1">Spotlight Snapchat</h1>
+                <p class="doc-p">Le Spotlight Snapchat est une fonctionnalité avancée qui envoie automatiquement des vidéos courtes en boucle sur tes comptes Snapchat pour maximiser la visibilité.</p>
+                <h2 class="doc-h2">Principe</h2>
+                <div class="doc-callout info">Le système envoie +1 vidéo par compte à chaque minute. Il utilise un <strong>pool de vidéos</strong> : une liste de vidéos qui sont envoyées en rotation sur tous les comptes connectés.</div>
+                <h2 class="doc-h2">Configurer le pool Spotlight</h2>
+                <div class="doc-steps">
+                  <div class="doc-step"><div class="doc-step-num">1</div><div><strong>Va dans Snapchat</strong><p>Clique sur Snapchat dans la sidebar → onglet <em>Spotlight</em>.</p></div></div>
+                  <div class="doc-step"><div class="doc-step-num">2</div><div><strong>Ajouter des vidéos au pool</strong><p>Upload tes vidéos courtes (max 60s, format MP4/MOV).</p></div></div>
+                  <div class="doc-step"><div class="doc-step-num">3</div><div><strong>Activer</strong><p>Active le Spotlight. Le daemon prend le relais et envoie automatiquement les vidéos.</p></div></div>
+                </div>
+                <div class="doc-callout warn">⚠️ Respecte les <a href="https://snap.com/en-US/terms" target="_blank" style="color:var(--purple)">règles de contenu Snapchat Spotlight</a>. Le contenu inapproprié peut entraîner la suspension du compte.</div>
+                <div class="doc-next-btn-row">
+                  <button class="doc-next-btn" onclick="showDoc('multiprofile',document.querySelector('[data-doc=multiprofile]'))">Multi-profils →</button>
+                </div>
+              </div>
+
+              <!-- multiprofile -->
+              <div class="doc-section" id="doc-multiprofile" style="display:none">
+                <div class="doc-breadcrumb">⚡ Avancé</div>
+                <h1 class="doc-h1">Multi-profils</h1>
+                <p class="doc-p">Le système de profils permet de gérer plusieurs créateurs ou projets distincts depuis un seul compte administrateur, sans jamais mélanger les données.</p>
+                <h2 class="doc-h2">Architecture</h2>
+                <div class="doc-callout info">Chaque profil dispose de son propre répertoire de données isolé. Les comptes, playlists, statistiques et revenus d'un profil sont <strong>100% séparés</strong> des autres profils.</div>
+                <h2 class="doc-h2">Sécurité — PIN</h2>
+                <p class="doc-p">Chaque profil peut être protégé par un PIN à 4 chiffres. Pour switcher vers ce profil, le PIN est obligatoire. Cela permet à plusieurs créateurs de partager le même dashboard en toute sécurité.</p>
+                <div class="doc-checklist">
+                  <div class="doc-check-item"><span class="doc-check">✓</span> Le PIN est stocké sous forme de hash, jamais en clair</div>
+                  <div class="doc-check-item"><span class="doc-check">✓</span> Seul l'admin peut créer/supprimer des profils</div>
+                  <div class="doc-check-item"><span class="doc-check">✓</span> Chaque profil peut être personnalisé (couleur, avatar, nom)</div>
+                </div>
+                <div class="doc-next-btn-row">
+                  <button class="doc-next-btn" onclick="showDoc('oneup',document.querySelector('[data-doc=oneup]'))">Clef API OneUp →</button>
+                </div>
+              </div>
+
+              <!-- oneup -->
+              <div class="doc-section" id="doc-oneup" style="display:none">
+                <div class="doc-breadcrumb">⚡ Avancé</div>
+                <h1 class="doc-h1">Clef API OneUp</h1>
+                <p class="doc-p">OneUp est un service tiers partenaire de Snapchat et Meta qui permet la publication programmée. StoryScheduler l'utilise pour Snapchat, Instagram et Facebook.</p>
+                <h2 class="doc-h2">Obtenir ta clef API</h2>
+                <div class="doc-steps">
+                  <div class="doc-step"><div class="doc-step-num">1</div><div><strong>Crée un compte OneUp</strong><p>Rends-toi sur 1up.app et crée un compte (plan payant requis pour l'accès API).</p></div></div>
+                  <div class="doc-step"><div class="doc-step-num">2</div><div><strong>Génère une clef API</strong><p>Dans les paramètres OneUp → API → Générer une clef.</p></div></div>
+                  <div class="doc-step"><div class="doc-step-num">3</div><div><strong>Configure dans StoryScheduler</strong><p>Dans la page Comptes, colle ta clef dans le champ <em>Clef API OneUp</em> et clique Sauvegarder.</p></div></div>
+                </div>
+                <div class="doc-callout warn">⚠️ Ta clef API est confidentielle. Ne la partage jamais. Régénère-la immédiatement si elle est compromise.</div>
+                <div class="doc-next-btn-row">
+                  <button class="doc-next-btn" onclick="showDoc('faq',document.querySelector('[data-doc=faq]'))">FAQ →</button>
+                </div>
+              </div>
+
+              <!-- faq -->
+              <div class="doc-section" id="doc-faq" style="display:none">
+                <div class="doc-breadcrumb">❓ Support</div>
+                <h1 class="doc-h1">FAQ</h1>
+                <div class="doc-faq-list">
+                  <div class="doc-faq"><div class="doc-faq-q">Mon compte Telegram se déconnecte souvent, pourquoi ?</div><div class="doc-faq-a">Les sessions Telegram peuvent expirer si Telegram détecte une activité inhabituelle. Utilise la fonction 🔄 Reconnecter dans la page Comptes. Assure-toi que le numéro utilisé est actif et que 2FA est correctement configuré.</div></div>
+                  <div class="doc-faq"><div class="doc-faq-q">Pourquoi ma story n'est pas publiée à l'heure prévue ?</div><div class="doc-faq-a">Le daemon vérifie les publications toutes les minutes. Un retard de 1-2 minutes est normal. Si la story reste bloquée, vérifie que le compte est bien connecté (indicateur vert).</div></div>
+                  <div class="doc-faq"><div class="doc-faq-q">Puis-je programmer des stories à l'avance sur plusieurs semaines ?</div><div class="doc-faq-a">Oui. L'auto-scheduling empile les stories les unes après les autres sans limite de date. Tu peux programmer plusieurs centaines de stories à l'avance.</div></div>
+                  <div class="doc-faq"><div class="doc-faq-q">Les données de mon profil sont-elles partagées avec d'autres profils ?</div><div class="doc-faq-a">Non. Chaque profil est stocké dans un répertoire totalement isolé. Il est techniquement impossible qu'un profil accède aux données d'un autre.</div></div>
+                  <div class="doc-faq"><div class="doc-faq-q">Comment supprimer une story programmée ?</div><div class="doc-faq-a">Dans la page de la plateforme concernée, clique sur la story dans le panneau droit → icône de suppression ✕. La story est annulée immédiatement.</div></div>
+                  <div class="doc-faq"><div class="doc-faq-q">Le site est-il conforme RGPD ?</div><div class="doc-faq-a">Oui. Aucune donnée personnelle n'est transmise à des serveurs tiers. Toutes les données (comptes, médias, statistiques) sont stockées sur le serveur dédié de la plateforme. Voir les Mentions légales pour plus de détails.</div></div>
+                </div>
+                <div class="doc-next-btn-row">
+                  <button class="doc-next-btn" onclick="showDoc('legal',document.querySelector('[data-doc=legal]'))">Mentions légales →</button>
+                </div>
+              </div>
+
+              <!-- legal -->
+              <div class="doc-section" id="doc-legal" style="display:none">
+                <div class="doc-breadcrumb">❓ Support</div>
+                <h1 class="doc-h1">Mentions légales</h1>
+                <h2 class="doc-h2">Éditeur</h2>
+                <p class="doc-p">StoryScheduler est un logiciel SaaS édité à titre privé. Pour toute question, contacte l'administrateur via les coordonnées fournies lors de ton inscription.</p>
+                <h2 class="doc-h2">Hébergement</h2>
+                <p class="doc-p">Le service est hébergé sur un serveur dédié sécurisé. Les données sont stockées exclusivement sur ce serveur et ne sont jamais transmises à des tiers, sauf aux APIs officielles des plateformes (Telegram, OneUp/Meta).</p>
+                <h2 class="doc-h2">Données personnelles (RGPD)</h2>
+                <p class="doc-p">Conformément au Règlement Général sur la Protection des Données (RGPD — Règlement UE 2016/679) :</p>
+                <div class="doc-checklist">
+                  <div class="doc-check-item"><span class="doc-check">✓</span> Seules les données strictement nécessaires au fonctionnement sont collectées (identifiant, hash du mot de passe, données de comptes réseaux sociaux)</div>
+                  <div class="doc-check-item"><span class="doc-check">✓</span> Aucune donnée n'est revendue ou partagée avec des tiers à des fins commerciales</div>
+                  <div class="doc-check-item"><span class="doc-check">✓</span> Tu disposes d'un droit d'accès, de rectification et de suppression de tes données</div>
+                  <div class="doc-check-item"><span class="doc-check">✓</span> Les mots de passe sont stockés sous forme de hash bcrypt (jamais en clair)</div>
+                </div>
+                <h2 class="doc-h2">Propriété intellectuelle</h2>
+                <p class="doc-p">Le code source, le design et les contenus de StoryScheduler sont protégés par le droit d'auteur. Toute reproduction ou distribution sans autorisation est interdite.</p>
+                <h2 class="doc-h2">Limitation de responsabilité</h2>
+                <p class="doc-p">L'éditeur décline toute responsabilité en cas d'utilisation de la plateforme en violation des conditions d'utilisation des réseaux sociaux tiers (Telegram, Snapchat, Meta). L'utilisateur est seul responsable du contenu qu'il publie.</p>
+                <div class="doc-next-btn-row">
+                  <button class="doc-next-btn" onclick="showDoc('cgu',document.querySelector('[data-doc=cgu]'))">CGU →</button>
+                </div>
+              </div>
+
+              <!-- cgu -->
+              <div class="doc-section" id="doc-cgu" style="display:none">
+                <div class="doc-breadcrumb">❓ Support</div>
+                <h1 class="doc-h1">Conditions Générales d'Utilisation</h1>
+                <p class="doc-p" style="font-size:.78rem;color:var(--t3)">Dernière mise à jour : juillet 2025</p>
+                <h2 class="doc-h2">1. Objet</h2>
+                <p class="doc-p">Les présentes CGU définissent les conditions d'utilisation de la plateforme StoryScheduler, outil d'automatisation de publication de contenu sur les réseaux sociaux.</p>
+                <h2 class="doc-h2">2. Accès au service</h2>
+                <p class="doc-p">L'accès est réservé aux utilisateurs disposant d'un compte valide. Toute tentative d'accès non autorisé est interdite et susceptible d'engager la responsabilité pénale.</p>
+                <h2 class="doc-h2">3. Obligations de l'utilisateur</h2>
+                <div class="doc-checklist">
+                  <div class="doc-check-item"><span class="doc-check">✓</span> Utiliser le service conformément aux CGU des plateformes tierces (Telegram, Snapchat, Meta)</div>
+                  <div class="doc-check-item"><span class="doc-check">✓</span> Ne pas publier de contenu illégal, diffamatoire, ou portant atteinte aux droits de tiers</div>
+                  <div class="doc-check-item"><span class="doc-check">✓</span> Ne pas tenter de contourner les mécanismes de sécurité du service</div>
+                  <div class="doc-check-item"><span class="doc-check">✓</span> Maintenir la confidentialité de ses identifiants de connexion</div>
+                </div>
+                <h2 class="doc-h2">4. Contenu publié</h2>
+                <p class="doc-p">L'utilisateur est seul responsable des contenus qu'il programme et publie via StoryScheduler. L'éditeur ne peut être tenu responsable de contenus publiés en violation des lois en vigueur ou des CGU des plateformes concernées.</p>
+                <h2 class="doc-h2">5. Interruption du service</h2>
+                <p class="doc-p">L'éditeur se réserve le droit de suspendre l'accès au service pour maintenance, mise à jour, ou en cas de violation des présentes CGU, sans préavis ni indemnité.</p>
+                <h2 class="doc-h2">6. Droit applicable</h2>
+                <p class="doc-p">Les présentes CGU sont soumises au droit français. Tout litige sera soumis aux tribunaux compétents du ressort de l'éditeur.</p>
+              </div>
+
+            </div><!-- /docContent -->
+          </div>
+        </div>
+        <!-- /Documentation -->
+
+        <!-- Modal ajout compte social -->
+        <div class="overlay hidden" id="overlayAddSocial" onclick="if(event.target===this)this.classList.add('hidden')">
+          <div class="modal" style="max-width:400px">
+            <div class="modal-t" id="addSocialTitle">Ajouter un compte</div>
+            <div class="modal-s">Entre le nom d'affichage et l'identifiant OneUp du compte</div>
+            <div id="addSocialImportRow" style="margin-top:14px;padding:10px 12px;background:rgba(124,58,237,.07);border:1px solid rgba(124,58,237,.2);border-radius:8px;display:flex;align-items:center;gap:10px">
+              <span style="font-size:.75rem;color:var(--t2);flex:1">Importer automatiquement via OneUp</span>
+              <button class="btn btn-xs" id="addSocialImportBtn" onclick="_importSocialFromOneUp()" style="background:rgba(124,58,237,.2);border-color:rgba(124,58,237,.4);color:#a78bfa;white-space:nowrap">🔄 Importer</button>
+            </div>
+            <div id="addSocialImportList" style="display:none;margin-top:8px;max-height:160px;overflow-y:auto;flex-direction:column;gap:4px"></div>
+            <div style="display:flex;align-items:center;gap:8px;margin:12px 0 8px">
+              <div style="flex:1;height:1px;background:var(--b1)"></div>
+              <span style="font-size:.7rem;color:var(--t3)">ou entrer manuellement</span>
+              <div style="flex:1;height:1px;background:var(--b1)"></div>
+            </div>
+            <input id="addSocialName" class="inp" placeholder="Nom / @username">
+            <input id="addSocialId" class="inp" placeholder="ID OneUp (ex: 123456)" style="margin-top:8px">
+            <div id="addSocialErr" style="color:#f87171;font-size:.78rem;min-height:16px;margin-top:6px"></div>
+            <div style="display:flex;gap:8px;margin-top:14px">
+              <button class="btn btn-primary" style="flex:1" onclick="_confirmAddSocial()">✓ Ajouter</button>
+              <button class="btn" onclick="document.getElementById('overlayAddSocial').classList.add('hidden')">Annuler</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- MODAL PHOTO URL -->
+        <div class="overlay hidden" id="overlayPhotoUrl" onclick="if(event.target===this)this.classList.add('hidden')">
+          <div class="modal" style="max-width:380px">
+            <div class="modal-t">📷 Photo de profil</div>
+            <div class="modal-s">Compte : <strong id="photoUrlPlatLabel"></strong> — <span id="photoUrlAccLabel"></span></div>
+            <div style="margin:14px 0 6px;font-size:.78rem;color:var(--t2)">Colle l'URL directe de la photo de profil :</div>
+            <input id="photoUrlInput" class="inp" placeholder="https://…" style="font-size:.78rem">
+            <div style="margin-top:7px;padding:8px 10px;background:rgba(124,58,237,.06);border:1px solid rgba(124,58,237,.15);border-radius:7px;font-size:.7rem;color:#888">
+              💡 Sur Instagram : ouvre ton profil dans un navigateur → clic droit sur la photo → "Copier l'adresse de l'image"
+            </div>
+            <div id="photoUrlErr" style="color:#f87171;font-size:.75rem;min-height:16px;margin-top:6px"></div>
+            <div style="display:flex;gap:8px;margin-top:12px">
+              <button class="btn btn-primary" id="photoUrlConfirmBtn" style="flex:1" onclick="_confirmPhotoUrl()">✓ Enregistrer</button>
+              <button class="btn" onclick="document.getElementById('overlayPhotoUrl').classList.add('hidden')">Annuler</button>
+            </div>
           </div>
         </div>
 
@@ -3257,15 +4755,32 @@ document.addEventListener('keydown',function(e){
 
       <!-- RIGHT PANEL -->
       <div class="right-panel" id="rightPanel">
-        <div class="rp-hd">
-          <div class="rp-title" id="rpTitle">📱 Telegram</div>
-          <div class="rp-hd-btns">
-            <button class="btn btn-xs btn-danger" id="btnSnapDeleteAll" style="display:none" title="Supprimer toutes les publications en attente">🗑️ Tout supprimer</button>
-            <button class="btn btn-xs" id="btnSelMode">Sélectionner</button>
-            <button class="btn btn-xs" id="btnCloneRP" title="Copier vers un compte">+ Compte</button>
+        <div class="rp-hd" style="flex-direction:column;align-items:stretch;gap:10px;padding-bottom:12px">
+          <div style="display:flex;align-items:center;justify-content:space-between">
+            <div class="rp-title" id="rpTitle">📱 Telegram</div>
+            <div class="rp-hd-btns" style="display:flex;gap:6px">
+              <button class="btn btn-xs btn-danger" id="btnSnapDeleteAll" style="display:none" title="Supprimer tout">🗑 Tout</button>
+              <button class="btn btn-xs" id="btnSelMode">Sélectionner</button>
+              <button class="btn btn-xs" id="btnCloneRP" title="Copier vers un compte">+ Compte</button>
+              <button class="btn btn-xs" id="btnSplRpRefresh" style="display:none" title="Rafraîchir">🔄</button>
+              <button class="btn btn-xs" id="btnRpRefresh" style="display:none" title="Rafraîchir">🔄</button>
+            </div>
+          </div>
+          <div class="sched-tabs" id="rpSchedTabs" style="align-self:stretch;display:grid;grid-template-columns:1fr 1fr">
+            <button class="sched-tab sched-tab-act" data-tab="pending" onclick="_setSchedFilter('pending')" style="justify-content:center">📅 En attente</button>
+            <button class="sched-tab" data-tab="done" onclick="_setSchedFilter('done')" style="justify-content:center">✅ Publiées</button>
+          </div>
+          <!-- Filtres Spotlight dans le panneau droit -->
+          <div id="rpSplTabs" style="display:none;align-self:stretch;display:none;grid-template-columns:1fr 1fr 1fr;gap:4px">
+            <button class="sched-tab sched-tab-act" onclick="_setSplFilter('all')" data-splf="all" style="justify-content:center;font-size:.65rem">Tous</button>
+            <button class="sched-tab" onclick="_setSplFilter('pending')" data-splf="pending" style="justify-content:center;font-size:.65rem">⏳ Attente</button>
+            <button class="sched-tab" onclick="_setSplFilter('done')" data-splf="done" style="justify-content:center;font-size:.65rem">✅ Envoyés</button>
           </div>
         </div>
         <div class="rp-list" id="slist"><div class="no-rp">Aucune story programmée</div></div>
+        <div class="rp-list" id="splRpList" style="display:none"><div class="no-rp">Aucun Spotlight programmé</div></div>
+        <div class="rp-list" id="igRpList" style="display:none"><div class="no-rp">Aucun post programmé</div></div>
+        <div class="rp-list" id="fbRpList" style="display:none"><div class="no-rp">Aucun post programmé</div></div>
       </div>
     </div>
   </div>
@@ -3416,11 +4931,76 @@ function todayStr(){const d=new Date();const p=n=>String(n).padStart(2,'0');retu
 
 async function confirmLogout(){
   await fetch('/api/auth/logout',{method:'POST'}).catch(()=>{});
-  document.querySelector('.app').style.display='none';
-  document.getElementById('loginScreen').style.display='block';
-  document.getElementById('loginUsername').value='';
-  document.getElementById('loginPassword').value='';
-  document.getElementById('loginErr').textContent='';
+  window.location.reload();
+}
+
+const _PLAN_INFO={
+  '':        {badge:'🔒',name:'Aucun forfait',price:'Accès bloqué',feats:[]},
+  'starter': {badge:'⚡',name:'Starter',price:'15€ / mois',feats:['Telegram ✓','Snapchat ✓','Médias ✓','Comptes ✓ (10 max)','Instagram ✗','Facebook ✗','Stats ✗','Revenus ✗']},
+  'pro':     {badge:'🚀',name:'Pro',price:'39€ / mois',feats:['Toutes les plateformes ✓','Médias ✓','Comptes ✓ (25 max)','Stats ✓','Revenus ✓']},
+  'business':{badge:'🏢',name:'Business',price:'239€ / mois',feats:['Tout illimité ✓','Support prioritaire ✓','Comptes illimités ✓']},
+};
+
+function openSubModal(){
+  const prof=(_profiles||[]).find(p=>p.id===_activeProfileId);
+  const plan=prof?prof.plan||'':'';
+  const info=_PLAN_INFO[plan]||_PLAN_INFO[''];
+  document.getElementById('subPlanBadge').textContent=info.badge;
+  document.getElementById('subPlanName').textContent=info.name;
+  document.getElementById('subPlanPrice').textContent=info.price;
+  const featsEl=document.getElementById('subPlanFeats');
+  featsEl.innerHTML=info.feats.map(f=>`<span style="font-size:.72rem;padding:3px 10px;border-radius:20px;background:${f.includes('✗')?'rgba(248,113,113,.08)':'rgba(124,58,237,.12)'};border:1px solid ${f.includes('✗')?'rgba(248,113,113,.2)':'rgba(124,58,237,.25)'};color:${f.includes('✗')?'#6b7280':'#a78bfa'}">${f}</span>`).join('');
+  const adminSec=document.getElementById('subAdminSection');
+  const userSec=document.getElementById('subUserSection');
+  if(_sessionIsAdmin){adminSec.style.display='block';userSec.style.display='none';_subHighlightBtn(plan);}
+  else{adminSec.style.display='none';userSec.style.display='block';}
+  document.getElementById('subSaveStatus').textContent='';
+  const lbl=document.getElementById('sbSubLabel');
+  if(lbl)lbl.textContent=info.name==='Aucun forfait'?'Mon abonnement':`Forfait ${info.name}`;
+  document.getElementById('subModal').classList.add('open');
+}
+
+function _subHighlightBtn(plan){
+  ['','starter','pro','business'].forEach(p=>{
+    const id='subBtn'+(p===''?'None':p.charAt(0).toUpperCase()+p.slice(1));
+    const btn=document.getElementById(id);
+    if(!btn)return;
+    btn.style.outline=plan===p?'2px solid #a78bfa':'none';
+    btn.style.outlineOffset='2px';
+  });
+}
+
+async function subSetPlan(plan){
+  if(!_activeProfileId)return;
+  const st=document.getElementById('subSaveStatus');
+  st.textContent='Enregistrement…';st.style.color='#888';
+  const r=await fetch(`/api/profiles/${_activeProfileId}`,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({plan:plan||null})}).catch(()=>null);
+  if(r&&r.ok){
+    const prof=(_profiles||[]).find(p=>p.id===_activeProfileId);
+    if(prof)prof.plan=plan||null;
+    const info=_PLAN_INFO[plan||'']||_PLAN_INFO[''];
+    document.getElementById('subPlanBadge').textContent=info.badge;
+    document.getElementById('subPlanName').textContent=info.name;
+    document.getElementById('subPlanPrice').textContent=info.price;
+    const featsEl=document.getElementById('subPlanFeats');
+    featsEl.innerHTML=info.feats.map(f=>`<span style="font-size:.72rem;padding:3px 10px;border-radius:20px;background:${f.includes('✗')?'rgba(248,113,113,.08)':'rgba(124,58,237,.12)'};border:1px solid ${f.includes('✗')?'rgba(248,113,113,.2)':'rgba(124,58,237,.25)'};color:${f.includes('✗')?'#6b7280':'#a78bfa'}">${f}</span>`).join('');
+    _subHighlightBtn(plan||'');
+    const lbl=document.getElementById('sbSubLabel');
+    if(lbl)lbl.textContent=info.name==='Aucun forfait'?'Mon abonnement':`Forfait ${info.name}`;
+    st.textContent='✓ Forfait mis à jour';st.style.color='#4ade80';
+    _applyPlanRestrictions(plan||null);
+  }else{st.textContent='Erreur lors de la sauvegarde';st.style.color='#f87171';}
+}
+
+// ── Filtre programmé/publié ────────────────────────────────────────────────
+let _schedFilter='pending'; // 'pending' | 'done'
+function _setSchedFilter(v){
+  _schedFilter=v;
+  document.querySelectorAll('.sched-tab').forEach(t=>t.classList.toggle('sched-tab-act',t.dataset.tab===v));
+  if(currentPage==='schedule')loadScheduled();
+  else if(currentPage==='snapchat')loadSnapScheduled();
+  else if(currentPage==='instagram')loadIgScheduled();
+  else if(currentPage==='facebook')loadFbScheduled();
 }
 
 async function _doLogin(){
@@ -3435,7 +5015,15 @@ async function _doLogin(){
     const r=await fetch('/api/auth/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username,password})});
     const d=await r.json().catch(()=>({}));
     if(!r.ok){errEl.textContent=d.detail||'Identifiant ou mot de passe incorrect';return;}
+    // Demander au navigateur d'enregistrer les identifiants
+    if(window.PasswordCredential){
+      try{
+        const cred=new PasswordCredential({id:username,password,name:username});
+        await navigator.credentials.store(cred);
+      }catch(_){}
+    }
     // Success — enter app
+    _sessionIsAdmin = !!d.is_admin;
     document.getElementById('loginScreen').style.display='none';
     document.querySelector('.app').style.display='';
     reloadAllData();
@@ -3447,8 +5035,66 @@ async function _doLogin(){
   }
 }
 
+function _showLanding(){
+  document.getElementById('landingPanel').style.display='block';
+  document.getElementById('loginFormWrapper').style.display='none';
+}
+function lpToggleFaq(el){
+  const body=el.querySelector('.lp-faq-body');
+  const icon=el.querySelector('.lp-faq-icon');
+  const open=body.style.display==='block';
+  body.style.display=open?'none':'block';
+  icon.textContent=open?'+':'−';
+  icon.style.transform=open?'':'rotate(45deg)';
+}
+function _showRegister(){
+  document.getElementById('landingPanel').style.display='none';
+  document.getElementById('loginFormWrapper').style.display='flex';
+  document.getElementById('loginPanel').style.display='none';
+  document.getElementById('registerPanel').style.display='';
+  document.getElementById('registerErr').textContent='';
+  ['regName','regLogin','regPassword','regConfirm'].forEach(id=>{const el=document.getElementById(id);if(el)el.value='';});
+}
+function _showLogin(){
+  document.getElementById('landingPanel').style.display='none';
+  document.getElementById('loginFormWrapper').style.display='flex';
+  document.getElementById('registerPanel').style.display='none';
+  document.getElementById('loginPanel').style.display='';
+  document.getElementById('loginErr').textContent='';
+}
+async function _doRegister(){
+  const btn=document.getElementById('registerBtn');
+  const name=document.getElementById('regName').value.trim();
+  const login=document.getElementById('regLogin').value.trim();
+  const password=document.getElementById('regPassword').value;
+  const confirm=document.getElementById('regConfirm').value;
+  const errEl=document.getElementById('registerErr');
+  errEl.textContent='';
+  if(!name||!login||!password){errEl.textContent='Remplis tous les champs.';return;}
+  if(password!==confirm){errEl.textContent='Les mots de passe ne correspondent pas.';return;}
+  if(password.length<6){errEl.textContent='Le mot de passe doit faire au moins 6 caractères.';return;}
+  btn.disabled=true;btn.textContent='Création…';
+  try{
+    const r=await fetch('/api/auth/register',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name,login,password})});
+    const d=await r.json().catch(()=>({}));
+    if(!r.ok){errEl.textContent=d.detail||'Erreur lors de la création du compte.';return;}
+    if(window.PasswordCredential){
+      try{const cred=new PasswordCredential({id:login,password,name});await navigator.credentials.store(cred);}catch(_){}
+    }
+    _sessionIsAdmin=!!d.is_admin;
+    document.getElementById('loginScreen').style.display='none';
+    document.querySelector('.app').style.display='';
+    reloadAllData();
+    loadProfiles();
+  }catch(e){
+    errEl.textContent='Erreur de connexion — réessaie.';
+  }finally{
+    btn.disabled=false;btn.textContent='Créer le compte';
+  }
+}
+
 // ── Profile system ─────────────────────────────────────────────────────────
-let _profiles=[], _activeProfileId=null, _pmSelected=null;
+let _profiles=[], _activeProfileId=null, _pmSelected=null, _sessionIsAdmin=false, _switchGen=0;
 
 async function loadProfiles(){
   const d=await fetch('/api/profiles').then(r=>r.json()).catch(()=>null);
@@ -3464,36 +5110,34 @@ function _profileAvatar(name){return(name||'?')[0].toUpperCase();}
 function _renderSbProfile(){
   const prof=_profiles.find(p=>p.id===_activeProfileId)||_profiles[0];
   if(!prof)return;
-  const isAdmin=!!prof.is_admin;
+  const isAdmin=_sessionIsAdmin;
+  const hasMany=_profiles.length>1;
   document.getElementById('sbProfileAvatar').textContent=_profileAvatar(prof.name);
   document.getElementById('sbProfileName').textContent=prof.name;
-  // Admin: show switcher. Non-admin: profile name only, no click
+  // Switcher visible dès qu'il y a plusieurs profils OU qu'on est admin
   const btn=document.getElementById('sbProfileBtn');
-  if(isAdmin){
+  if(isAdmin||hasMany){
     btn.onclick=toggleProfileMenu;btn.style.cursor='pointer';
     btn.querySelector('svg').style.display='';
   } else {
     btn.onclick=null;btn.style.cursor='default';
     btn.querySelector('svg').style.display='none';
   }
+  // Liste des profils — visible pour tous (admin ou non)
   const list=document.getElementById('sbProfileList');
-  if(isAdmin){
-    list.innerHTML=_profiles.map(p=>`
-      <button class="sb-profile-menu-item${p.id===_activeProfileId?' active-prof':''}" onclick="switchProfile('${p.id}')">
-        <span style="width:18px;height:18px;border-radius:5px;background:linear-gradient(135deg,#7c3aed,#4f46e5);display:inline-flex;align-items:center;justify-content:center;font-size:.6rem;font-weight:800;color:#fff;flex-shrink:0">${_profileAvatar(p.name)}</span>
-        <span style="flex:1;text-align:left;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${p.name}</span>
-        ${p.pin_set?'<span style="font-size:.7rem;opacity:.6">🔒</span>':''}
-        ${p.id===_activeProfileId?'<span style="width:6px;height:6px;border-radius:50%;background:var(--green);flex-shrink:0"></span>':''}
-      </button>`).join('');
-  } else {
-    list.innerHTML='';
-  }
-  // Hide profile management buttons for non-admins
+  list.innerHTML=_profiles.map(p=>`
+    <button class="sb-profile-menu-item${p.id===_activeProfileId?' active-prof':''}" onclick="switchProfile('${p.id}')">
+      <span style="width:18px;height:18px;border-radius:5px;background:linear-gradient(135deg,#7c3aed,#4f46e5);display:inline-flex;align-items:center;justify-content:center;font-size:.6rem;font-weight:800;color:#fff;flex-shrink:0">${_profileAvatar(p.name)}</span>
+      <span style="flex:1;text-align:left;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${p.name}</span>
+      ${p.pin_set?'<span style="font-size:.7rem;opacity:.6">🔒</span>':''}
+      ${p.id===_activeProfileId?'<span style="width:6px;height:6px;border-radius:50%;background:var(--green);flex-shrink:0"></span>':''}
+    </button>`).join('');
+  // Boutons de gestion : visibles pour tous
   const manageBtn=document.querySelector('.sb-profile-menu-item[onclick="openProfileManager()"]');
   const newBtn=document.querySelector('.sb-profile-menu-item[onclick="newProfileQuick()"]');
   const sep=document.querySelector('.sb-profile-menu-sep');
-  [manageBtn,newBtn,sep].forEach(el=>{if(el)el.style.display=isAdmin?'':'none';});
-  // Hide Settings nav item for non-admins
+  [manageBtn,newBtn,sep].forEach(el=>{if(el)el.style.display='';});
+  // Settings : admin seulement
   const settingsBtn=document.querySelector('.sb-item[data-page="settings"]');
   if(settingsBtn) settingsBtn.style.display=isAdmin?'':'none';
 }
@@ -3521,36 +5165,86 @@ function _skeletonItems(n=4){
       </div>
     </div>`).join('');
 }
-function reloadAllData(){
-  // Skeleton immédiat pendant le chargement
+async function reloadAllData(gen){
+  if(gen===undefined)gen=_switchGen;
   accounts=[];
   document.getElementById('slist').innerHTML=_skeletonItems(4);
   const snapEl=document.getElementById('snapSlist');
   if(snapEl)snapEl.innerHTML=_skeletonItems(3);
 
-  // Priorité 1 : comptes + stories (visible immédiatement)
-  Promise.all([loadAccounts()]).then(()=>{
-    loadScheduled();
-    loadSnapScheduled();
-  });
+  // Tout en parallèle — chaque fonction est indépendante
+  await Promise.all([
+    loadAccounts(),
+    loadScheduled(),
+    loadSnapScheduled(),
+    loadPlaylists(),
+    loadSnapAccounts(),
+    loadIgAccounts(),
+    loadFbAccounts(),
+    loadSplList(),
+    loadSplPool(),
+    loadRevenue(),
+  ]);
+  if(gen!==_switchGen)return; // un switch plus récent a pris la main, on abandonne
+  // Actualiser la page courante une fois toutes les données chargées
+  if(currentPage==='stats') loadStats();
+  if(currentPage==='accounts') _renderAllSocialAccounts();
+  if(currentPage==='instagram') loadIgScheduled();
+  if(currentPage==='facebook') loadFbScheduled();
+  // Apply plan restrictions after data is loaded
+  const _activeProfObj=(_profiles||[]).find(p=>p.id===_activeProfileId);
+  _applyPlanRestrictions(_activeProfObj?_activeProfObj.plan:null);
+}
 
-  // Priorité 2 : reste en parallèle (pas urgent)
-  setTimeout(()=>{
-    loadPlaylists();
-    loadSnapAccounts();
-    loadSplList();
-    loadSplPool();
-    loadRevenue();
-    // Stats seulement si on est sur la page stats (appel Telegram = lent)
-    if(currentPage==='stats') loadStats();
-  }, 100);
+// ── Plan restrictions ──────────────────────────────────────────────────────
+const _PLAN_LOCKED_MAP={
+  starter:   new Set(['instagram','facebook','stats','revenue']),
+  pro:       new Set(),
+  business:  new Set(),
+};
+let _lockedPages=new Set(['instagram','facebook','stats','revenue','snapchat','playlists','schedule','accounts','docs']);
+function _applyPlanRestrictions(plan){
+  if(_sessionIsAdmin){
+    _lockedPages=new Set();
+    document.getElementById('planPaywall').style.display='none';
+    document.querySelectorAll('.sb-item.plan-locked').forEach(b=>b.classList.remove('plan-locked'));
+    return;
+  }
+  const hasPlan=plan&&plan!=='';
+  _lockedPages=hasPlan?(_PLAN_LOCKED_MAP[plan]||new Set()):new Set(['instagram','facebook','stats','revenue','snapchat','playlists','schedule','accounts','docs']);
+  document.getElementById('planPaywall').style.display=hasPlan?'none':'flex';
+  document.querySelectorAll('.sb-item[data-page]').forEach(btn=>{
+    btn.classList.toggle('plan-locked',_lockedPages.has(btn.dataset.page));
+  });
+  if(hasPlan&&_lockedPages.has(currentPage)){
+    const first=['schedule','snapchat','playlists'].find(p=>!_lockedPages.has(p));
+    if(first)setTimeout(()=>navigateTo(first),50);
+  }
 }
 
 function _clearForSwitch(){
-  accounts=[];
-  document.getElementById('slist').innerHTML=_skeletonItems(4);
-  const snapEl=document.getElementById('snapSlist');
-  if(snapEl)snapEl.innerHTML=_skeletonItems(3);
+  accounts=[];snapAccounts=[];igAccounts=[];fbAccounts=[];
+  const skel4=_skeletonItems(4), skel3=_skeletonItems(3);
+  const loading='<div class="no-acc-warn">Chargement…</div>';
+  const _c=(id,h)=>{const e=document.getElementById(id);if(e)e.innerHTML=h;};
+  _c('slist',skel4);
+  _c('snapSlist',skel3);
+  _c('igRpList',skel3);
+  _c('fbRpList',skel3);
+  _c('splList',skel3);
+  _c('revList',skel3);
+  _c('tgMediaCol',skel3);
+  _c('snapMediaCol',skel3);
+  _c('igMediaCol',skel3);
+  _c('splPoolInfo','📂 Chargement du pool...');
+  // Vider les checkboxes de comptes (snap/ig/fb) pour qu'ils s'affichent à jour
+  _c('snapAccChecks',loading);
+  _c('igAccChecks',loading);
+  _c('fbAccChecks',loading);
+  // Vider la page Comptes
+  _c('snapAccListPage',loading);
+  _c('igAccListPage',loading);
+  _c('fbAccListPage',loading);
 }
 async function switchProfile(pid){
   document.getElementById('sbProfileMenu').style.display='none';
@@ -3564,12 +5258,21 @@ async function switchProfile(pid){
   await _doSwitchProfile(pid,'');
 }
 async function _doSwitchProfile(pid,pin){
+  const myGen=++_switchGen;
   const r=await fetch(`/api/profiles/${pid}/activate`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({pin})}).then(x=>x.json()).catch(()=>({ok:false}));
+  if(myGen!==_switchGen)return; // un autre switch a démarré entre-temps
   if(!r.ok){_pinError();loadScheduled();return;}
   _closePinModal();
   _activeProfileId=pid;
   _renderSbProfile();
-  reloadAllData();
+  // Afficher l'indicateur de chargement dans la sidebar
+  const sbName=document.getElementById('sbProfileName');
+  if(sbName){sbName.textContent='Chargement…';sbName.style.opacity='.5';}
+  await reloadAllData(myGen);
+  if(myGen!==_switchGen)return; // dépassé par un switch plus récent
+  if(sbName){sbName.style.opacity='';}
+  const prof=_profiles.find(p=>p.id===pid);
+  if(sbName&&prof)sbName.textContent=prof.name;
 }
 
 function newProfileQuick(){
@@ -3609,6 +5312,7 @@ function pmSelectProfile(pid){
     <div class="pm-field"><label>Clef API OneUp</label>
       <div style="display:flex;gap:6px">
         <input id="pmOneup" value="${esc(prof.oneup_api_key||'')}" style="flex:1">
+        <button class="btn btn-xs" onclick="navigator.clipboard.readText().then(t=>{document.getElementById('pmOneup').value=t.trim();toast('✅ Clef collée','ok');}).catch(()=>alert('Autorise le presse-papiers dans le navigateur.'))" title="Coller depuis le presse-papiers" style="white-space:nowrap">📋 Coller</button>
         <button class="btn btn-xs" onclick="pmImportSnap()" title="Pré-remplir avec les comptes du profil actif" style="white-space:nowrap">🔄 Importer comptes actifs</button>
       </div>
     </div>
@@ -3629,8 +5333,25 @@ function pmSelectProfile(pid){
     <div id="pmIgImportStatus" style="font-size:.68rem;color:var(--t3);margin-bottom:6px"></div>
     <div class="pm-snap-list" id="pmIgList">${(prof.instagram_accounts||[]).map((a,i)=>pmSnapRow(i,a.username,a.id,'ig')).join('')}</div>
     <div class="pm-field"><label>Category ID Instagram (OneUp)</label><input id="pmCatIg" value="${esc(prof.category_id_instagram||'')}"></div>
+    <h3 style="margin-top:16px">Comptes Facebook
+      <button class="btn btn-xs" onclick="pmImportFb()" style="margin-left:6px">🔄 Importer depuis OneUp</button>
+      <button class="btn btn-xs" onclick="pmAddFb()" style="margin-left:4px">+ Manuel</button>
+    </h3>
+    <div id="pmFbImportStatus" style="font-size:.68rem;color:var(--t3);margin-bottom:6px"></div>
+    <div class="pm-snap-list" id="pmFbList">${(prof.facebook_accounts||[]).map((a,i)=>pmSnapRow(i,a.username,a.id,'fb')).join('')}</div>
+    <div class="pm-field"><label>Category ID Facebook (OneUp)</label><input id="pmCatFb" value="${esc(prof.category_id_facebook||'')}"></div>
     <h3 style="margin-top:16px">Dossier Spotlight (local)</h3>
     <div class="pm-field"><label>Chemin dossier pool</label><input id="pmSpotDir" value="${esc(prof.spotlight_pool_dir||'')}"></div>
+    <h3 style="margin-top:16px">💳 Forfait</h3>
+    <div class="pm-field">
+      <label>Plan actif</label>
+      <select id="pmPlan" style="background:var(--c1);border:1px solid var(--b1);color:var(--t1);border-radius:var(--r2);padding:8px 10px;font-size:.83rem;width:100%">
+        <option value="" ${!prof.plan?'selected':''}>🔒 Aucun forfait (accès bloqué)</option>
+        <option value="starter" ${prof.plan==='starter'?'selected':''}>⚡ Starter — 15€/mois (10 comptes)</option>
+        <option value="pro" ${prof.plan==='pro'?'selected':''}>🚀 Pro — 39€/mois (25 comptes)</option>
+        <option value="business" ${prof.plan==='business'?'selected':''}>🏢 Business — 239€/mois (illimité)</option>
+      </select>
+    </div>
     <h3 style="margin-top:16px">🔑 Accès client (Login)</h3>
     <div style="background:var(--c1);border:1px solid var(--b1);border-radius:8px;padding:14px;margin-bottom:12px">
       <div style="font-size:.72rem;color:var(--t3);margin-bottom:10px">Ces identifiants permettent au client de se connecter à son espace. Sans mot de passe configuré, le profil est inaccessible.</div>
@@ -3792,6 +5513,25 @@ function pmAddIg(){
   const i=list.querySelectorAll('.pm-snap-row').length;
   list.insertAdjacentHTML('beforeend',pmSnapRow(i,'','','ig'));
 }
+function pmAddFb(){
+  const list=document.getElementById('pmFbList');
+  const i=list.querySelectorAll('.pm-snap-row').length;
+  list.insertAdjacentHTML('beforeend',pmSnapRow(i,'','','fb'));
+}
+async function pmImportFb(){
+  const key=document.getElementById('pmOneup').value.trim();
+  if(!key){alert('Entre la clef API OneUp d\'abord.');return;}
+  const st=document.getElementById('pmFbImportStatus');
+  st.textContent='⏳ Import en cours…';
+  const d=await fetch(`/api/oneup/fb-accounts?oneup_key=${encodeURIComponent(key)}`).then(r=>r.json()).catch(e=>({ok:false,error:String(e)}));
+  if(!d.ok){st.style.color='#f87171';st.textContent='❌ '+(d.detail||d.error||'Erreur');return;}
+  if(!d.accounts.length){st.style.color='var(--yellow)';st.textContent='⚠️ Aucun compte Facebook trouvé — ajoute-les manuellement';return;}
+  const list=document.getElementById('pmFbList');
+  list.innerHTML='';
+  d.accounts.forEach((a,i)=>list.insertAdjacentHTML('beforeend',pmSnapRow(i,a.username,a.id,'fb')));
+  st.style.color='var(--green)';
+  st.textContent=`✅ ${d.accounts.length} compte(s) Facebook importé(s) — clique Enregistrer pour sauvegarder`;
+}
 async function pmImportIg(){
   const key=document.getElementById('pmOneup').value.trim();
   if(!key){alert('Entre la clef API OneUp d\'abord.');return;}
@@ -3817,18 +5557,27 @@ async function pmSave(pid){
     const ins=row.querySelectorAll('input');
     return {username:ins[0].value.replace('@','').trim(),id:ins[1].value.trim()};
   }).filter(a=>a.username&&a.id):[];
+  const fbList=document.getElementById('pmFbList');
+  const fbs=fbList?[...fbList.querySelectorAll('.pm-snap-row')].map(row=>{
+    const ins=row.querySelectorAll('input');
+    return {username:ins[0].value.replace('@','').trim(),id:ins[1].value.trim()};
+  }).filter(a=>a.username&&a.id):[];
   const catIgEl=document.getElementById('pmCatIg');
+  const catFbEl=document.getElementById('pmCatFb');
   const body={
     name:           document.getElementById('pmName').value.trim(),
     oneup_api_key:  document.getElementById('pmOneup').value.trim(),
     category_id_snap:document.getElementById('pmCatSnap').value.trim(),
     category_id_instagram:catIgEl?catIgEl.value.trim():'',
+    category_id_facebook:catFbEl?catFbEl.value.trim():'',
     cloudinary_cloud_name:document.getElementById('pmCloudName').value.trim(),
     cloudinary_api_key:   document.getElementById('pmCloudKey').value.trim(),
     cloudinary_api_secret:document.getElementById('pmCloudSecret').value.trim(),
     snap_accounts:  snaps,
     instagram_accounts: igs,
+    facebook_accounts: fbs,
     spotlight_pool_dir:document.getElementById('pmSpotDir').value.trim(),
+    plan: document.getElementById('pmPlan')?document.getElementById('pmPlan').value||null:undefined,
   };
   const r=await fetch(pid?`/api/profiles/${pid}`:'/api/profiles',{method:pid?'PUT':'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}).then(r=>r.json());
   await loadProfiles();
@@ -3844,7 +5593,12 @@ async function pmNewProfile(){
     <h3>Nouveau profil</h3>
     <div class="pm-field"><label>Nom du profil</label><input id="pmName" value="Nouveau profil"></div>
     <h3 style="margin-top:16px">OneUp</h3>
-    <div class="pm-field"><label>Clef API OneUp</label><input id="pmOneup" value=""></div>
+    <div class="pm-field"><label>Clef API OneUp</label>
+      <div style="display:flex;gap:6px">
+        <input id="pmOneup" value="" style="flex:1">
+        <button class="btn btn-xs" onclick="navigator.clipboard.readText().then(t=>{document.getElementById('pmOneup').value=t.trim();toast('✅ Clef collée','ok');}).catch(()=>alert('Autorise le presse-papiers dans le navigateur.'))" title="Coller depuis le presse-papiers" style="white-space:nowrap">📋 Coller</button>
+      </div>
+    </div>
     <div class="pm-field"><label>Category ID Snap</label><input id="pmCatSnap" value=""></div>
     <h3 style="margin-top:16px">Cloudinary</h3>
     <div class="pm-field"><label>Cloud name</label><input id="pmCloudName" value=""></div>
@@ -3967,11 +5721,33 @@ async function pmDelete(pid){
 }
 
 // ── Navigation sidebar ──────────────────────────────────────────────────────
-const pages={schedule:'Telegram',playlists:'Médias',stats:'Statistiques',snapchat:'Snapchat',instagram:'Instagram',revenue:'Revenus',accounts:'Comptes'};
+const pages={schedule:'Telegram',playlists:'Médias',stats:'Statistiques',snapchat:'Snapchat',instagram:'Instagram',facebook:'Facebook',revenue:'Revenus',accounts:'Comptes',docs:'Documentation'};
+function showDoc(id,btn){
+  document.querySelectorAll('.doc-section').forEach(s=>s.style.display='none');
+  document.querySelectorAll('.doc-nav-item').forEach(b=>b.classList.remove('active'));
+  const sec=document.getElementById('doc-'+id);
+  if(sec)sec.style.display='';
+  if(btn)btn.classList.add('active');
+  const dc=document.getElementById('docContent');
+  if(dc)dc.scrollTop=0;
+}
 let currentPage='schedule';
-function navigateTo(page){const btn=document.querySelector(`.sb-item[data-page="${page}"]`);if(btn)btn.click();}
+function navigateTo(page){
+  if(page==='docs'){switchToDocs();return;}
+  const btn=document.querySelector(`.sb-item[data-page="${page}"]`);if(btn)btn.click();
+}
+function switchToDocs(){
+  document.querySelectorAll('.sb-item').forEach(b=>b.classList.remove('active'));
+  document.querySelectorAll('.page').forEach(p=>p.classList.remove('active'));
+  currentPage='docs';
+  document.getElementById('page-docs').classList.add('active');
+  document.getElementById('topTitle').textContent='Documentation';
+  document.getElementById('rightPanel').style.display='none';
+  ['btnClone','btnSelMode','btnCloneRP','btnRpRefresh','btnSnapDeleteAll'].forEach(id=>{const e=document.getElementById(id);if(e)e.style.display='none';});
+}
 document.querySelectorAll('.sb-item[data-page]').forEach(btn=>{
   btn.addEventListener('click',()=>{
+    if(_lockedPages&&_lockedPages.has(btn.dataset.page)){toast('🔒 Non inclus dans ton forfait — contacte l\'administrateur','warn');return;}
     document.querySelectorAll('.sb-item').forEach(b=>b.classList.remove('active'));
     document.querySelectorAll('.page').forEach(p=>p.classList.remove('active'));
     btn.classList.add('active');
@@ -3980,21 +5756,51 @@ document.querySelectorAll('.sb-item[data-page]').forEach(btn=>{
     document.getElementById('topTitle').textContent=pages[currentPage]||'';
     const isSchedule=currentPage==='schedule';
     const isSnap=currentPage==='snapchat';
+    const isIg=currentPage==='instagram';
+    const isFb=currentPage==='facebook';
     document.getElementById('btnClone').style.display=isSchedule?'':'none';
-    document.getElementById('btnAddAcc').style.display=currentPage==='accounts'?'':'none';
-    document.getElementById('rightPanel').style.display=(isSchedule||isSnap)?'':'none';
+    document.getElementById('rightPanel').style.display=(isSchedule||isSnap||isIg||isFb)?'':'none';
     document.getElementById('btnSnapDeleteAll').style.display=isSnap?'':'none';
     document.getElementById('btnSelMode').style.display=isSchedule?'':'none';
     document.getElementById('btnCloneRP').style.display=isSchedule?'':'none';
+    document.getElementById('btnRpRefresh').style.display=(isIg||isFb)?'':'none';
     if(isSchedule){
       document.getElementById('rpTitle').textContent='📱 Telegram';
+      document.getElementById('slist').style.display='';
+      document.getElementById('splRpList').style.display='none';
+      document.getElementById('igRpList').style.display='none';
+      document.getElementById('fbRpList').style.display='none';
+      document.getElementById('rpSchedTabs').style.display='grid';
       loadScheduled();
     } else if(isSnap){
       document.getElementById('rpTitle').textContent='👻 Snapchat';
+      document.getElementById('slist').style.display='';
+      document.getElementById('igRpList').style.display='none';
+      document.getElementById('fbRpList').style.display='none';
       if(!snapAccounts.length)loadSnapAccounts().then(()=>loadSnapScheduled());else loadSnapScheduled();
-    } else if(currentPage==='instagram'){
+      _splRestoreFolders();
+    } else if(isIg){
+      document.getElementById('rpTitle').textContent='📸 Instagram';
+      document.getElementById('slist').style.display='none';
+      document.getElementById('splRpList').style.display='none';
+      document.getElementById('igRpList').style.display='';
+      document.getElementById('fbRpList').style.display='none';
+      document.getElementById('rpSchedTabs').style.display='grid';
+      document.getElementById('rpSplTabs').style.display='none';
+      document.getElementById('btnSplRpRefresh').style.display='none';
       if(!igAccounts.length) loadIgAccounts();
       loadIgScheduled();
+    } else if(isFb){
+      document.getElementById('rpTitle').textContent='📘 Facebook';
+      document.getElementById('slist').style.display='none';
+      document.getElementById('splRpList').style.display='none';
+      document.getElementById('igRpList').style.display='none';
+      document.getElementById('fbRpList').style.display='';
+      document.getElementById('rpSchedTabs').style.display='grid';
+      document.getElementById('rpSplTabs').style.display='none';
+      document.getElementById('btnSplRpRefresh').style.display='none';
+      if(!fbAccounts.length) loadFbAccounts();
+      loadFbScheduled();
     } else if(currentPage==='stats'){
       loadStats();
     } else if(currentPage==='revenue'){
@@ -4002,9 +5808,12 @@ document.querySelectorAll('.sb-item[data-page]').forEach(btn=>{
     } else if(currentPage==='playlists'){
       loadPlaylists();
     } else if(currentPage==='accounts'){
-      if(!snapAccounts.length)loadSnapAccounts().then(_renderSnapIgAccounts);
-      else _renderSnapIgAccounts();
-      if(!igAccounts.length)loadIgAccounts().then(_renderSnapIgAccounts);
+      _renderAllSocialAccounts();
+      Promise.all([
+        snapAccounts.length?Promise.resolve():loadSnapAccounts(),
+        igAccounts.length?Promise.resolve():loadIgAccounts(),
+        fbAccounts.length?Promise.resolve():loadFbAccounts(),
+      ]).then(_renderAllSocialAccounts);
     }
   });
 });
@@ -4014,9 +5823,11 @@ let accounts=[];
 async function loadAccounts(){
   const r=await fetch('/api/accounts');accounts=await r.json();
   renderAccList();renderAccChecks();
+  const _acsProf=(_profiles||[]).find(p=>p.id===_activeProfileId);
+  if(_acsProf)document.getElementById('acsOneupKey').value=_acsProf.oneup_api_key||'';
   const n=accounts.filter(a=>a.connected).length;
   const b=document.getElementById('badgeAccounts');
-  b.textContent=accounts.length;b.style.display=accounts.length?'':'none';
+  b.textContent=accounts.length;b.style.display='none';
   document.getElementById('mAccounts').textContent=n;
 }
 // ── Reconnexion Telegram ────────────────────────────────────────────────────
@@ -4088,64 +5899,319 @@ async function reconnectAllDisconnected(){
   openReconModal(a.id, a.phone, a.name||a.phone);
 }
 
-function _renderSnapIgAccounts(){
-  function _makeCard(a, avatarBg, avatarSvg, subLabel, platform){
-    return `<div class="acc-item" style="padding:12px 14px;border-radius:12px;background:#0e0e10;border:1px solid #1a1a1f;margin-bottom:8px;display:flex;align-items:center;gap:12px">
-      <div style="position:relative;flex-shrink:0">
-        <div style="width:46px;height:46px;border-radius:12px;background:${avatarBg};display:flex;align-items:center;justify-content:center;overflow:hidden">${avatarSvg}</div>
-        <div style="position:absolute;bottom:-2px;right:-2px;width:12px;height:12px;border-radius:50%;background:var(--green);border:2px solid #0e0e10"></div>
-      </div>
-      <div style="flex:1;min-width:0">
-        <div style="font-weight:700;font-size:.88rem;color:#fff">@${a.username}</div>
-        <div style="font-size:.72rem;color:var(--t3);margin-top:2px">${subLabel}</div>
-        <div style="font-size:.62rem;color:#333;font-family:monospace;margin-top:3px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:200px">${a.id}</div>
-      </div>
-      <div style="display:flex;flex-direction:column;gap:6px;align-items:flex-end;flex-shrink:0">
-        <span style="font-size:.65rem;padding:3px 8px;border-radius:6px;background:rgba(34,197,94,.1);border:1px solid rgba(34,197,94,.25);color:var(--green);font-weight:600;letter-spacing:.02em">OneUp ✓</span>
-        <span style="font-size:.65rem;padding:3px 8px;border-radius:6px;background:rgba(99,102,241,.1);border:1px solid rgba(99,102,241,.25);color:#818cf8;font-weight:500">${platform}</span>
-      </div>
-    </div>`;
+// ── Comptes sociaux unifiés (Snap / IG / FB) ───────────────────────────────
+let _addSocialPlatform='snap';
+
+function _socialAvatarBg(platform){
+  return {snap:'linear-gradient(135deg,#3a3000,#5a4800)',ig:'linear-gradient(135deg,#4a1060,#7a1a1a)',fb:'linear-gradient(135deg,#0a2050,#1040a0)'}[platform]||'#222';
+}
+function _socialInitials(name){return(name||'?').replace('@','').slice(0,2).toUpperCase();}
+function _socialPlatformLabel(p){return{snap:'Snapchat',ig:'Instagram',fb:'Facebook'}[p]||p;}
+function _socialPlatformColor(p){return{snap:'#f5c518',ig:'#c084fc',fb:'#60a5fa'}[p]||'#888';}
+
+async function _saveSocialAccountPicture(platform, accId, picUrl){
+  const accs=_getSocialAccounts(platform);
+  const acc=accs.find(a=>a.id===accId);
+  if(!acc||acc.picture===picUrl)return;
+  acc.picture=picUrl;
+  await _saveSocialAccounts(platform, accs);
+  // Mettre à jour les checkboxes aussi
+  const cb=document.querySelector(`#${platform==='snap'?'snapAccChecks':platform==='ig'?'igAccChecks':'fbAccChecks'} input[data-id="${accId}"]`);
+  if(cb){
+    const lbl=cb.closest('label');
+    const oldImg=lbl&&lbl.querySelector('img');
+    if(!oldImg){
+      const dot=lbl&&lbl.querySelector('.acc-check-dot');
+      if(dot){
+        const img=document.createElement('img');
+        img.src=picUrl;img.style.cssText='width:22px;height:22px;border-radius:50%;object-fit:cover;flex-shrink:0';
+        img.onerror=()=>img.remove();
+        dot.replaceWith(img);
+      }
+    }
   }
+}
 
-  const snapSvg=`<svg width="30" height="30" viewBox="0 0 48 48"><rect width="48" height="48" rx="9" fill="#FFFC00"/><path fill="#000" d="M24 7c-5.3 0-9.5 4.1-9.5 9.2v1.4c-1 .3-2.2.6-3 .6h-.5c-.11-.02-.2.07-.17.18.28.7 1.46 1.37 2.24 1.65.07.02.13.09.14.17.38 1.76 1.08 3.23 2.1 4.35-1.33.75-2.66 1.55-2.66 2.92 0 .98.84 1.73 2.57 2.18.17.05.3.18.31.35.21.98.58 1.91 1.06 2.47-.47.2-.9.4-.9.7 0 .54.83 1.03 2.33 1.03h1.25c.82.76 1.94 1.22 3.3 1.22s2.48-.46 3.3-1.22h1.25c1.5 0 2.33-.49 2.33-1.03 0-.3-.43-.5-.9-.7.48-.56.85-1.49 1.06-2.47.01-.17.14-.3.31-.35 1.73-.45 2.57-1.2 2.57-2.18 0-1.37-1.33-2.17-2.66-2.92 1.02-1.12 1.72-2.59 2.1-4.35.01-.08.07-.15.14-.17.78-.28 1.96-.95 2.24-1.65.03-.11-.06-.2-.17-.18h-.05c-.78 0-1.9-.27-3-.6v-1.4C33.5 11.1 29.3 7 24 7z"/></svg>`;
-  const igSvg=`<svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="2" width="20" height="20" rx="5"/><circle cx="12" cy="12" r="4.5"/><circle cx="17.5" cy="6.5" r="1" fill="#fff" stroke="none"/></svg>`;
+function _makeSocialCard(a, platform){
+  const initials=_socialInitials(a.username);
+  const bg=_socialAvatarBg(platform);
+  const platLabel=_socialPlatformLabel(platform);
+  const platColor=_socialPlatformColor(platform);
+  const desc=a.description||'';
+  const uname=a.username.replace(/[^a-zA-Z0-9._-]/g,'');
+  const platSlug={snap:'snapchat',ig:'instagram',fb:'facebook'}[platform]||platform;
+  // Photo via endpoint proxy/cache VPS → instantané après 1ère visite
+  const uidParam=(a.id&&['ig','fb'].includes(platform))?`?uid=${encodeURIComponent(a.id)}`:'';
+  const imgTag=uname
+    ? `<img src="/api/social/avatar/${platform}/${encodeURIComponent(uname)}${uidParam}" loading="lazy" onerror="this.remove()">`
+    : '';
+  return `<div class="acc-item-sm" data-sid="${a.id}" data-plat="${platform}">
+    <div class="acc-avatar-wrap-sm">
+      <div class="acc-avatar-sm" style="background:${bg}">${initials}${imgTag}
+      </div>
+      <div class="acc-dot-sm" style="background:var(--green)"></div>
+    </div>
+    <div style="flex:1;min-width:0">
+      <div class="acc-name-sm">@${a.username}</div>
+      <div class="acc-plat-sm" style="color:${platColor}">${platLabel}</div>
+      <div class="acc-desc-wrap"><div class="acc-desc-sm" data-sid="${a.id}" data-plat="${platform}">${desc||'Ajouter une description…'}</div></div>
+    </div>
+    <div style="display:flex;flex-direction:column;gap:4px;align-items:flex-end;flex-shrink:0">
+      <button class="acc-btn-sq" data-sid="${a.id}" data-plat="${platform}" data-desc="${desc.replace(/"/g,'&quot;')}" title="Modifier la description">📝</button>
+      <button class="acc-btn-sq acc-ren" data-plat="${platform}" data-id="${a.id}" data-name="${a.username.replace(/"/g,'&quot;')}" title="Renommer">✏</button>
+      <button class="acc-btn-sq acc-photo-btn" data-plat="${platform}" data-id="${a.id}" data-uname="${uname}" title="Changer la photo de profil">📷</button>
+      <button class="acc-btn-sq del acc-del-btn" data-plat="${platform}" data-id="${a.id}">✕</button>
+    </div>
+  </div>`;
+}
 
+function _getSocialAccounts(platform){
+  const active=_profiles.find(p=>p.id===_activeProfileId)||_profiles[0];
+  if(!active)return[];
+  const key={snap:'snap_accounts',ig:'instagram_accounts',fb:'facebook_accounts'}[platform];
+  return (active[key]||[]).map(a=>({...a}));
+}
+async function _saveSocialAccounts(platform, list){
+  const key={snap:'snap_accounts',ig:'instagram_accounts',fb:'facebook_accounts'}[platform];
+  const pid=_activeProfileId;
+  const r=await fetch(`/api/profiles/${pid}`,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({[key]:list})}).then(r=>r.json()).catch(()=>null);
+  // Mettre à jour _profiles en local pour éviter un rechargement complet
+  const prof=_profiles.find(p=>p.id===pid);
+  if(prof)prof[key]=list;
+}
+
+function _renderAllSocialAccounts(){
+  // Snapchat
   const snapEl=document.getElementById('snapAccListPage');
   if(snapEl){
-    if(!snapAccounts.length) snapEl.innerHTML='<div class="no-acc" style="padding:18px 0;text-align:center;color:var(--t3);font-size:.8rem">Aucun compte Snapchat — configure la clé OneUp dans Réglages</div>';
-    else snapEl.innerHTML='<div style="padding:8px 0">'+snapAccounts.map(a=>_makeCard(a,'#3a3000',snapSvg,'Snapchat · OneUp','Snap')).join('')+'</div>';
+    document.getElementById('acsBadgeSnap').textContent=snapAccounts.length;
+    if(!snapAccounts.length) snapEl.innerHTML='<div class="no-acc">Aucun compte — clique + Ajouter</div>';
+    else{snapEl.innerHTML=snapAccounts.map(a=>_makeSocialCard(a,'snap')).join('');_attachSocialCardEvents(snapEl,'snap');}
   }
+  // Instagram
   const igEl=document.getElementById('igAccListPage');
   if(igEl){
-    if(!igAccounts.length) igEl.innerHTML='<div class="no-acc" style="padding:18px 0;text-align:center;color:var(--t3);font-size:.8rem">Aucun compte Instagram — configure la clé OneUp dans Réglages</div>';
-    else igEl.innerHTML='<div style="padding:8px 0">'+igAccounts.map(a=>_makeCard(a,'linear-gradient(135deg,#833ab4,#fd1d1d,#fcb045)',igSvg,'Instagram · OneUp','Insta')).join('')+'</div>';
+    document.getElementById('acsBadgeIg').textContent=igAccounts.length;
+    if(!igAccounts.length) igEl.innerHTML='<div class="no-acc">Aucun compte — clique + Ajouter</div>';
+    else{igEl.innerHTML=igAccounts.map(a=>_makeSocialCard(a,'ig')).join('');_attachSocialCardEvents(igEl,'ig');}
   }
+  // Facebook
+  const fbEl=document.getElementById('fbAccListPage');
+  if(fbEl){
+    document.getElementById('acsBadgeFb').textContent=fbAccounts.length;
+    if(!fbAccounts.length) fbEl.innerHTML='<div class="no-acc">Aucun compte — clique + Ajouter</div>';
+    else{fbEl.innerHTML=fbAccounts.map(a=>_makeSocialCard(a,'fb')).join('');_attachSocialCardEvents(fbEl,'fb');}
+  }
+}
+
+function _attachSocialCardEvents(el, platform){
+  el.querySelectorAll('.acc-del-btn').forEach(b=>b.addEventListener('click',async()=>{
+    if(!confirm('Supprimer ce compte ?'))return;
+    const list=_getSocialAccounts(platform).filter(a=>a.id!==b.dataset.id);
+    await _saveSocialAccounts(platform,list);
+    await _reloadPlatformAccounts(platform);
+    _renderAllSocialAccounts();
+    toast('Compte supprimé');
+  }));
+  el.querySelectorAll('.acc-ren').forEach(b=>b.addEventListener('click',async()=>{
+    const newName=prompt('Nouveau nom :',b.dataset.name);
+    if(!newName||!newName.trim())return;
+    const list=_getSocialAccounts(platform);
+    const acc=list.find(a=>a.id===b.dataset.id);
+    if(acc)acc.username=newName.trim().replace('@','');
+    await _saveSocialAccounts(platform,list);
+    await _reloadPlatformAccounts(platform);
+    _renderAllSocialAccounts();
+    toast('Renommé');
+  }));
+  // Bouton description (📝) et clic sur le texte de description
+  const openDesc=(sid)=>{
+    const item=el.querySelector(`.acc-item[data-sid="${sid}"]`);
+    if(!item)return;
+    const wrap=item.querySelector('.acc-desc-wrap');
+    if(!wrap||wrap.querySelector('.acc-desc-inp'))return;
+    const list=_getSocialAccounts(platform);
+    const acc=list.find(a=>a.id===sid);
+    const cur=acc?.description||'';
+    wrap.innerHTML=`<textarea class="acc-desc-inp" rows="2" placeholder="Description…">${cur.replace(/</g,'&lt;')}</textarea>
+      <div style="display:flex;gap:6px;margin-top:5px">
+        <button class="btn btn-xs btn-primary" data-save-sid="${sid}">💾 Enregistrer</button>
+        <button class="btn btn-xs" data-cancel-sid="${sid}">Annuler</button>
+      </div>`;
+    wrap.querySelector(`[data-save-sid]`).addEventListener('click',async()=>{
+      const val=wrap.querySelector('.acc-desc-inp').value.trim();
+      const list2=_getSocialAccounts(platform);
+      const acc2=list2.find(a=>a.id===sid);
+      if(acc2)acc2.description=val;
+      await _saveSocialAccounts(platform,list2);
+      await _reloadPlatformAccounts(platform);
+      _renderAllSocialAccounts();
+      toast('Description enregistrée','ok');
+    });
+    wrap.querySelector(`[data-cancel-sid]`).addEventListener('click',()=>{
+      _renderAllSocialAccounts();
+    });
+    wrap.querySelector('.acc-desc-inp').focus();
+  };
+  el.querySelectorAll('.acc-btn-sq[data-desc]').forEach(b=>b.addEventListener('click',()=>openDesc(b.dataset.sid)));
+  el.querySelectorAll('.acc-desc-sm').forEach(d=>d.addEventListener('click',()=>openDesc(d.dataset.sid)));
+  // Bouton photo 📷
+  el.querySelectorAll('.acc-photo-btn').forEach(b=>b.addEventListener('click',()=>{
+    const accId=b.dataset.id, uname=b.dataset.uname||'', plat=b.dataset.plat;
+    _openPhotoUrlModal(plat, accId, uname);
+  }));
+}
+
+let _photoModalCtx={plat:'',id:'',uname:''};
+function _openPhotoUrlModal(plat, id, uname){
+  _photoModalCtx={plat,id,uname};
+  const ov=document.getElementById('overlayPhotoUrl');
+  if(!ov)return;
+  document.getElementById('photoUrlInput').value='';
+  document.getElementById('photoUrlErr').textContent='';
+  document.getElementById('photoUrlPlatLabel').textContent={snap:'Snapchat',ig:'Instagram',fb:'Facebook'}[plat]||plat;
+  document.getElementById('photoUrlAccLabel').textContent='@'+(uname||id);
+  ov.classList.remove('hidden');
+  setTimeout(()=>document.getElementById('photoUrlInput').focus(),60);
+}
+async function _confirmPhotoUrl(){
+  const url=document.getElementById('photoUrlInput').value.trim();
+  const errEl=document.getElementById('photoUrlErr');
+  errEl.textContent='';
+  if(!url){errEl.textContent='Colle une URL de photo.';return;}
+  const btn=document.getElementById('photoUrlConfirmBtn');
+  btn.disabled=true;btn.textContent='Chargement…';
+  try{
+    const {plat,id,uname}=_photoModalCtx;
+    const r=await fetch(`/api/social/avatar/${plat}/${encodeURIComponent(uname||id)}/set-url`,{
+      method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({url,uid:id})
+    });
+    const d=await r.json().catch(()=>({}));
+    if(!r.ok){errEl.textContent=d.detail||'Erreur lors du téléchargement.';return;}
+    document.getElementById('overlayPhotoUrl').classList.add('hidden');
+    // Forcer le rechargement de l'avatar dans les cartes
+    document.querySelectorAll(`[data-sid="${id}"] .acc-avatar-sm img`).forEach(img=>{
+      img.src=img.src.split('?')[0]+'?t='+Date.now();
+    });
+    toast('Photo mise à jour','ok');
+  }catch(e){
+    errEl.textContent='Erreur réseau.';
+  }finally{
+    btn.disabled=false;btn.textContent='✓ Enregistrer';
+  }
+}
+
+async function _reloadPlatformAccounts(platform){
+  if(platform==='snap'){await loadSnapAccounts();}
+  else if(platform==='ig'){await loadIgAccounts();}
+  else if(platform==='fb'){await loadFbAccounts();}
+}
+
+function _openAddSocialModal(platform){
+  _addSocialPlatform=platform;
+  const titles={snap:'Ajouter un compte Snapchat',ig:'Ajouter un compte Instagram',fb:'Ajouter un compte Facebook'};
+  document.getElementById('addSocialTitle').textContent=titles[platform]||'Ajouter un compte';
+  document.getElementById('addSocialName').value='';
+  document.getElementById('addSocialId').value='';
+  document.getElementById('addSocialErr').textContent='';
+  const importList=document.getElementById('addSocialImportList');
+  if(importList){importList.innerHTML='';importList.style.display='none';}
+  const importBtn=document.getElementById('addSocialImportBtn');
+  if(importBtn){importBtn.textContent='🔄 Importer';importBtn.disabled=false;}
+  document.getElementById('overlayAddSocial').classList.remove('hidden');
+  setTimeout(()=>document.getElementById('addSocialName').focus(),50);
+}
+
+async function _importSocialFromOneUp(){
+  const eps={snap:'/api/oneup/snap-accounts',ig:'/api/oneup/ig-accounts',fb:'/api/oneup/fb-accounts'};
+  const ep=eps[_addSocialPlatform];
+  if(!ep)return;
+  const btn=document.getElementById('addSocialImportBtn');
+  const listEl=document.getElementById('addSocialImportList');
+  if(btn){btn.textContent='…';btn.disabled=true;}
+  const raw=await fetch(ep).then(r=>r.json()).catch(()=>null);
+  if(btn){btn.textContent='🔄 Importer';btn.disabled=false;}
+  if(!raw){
+    document.getElementById('addSocialErr').textContent='Impossible de récupérer les comptes OneUp.';
+    return;
+  }
+  const data=Array.isArray(raw)?raw:(raw.accounts||raw.data||[]);
+  if(!data.length){
+    document.getElementById('addSocialErr').textContent='Aucun compte trouvé dans OneUp.';
+    return;
+  }
+  const existing=_getSocialAccounts(_addSocialPlatform).map(a=>a.id);
+  const platColors={snap:'#FFFC00',ig:'#E1306C',fb:'#1877F2'};
+  const platC=platColors[_addSocialPlatform]||'#a78bfa';
+  listEl.innerHTML=data.map(a=>{
+    const already=existing.includes(String(a.id));
+    return `<div style="display:flex;align-items:center;gap:8px;padding:6px 8px;background:var(--c2);border-radius:6px;border:1px solid var(--b1)">
+      <div style="width:28px;height:28px;border-radius:8px;background:${platC}22;border:1px solid ${platC}44;display:flex;align-items:center;justify-content:center;font-size:.75rem;font-weight:700;color:${platC}">${(a.name||a.username||'?').slice(0,2).toUpperCase()}</div>
+      <div style="flex:1;min-width:0">
+        <div style="font-size:.8rem;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">@${a.name||a.username||a.id}</div>
+        <div style="font-size:.65rem;color:var(--t3);font-family:monospace">${a.id}</div>
+      </div>
+      ${already
+        ?`<span style="font-size:.65rem;color:var(--green);white-space:nowrap">✓ Ajouté</span>`
+        :`<button class="btn btn-xs" style="background:${platC}22;border-color:${platC}66;color:${platC};white-space:nowrap;font-size:.7rem" onclick="_importOneSocial('${a.id}','${(a.name||a.username||a.id).replace(/'/g,"\\'")}',this)">+ Ajouter</button>`
+      }
+    </div>`;
+  }).join('');
+  listEl.style.display='flex';
+}
+
+async function _importOneSocial(id, name, btn){
+  const list=_getSocialAccounts(_addSocialPlatform);
+  if(list.find(a=>a.id===String(id))){return;}
+  list.push({username:name,id:String(id)});
+  await _saveSocialAccounts(_addSocialPlatform,list);
+  await _reloadPlatformAccounts(_addSocialPlatform);
+  _renderAllSocialAccounts();
+  if(btn){btn.outerHTML=`<span style="font-size:.65rem;color:var(--green);white-space:nowrap">✓ Ajouté</span>`;}
+  toast('@'+name+' ajouté ✓','ok');
+}
+
+async function _confirmAddSocial(){
+  const name=document.getElementById('addSocialName').value.trim().replace('@','');
+  const id=document.getElementById('addSocialId').value.trim();
+  const errEl=document.getElementById('addSocialErr');
+  if(!name){errEl.textContent='Entre un nom.';return;}
+  if(!id){errEl.textContent='Entre un ID OneUp.';return;}
+  const list=_getSocialAccounts(_addSocialPlatform);
+  if(list.find(a=>a.id===id)){errEl.textContent='Ce compte existe déjà.';return;}
+  list.push({username:name,id});
+  await _saveSocialAccounts(_addSocialPlatform,list);
+  await _reloadPlatformAccounts(_addSocialPlatform);
+  _renderAllSocialAccounts();
+  document.getElementById('overlayAddSocial').classList.add('hidden');
+  toast('Compte ajouté ✓','ok');
 }
 
 function renderAccList(){
   const el=document.getElementById('accList');
+  const badge=document.getElementById('acsBadgeTg');if(badge)badge.textContent=accounts.length;
   if(!accounts.length){el.innerHTML='<div class="no-acc">Aucun compte</div>';return;}
   el.innerHTML=accounts.map(a=>{
     const desc=a.description||'';
-    const descHtml=desc
-      ?`<div class="acc-desc-el acc-desc-click" data-id="${a.id}" title="Cliquer pour modifier">${desc.replace(/</g,'&lt;')}</div>`
-      :`<div class="acc-desc-el acc-desc-click" data-id="${a.id}" style="color:#555;font-style:italic;cursor:pointer" title="Cliquer pour ajouter">Ajouter une description…</div>`;
     const initials=(a.name||a.phone||'?').slice(0,2).toUpperCase();
-    return `<div class="acc-item" data-id="${a.id}">
-      <div class="acc-avatar-wrap">
-        <div class="acc-avatar" id="av-${a.id}">${initials}</div>
-        <div class="acc-dot" style="background:${a.connected?'var(--green)':'#444'}"></div>
+    return `<div class="acc-item-sm" data-id="${a.id}">
+      <div class="acc-avatar-wrap-sm">
+        <div class="acc-avatar-sm" id="av-${a.id}" style="background:linear-gradient(135deg,#1e1b4b,#312e81)">${initials}<img src="/api/accounts/${a.id}/photo" style="position:absolute;inset:0;width:100%;height:100%;object-fit:cover;border-radius:50%" onerror="this.remove()"></div>
+        <div class="acc-dot-sm" style="background:${a.connected?'var(--green)':'#444'}"></div>
       </div>
       <div style="flex:1;min-width:0">
-        <div class="acc-name-el">${a.name||a.phone}</div>
-        <div class="acc-phone-el">${a.phone}</div>
-        <div class="acc-desc-wrap">${descHtml}</div>
+        <div class="acc-name-sm">${a.name||a.phone}</div>
+        <div class="acc-plat-sm" style="color:var(--t2)">${a.phone} · <span style="color:#5b6acf;font-size:.7rem;font-weight:700">Telegram</span></div>
+        <div class="acc-desc-wrap"><div class="acc-desc-sm acc-desc-click" data-id="${a.id}">${desc||'Ajouter une description…'}</div></div>
       </div>
-      <div style="display:flex;flex-direction:column;gap:6px;align-items:flex-end;flex-shrink:0">
-        ${!a.connected?`<button class="btn btn-xs" style="font-size:.7rem;padding:4px 8px;background:rgba(124,58,237,.18);border:1px solid rgba(124,58,237,.4);color:#a78bfa;white-space:nowrap" data-recon-id="${a.id}" data-recon-phone="${a.phone}" data-recon-name="${(a.name||a.phone).replace(/"/g,'&quot;')}">🔄 Reconnecter</button>`:''}
-        <button class="acc-desc-btn" data-id="${a.id}" data-desc="${desc.replace(/"/g,'&quot;')}" title="Modifier la description">📝</button>
-        <button class="acc-ren" data-id="${a.id}" data-name="${a.name||''}" data-phone="${a.phone}" title="Renommer">✏</button>
-        <button class="acc-del-btn" data-id="${a.id}">✕</button>
+      <div style="display:flex;flex-direction:column;gap:4px;align-items:flex-end;flex-shrink:0">
+        ${a.connected
+          ?`<button class="acc-btn-sq" style="color:#a78bfa;border-color:rgba(124,58,237,.3);cursor:default" title="Connecté" disabled>✓</button>`
+          :`<button class="acc-btn-sq" style="color:#a78bfa;border-color:rgba(124,58,237,.4)" data-recon-id="${a.id}" data-recon-phone="${a.phone}" data-recon-name="${(a.name||a.phone).replace(/"/g,'&quot;')}" title="Reconnecter">🔄</button>`}
+        <button class="acc-btn-sq acc-desc-btn" data-id="${a.id}" data-desc="${desc.replace(/"/g,'&quot;')}" title="Modifier la description">📝</button>
+        <button class="acc-btn-sq acc-ren" data-id="${a.id}" data-name="${a.name||''}" data-phone="${a.phone}" title="Renommer">✏</button>
+        <button class="acc-btn-sq del acc-del-btn" data-id="${a.id}">✕</button>
       </div>
     </div>`;
   }).join('');
@@ -4182,7 +6248,7 @@ function renderAccList(){
 
   // Fonction commune d'édition inline description
   function _openDescEditor(accId, wrap){
-    if(wrap.querySelector('textarea')) return;
+    if(wrap.querySelector('textarea'))return;
     const acc=accounts.find(a=>a.id===accId);
     const curDesc=(acc&&acc.description)||'';
     wrap.innerHTML=`<textarea class="acc-desc-inp" rows="2" placeholder="Description, notes, objectifs…">${curDesc.replace(/</g,'&lt;')}</textarea>
@@ -4191,24 +6257,19 @@ function renderAccList(){
         <button class="btn btn-xs" style="background:#222">Annuler</button>
       </div>`;
     const ta=wrap.querySelector('textarea');
-    ta.focus(); ta.selectionStart=ta.selectionEnd=ta.value.length;
+    ta.focus();ta.selectionStart=ta.selectionEnd=ta.value.length;
+    const _setDesc=(v)=>{
+      wrap.innerHTML=`<div class="acc-desc-sm acc-desc-click" data-id="${accId}">${v||'Ajouter une description…'}</div>`;
+      wrap.querySelector('.acc-desc-click').addEventListener('click',()=>_openDescEditor(accId,wrap));
+    };
     wrap.querySelector('.btn-save-desc').addEventListener('click',async()=>{
       const val=ta.value;
       await fetch(`/api/accounts/${accId}`,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({description:val})});
-      if(acc) acc.description=val;
-      wrap.innerHTML=val
-        ?`<div class="acc-desc-el acc-desc-click" data-id="${accId}" title="Cliquer pour modifier">${val.replace(/</g,'&lt;')}</div>`
-        :`<div class="acc-desc-el acc-desc-click" data-id="${accId}" style="color:#555;font-style:italic;cursor:pointer" title="Cliquer pour ajouter">Ajouter une description…</div>`;
-      wrap.querySelector('.acc-desc-click').addEventListener('click',()=>_openDescEditor(accId,wrap));
+      if(acc)acc.description=val;
+      _setDesc(val);
       toast('Description sauvegardée');
     });
-    wrap.querySelectorAll('.btn-xs')[1].addEventListener('click',()=>{
-      wrap.innerHTML=(curDesc)
-        ?`<div class="acc-desc-el acc-desc-click" data-id="${accId}" title="Cliquer pour modifier">${curDesc.replace(/</g,'&lt;')}</div>`
-        :`<div class="acc-desc-el acc-desc-click" data-id="${accId}" style="color:#555;font-style:italic;cursor:pointer" title="Cliquer pour ajouter">Ajouter une description…</div>`;
-      wrap.querySelector('.acc-desc-click').addEventListener('click',()=>_openDescEditor(accId,wrap));
-    });
-    // Ctrl+Enter = sauvegarder
+    wrap.querySelectorAll('.btn-xs')[1].addEventListener('click',()=>_setDesc(curDesc));
     ta.addEventListener('keydown',e=>{if((e.ctrlKey||e.metaKey)&&e.key==='Enter')wrap.querySelector('.btn-save-desc').click();});
   }
 
@@ -4219,22 +6280,24 @@ function renderAccList(){
     _openDescEditor(accId, wrap);
   }));
 
-  // Bouton 📝 (conservé pour rétrocompat)
+  // Bouton 📝
   el.querySelectorAll('.acc-desc-btn').forEach(b=>b.addEventListener('click',()=>{
     const accId=b.dataset.id;
-    const item=el.querySelector(`.acc-item[data-id="${accId}"]`);
-    const wrap=item.querySelector('.acc-desc-wrap');
-    _openDescEditor(accId, wrap);
+    const item=el.querySelector(`[data-id="${accId}"]`);
+    const wrap=item?.querySelector('.acc-desc-wrap');
+    if(wrap)_openDescEditor(accId, wrap);
   }));
 }
 function renderAccChecks(){
   const el=document.getElementById('accChecks');
   if(!accounts.length){el.innerHTML='<div class="no-acc-warn">Aucun compte — ajoute un compte dans Comptes</div>';updateSchedBtn();return;}
   el.innerHTML=accounts.map(a=>`
-    <label class="acc-check ${a.connected?'sel':''}">
-      <input type="checkbox" data-id="${a.id}" ${a.connected?'checked':''} ${!a.connected?'disabled':''}>
-      <div class="acc-check-dot" style="background:${a.connected?'var(--green)':'#333'}"></div>
-      <span class="acc-check-name">${a.name||a.phone}</span>
+    <label class="acc-check ${a.connected?'sel':''}" style="${!a.connected?'opacity:.55':''}">
+      <input type="checkbox" data-id="${a.id}" ${a.connected?'checked':''}>
+      <img src="/api/accounts/${a.id}/photo"
+           style="width:22px;height:22px;border-radius:50%;object-fit:cover;flex-shrink:0"
+           onerror="this.style.display='none'">
+      <span class="acc-check-name">${a.name||a.phone}${!a.connected?' 🔴':''}</span>
     </label>`).join('');
   el.querySelectorAll('.acc-check').forEach(l=>{
     const cb=l.querySelector('input');
@@ -4427,30 +6490,74 @@ function _updateSelBar(){
 
 async function loadScheduled(){
   if(!accounts.length) await loadAccounts();
-  const r=await fetch('/api/scheduled');const list=await r.json();
+  const r=await fetch('/api/scheduled?t='+Date.now());const list=await r.json();
   const el=document.getElementById('slist');
   const pending=list.filter(s=>s.status==='pending').length;
-  const done=list.filter(s=>s.status==='done').length;
+  const doneCount=list.filter(s=>s.status==='done').length;
   document.getElementById('mPending').textContent=pending;
-  document.getElementById('mDone').textContent=done;
+  document.getElementById('mDone').textContent=doneCount;
   const b=document.getElementById('badgePending');b.textContent=pending;b.style.display=pending?'':'none';
   if(!list.length){el.innerHTML='<div class="no-rp">Aucune story programmée</div>';return;}
   const bmap={pending:'bp En attente',posting:'bs Envoi…',done:'bd Envoyé',error:'be Erreur',partial:'bpar Partiel'};
   const _sp={pending:0,posting:0,partial:1,error:1,done:2};
-  const items=list.slice().sort((a,b)=>{const pa=_sp[a.status]??1,pb=_sp[b.status]??1;if(pa!==pb)return pa-pb;return a.scheduled_at.localeCompare(b.scheduled_at);}).slice(-60).map(s=>{
+  const sorted=list.slice().sort((a,b)=>{const pa=_sp[a.status]??1,pb=_sp[b.status]??1;if(pa!==pb)return pa-pb;return a.scheduled_at.localeCompare(b.scheduled_at);});
+  const toShow=_schedFilter==='done'
+    ?sorted.filter(s=>s.status==='done'||s.status==='partial'||s.status==='error').sort((a,b)=>b.scheduled_at.localeCompare(a.scheduled_at)).slice(0,150)
+    :sorted.filter(s=>s.status==='pending'||s.status==='posting');
+  if(!toShow.length){el.innerHTML=`<div class="no-rp">${_schedFilter==='done'?'Aucune story publiée':'Aucune story en attente'}</div>`;return;}
+  const items=toShow.map(s=>{
     const[bc,bl]=(bmap[s.status]||'bp ?').split(' ');
-    const accNames=(s.account_ids||[]).map(id=>{const a=accounts.find(x=>x.id===id);return a?(a.name||a.phone):id;}).join(' · ');
+    const accList=(s.account_ids||[]).map(id=>{const a=accounts.find(x=>x.id===id);return a?(a.name||a.phone):id;});
+    const accCount=accList.length;
+    const accBadge=accCount?`<span class="acc-badge" data-tooltip="${accList.join('\n').replace(/"/g,'&quot;')}"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="12" cy="8" r="4"/><path d="M4 20c0-4 3.6-7 8-7s8 3 8 7"/></svg>${accCount} compte${accCount>1?'s':''} connecté${accCount>1?'s':''}</span>`:'<span style="font-size:.72rem;color:var(--t3)">—</span>';
     const plB=s.playlist_name?`<div class="spl">🎵 ${s.playlist_name}</div>`:'';
     const noteB=s.note?`<div class="snote">📝 ${s.note}</div>`:'';
     const isPending=s.status==='pending';
     const cbHtml=(_selMode&&isPending)?`<input type="checkbox" class="sitem-cb" data-cbid="${s.id}" ${_selIds.has(s.id)?'checked':''}>`:'';
     const noteBtn=(!_selMode&&isPending)?`<button class="snote-btn" data-id="${s.id}" data-note="${s.note||''}">📝</button>`:'';
     const delBtn=(!_selMode&&isPending)?`<button class="sdel2" data-id="${s.id}">✕</button>`:'';
+    let errTip='';
+    if((s.status==='error'||s.status==='partial')&&s.results){
+      const _emap=[
+        [/premium account is required/i,'Compte Telegram Premium requis pour poster des stories'],
+        [/sendstoryrequest/i,'Compte Telegram Premium requis pour poster des stories'],
+        [/PREMIUM_ACCOUNT_REQUIRED/i,'Compte Telegram Premium requis'],
+        [/FLOOD_WAIT_(\d+)/i,(m,n)=>`Limite atteinte — réessayer dans ${Math.ceil(n/60)} min`],
+        [/flood.wait/i,'Limite Telegram atteinte — attendre quelques minutes'],
+        [/AUTH_KEY_UNREGISTERED|SESSION_REVOKED|session.*expir/i,'Session expirée — reconnecter le compte'],
+        [/USER_DEACTIVATED/i,'Compte Telegram désactivé'],
+        [/PHONE_NUMBER_BANNED/i,'Numéro banni par Telegram'],
+        [/CHAT_WRITE_FORBIDDEN/i,'Permission refusée sur ce canal'],
+        [/fichier introuvable/i,'Fichier média introuvable'],
+        [/upload.*cloudinary.*fail|cloudinary.*échou/i,'Échec upload du fichier'],
+        [/connection.*reset|network|timeout|timed out/i,'Erreur réseau — connexion interrompue'],
+        [/locked/i,'Compte temporairement bloqué par Telegram'],
+        [/Too many requests/i,'Trop de requêtes — Telegram a bloqué temporairement'],
+      ];
+      function _simplErr(raw){
+        if(!raw)return'?';
+        for(const[pat,repl]of _emap){
+          const m=String(raw).match(pat);
+          if(m)return typeof repl==='function'?repl(...m):repl;
+        }
+        if(String(raw).length>80)return String(raw).slice(0,80)+'…';
+        return raw;
+      }
+      const lines=Object.entries(s.results).map(([k,v])=>{
+        const icon=v.status==='done'?'✓':v.status==='error'?'✗':'⚠';
+        const name=v.username||(k==='_'?'':k);
+        const raw=v.msg||v.error||v.status||'?';
+        const msg=_simplErr(raw);
+        return name?`${icon} ${name}: ${msg}`:`${icon} ${msg}`;
+      });
+      errTip=lines.join('\n');
+    }
+    const badgeTip=errTip?` data-tooltip="${errTip.replace(/"/g,'&quot;')}"`:''
     return `<div class="sitem${_selIds.has(s.id)?' sitem-sel':''}" data-sid="${s.id}">
       ${cbHtml}
       <img class="sthumb" src="/uploads/${s.filename}" onerror="this.style.display='none'">
-      <div class="sinfo"><div class="sdate">📅 ${fmt(s.scheduled_at)}</div>${plB}<div class="saccs">👤 ${accNames||'—'}</div>${noteB}</div>
-      <div class="sright"><span class="badge ${bc}">${bl}</span>${noteBtn}${delBtn}</div>
+      <div class="sinfo"><div class="sdate">📅 ${fmt(s.scheduled_at)}</div>${plB}${accBadge}${noteB}</div>
+      <div class="sright"><span class="badge ${bc}"${badgeTip}>${bl}</span>${noteBtn}${delBtn}</div>
     </div>`;
   }).join('');
   // Barre d'action sticky (toujours présente quand mode sélection actif)
@@ -4598,13 +6705,13 @@ function showPlView(view){ // compatibilité avec le code existant launch modal
   });
 }
 
-// ── Médias : charger les 3 colonnes ────────────────────────────────────────
+// ── Médias : charger les 4 colonnes ────────────────────────────────────────
 async function loadPlaylists(){
-  const [rTg,rSn,rIg,rOld]=await Promise.all([
+  const [rTg,rSn,rIg,rFb,rOld]=await Promise.all([
     fetch('/api/tg/plannings'),fetch('/api/snap/plannings'),
-    fetch('/api/ig/plannings'),fetch('/api/playlists')]);
+    fetch('/api/ig/plannings'),fetch('/api/fb/plannings'),fetch('/api/playlists')]);
   const tgList=await rTg.json(), snList=await rSn.json(),
-        igList=await rIg.json(), oldList=await rOld.json();
+        igList=await rIg.json(), fbList=await rFb.json(), oldList=await rOld.json();
   const today=new Date();
   const legacyTg=oldList.map(pl=>({
     id:pl.id, name:pl.name+'  (legacy)', count:pl.entries.length, _legacy:true,
@@ -4616,19 +6723,21 @@ async function loadPlaylists(){
     })
   }));
   const allTg=[...legacyTg,...tgList];
-  document.getElementById('mPlaylists').textContent=allTg.length+snList.length+igList.length;
+  document.getElementById('mPlaylists').textContent=allTg.length+snList.length+igList.length+fbList.length;
   renderMediaCol('tgMediaCol',allTg,'tg');
   renderMediaCol('snapMediaCol',snList,'snap');
   renderMediaCol('igMediaCol',igList,'ig');
+  renderMediaCol('fbMediaCol',fbList,'fb');
 }
 
 const _plIcons={
   tg:`<svg width="22" height="22" viewBox="0 0 240 240"><circle cx="120" cy="120" r="120" fill="#29a9e0"/><path fill="#fff" d="M20.665 100.68c49.238-21.462 82.064-35.607 98.477-42.437 46.905-19.52 56.629-22.918 62.959-23.04 1.396-.024 4.52.322 6.547 1.97 1.707 1.389 2.177 3.262 2.405 4.576.229 1.315.512 4.306.284 6.647-2.548 26.78-13.558 91.763-19.161 121.77-2.369 12.696-7.038 16.951-11.561 17.36-9.826.906-17.294-6.492-26.828-12.73-14.913-9.766-23.33-15.844-37.82-25.386-16.718-11.016-5.882-17.068 3.638-26.978 2.49-2.583 45.749-41.925 46.575-45.503.104-.447.201-2.113-1.28-2.994-1.481-.88-3.666-.577-5.243-.339-2.233.336-37.78 24.014-106.64 70.58-10.091 6.929-19.232 10.308-27.424 10.132-9.025-.193-26.383-5.108-39.284-9.306-15.832-5.148-28.405-7.875-27.324-16.619.565-4.561 6.867-9.225 18.905-14.003z"/></svg>`,
   snap:`<svg width="22" height="22" viewBox="0 0 48 48"><rect width="48" height="48" rx="9" fill="#FFFC00"/><path fill="#000" d="M24 7c-5.3 0-9.5 4.1-9.5 9.2v1.4c-1 .3-2.2.6-3 .6h-.5c-.11-.02-.2.07-.17.18.28.7 1.46 1.37 2.24 1.65.07.02.13.09.14.17.38 1.76 1.08 3.23 2.1 4.35-1.33.75-2.66 1.55-2.66 2.92 0 .98.84 1.73 2.57 2.18.17.05.3.18.31.35.21.98.58 1.91 1.06 2.47-.47.2-.9.4-.9.7 0 .54.83 1.03 2.33 1.03h1.25c.82.76 1.94 1.22 3.3 1.22s2.48-.46 3.3-1.22h1.25c1.5 0 2.33-.49 2.33-1.03 0-.3-.43-.5-.9-.7.48-.56.85-1.49 1.06-2.47.01-.17.14-.3.31-.35 1.73-.45 2.57-1.2 2.57-2.18 0-1.37-1.33-2.17-2.66-2.92 1.02-1.12 1.72-2.59 2.1-4.35.01-.08.07-.15.14-.17.78-.28 1.96-.95 2.24-1.65.03-.11-.06-.2-.17-.18h-.05c-.78 0-1.9-.27-3-.6v-1.4C33.5 11.1 29.3 7 24 7z"/></svg>`,
-  ig:`<svg width="22" height="22" viewBox="0 0 24 24"><rect width="24" height="24" rx="6" fill="url(#igG2)"/><defs><linearGradient id="igG2" x1="0" y1="24" x2="24" y2="0"><stop offset="0%" stop-color="#f09433"/><stop offset="50%" stop-color="#dc2743"/><stop offset="100%" stop-color="#bc1888"/></linearGradient></defs><rect x="2" y="2" width="20" height="20" rx="5" stroke="#fff" stroke-width="1.5"/><circle cx="12" cy="12" r="4.5" stroke="#fff" stroke-width="1.5"/><circle cx="17.5" cy="6.5" r="1" fill="#fff"/></svg>`
+  ig:`<svg width="22" height="22" viewBox="0 0 24 24"><rect width="24" height="24" rx="6" fill="url(#igG2)"/><defs><linearGradient id="igG2" x1="0" y1="24" x2="24" y2="0"><stop offset="0%" stop-color="#f09433"/><stop offset="50%" stop-color="#dc2743"/><stop offset="100%" stop-color="#bc1888"/></linearGradient></defs><rect x="2" y="2" width="20" height="20" rx="5" stroke="#fff" stroke-width="1.5"/><circle cx="12" cy="12" r="4.5" stroke="#fff" stroke-width="1.5"/><circle cx="17.5" cy="6.5" r="1" fill="#fff"/></svg>`,
+  fb:`<svg width="22" height="22" viewBox="0 0 24 24"><rect width="24" height="24" rx="6" fill="#1877F2"/><path fill="#fff" d="M15.12 12.78h-2.1v7.22h-3V12.78H8.5V10.1h1.52V8.38C10.02 6.4 11.1 5 13.38 5c.97 0 2 .1 2 .1v2.2h-1.13c-.84 0-1.13.52-1.13 1.08V10.1h2.23l-.23 2.68z"/></svg>`
 };
-const _plCopyTargets={tg:['snap','ig'],snap:['tg','ig'],ig:['tg','snap']};
-const _plCopyLabels={tg:'Telegram',snap:'Snapchat',ig:'Instagram'};
+const _plCopyTargets={tg:['snap','ig','fb'],snap:['tg','ig','fb'],ig:['tg','snap','fb'],fb:['tg','snap','ig']};
+const _plCopyLabels={tg:'Telegram',snap:'Snapchat',ig:'Instagram',fb:'Facebook'};
 
 function renderMediaCol(colId,list,type){
   const col=document.getElementById(colId);
@@ -4636,7 +6745,7 @@ function renderMediaCol(colId,list,type){
   col.innerHTML=list.map(pl=>`
     <div style="background:var(--c2);border:1px solid ${pl._legacy?'#3a3000':'var(--b1)'};border-radius:12px;padding:12px 14px;margin-bottom:9px;display:flex;align-items:center;gap:10px;transition:opacity .15s,transform .15s"
          data-plid="${pl.id}" data-pltype="${type}" class="md-pl-row">
-      ${pl._legacy?'':` <div class="md-pl-handle" title="Glisser pour réordonner" style="color:#444;font-size:18px;cursor:grab;flex-shrink:0;padding:0 2px;user-select:none;touch-action:none;line-height:1" onmouseenter="this.style.color='#888'" onmouseleave="this.style.color='#444'">⠿</div>`}
+      <div class="md-pl-handle" title="Glisser pour réordonner" style="color:#444;font-size:18px;cursor:grab;flex-shrink:0;padding:0 2px;user-select:none;touch-action:none;line-height:1" onmouseenter="this.style.color='#888'" onmouseleave="this.style.color='#444'">⠿</div>
       <div style="width:36px;height:36px;border-radius:8px;background:#111;display:flex;align-items:center;justify-content:center;flex-shrink:0;cursor:pointer">
         ${_plIcons[type]||''}
       </div>
@@ -4691,7 +6800,7 @@ function renderMediaCol(colId,list,type){
   document.addEventListener('click',()=>document.querySelectorAll('.md-copy-menu').forEach(m=>m.style.display='none'),{once:false,capture:false});
 
   // ── Drag-and-drop réordonnancement ─────────────────────────────────────────
-  const apiReorder = type==='tg'?'/api/tg/plannings/reorder':type==='snap'?'/api/snap/plannings/reorder':'/api/ig/plannings/reorder';
+  const apiReorder = {tg:'/api/tg/plannings/reorder',snap:'/api/snap/plannings/reorder',ig:'/api/ig/plannings/reorder',fb:'/api/fb/plannings/reorder'}[type]||'/api/tg/plannings/reorder';
   let _plDragSrc=null, _plDragClone=null, _plDropIndicator=null;
 
   col.querySelectorAll('.md-pl-handle').forEach(handle=>{
@@ -4775,7 +6884,8 @@ function renderMediaCol(colId,list,type){
 async function copyPlaylistTo(pl,destType){
   const name=pl.name.replace(' (legacy)','');
   const photos=(pl.photos||[]).map(p=>({filename:p.filename,url:p.url,dt:p.dt||''}));
-  const api=destType==='tg'?'/api/tg/plannings':destType==='snap'?'/api/snap/plannings':'/api/ig/plannings';
+  const apiMap={tg:'/api/tg/plannings',snap:'/api/snap/plannings',ig:'/api/ig/plannings',fb:'/api/fb/plannings'};
+  const api=apiMap[destType]||'/api/tg/plannings';
   const r=await fetch(api,{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({name:name+' (copie)',photos})});
   if(r.ok){toast(`✅ Copié vers ${_plCopyLabels[destType]}`,'ok');loadPlaylists();}
@@ -4808,6 +6918,10 @@ function openCreatePlaylist(type){
     icon.style.background='#2a0a2a';
     icon.innerHTML='<svg width="20" height="20" viewBox="0 0 24 24"><rect width="24" height="24" rx="6" fill="url(#igG3)"/><defs><linearGradient id="igG3" x1="0" y1="24" x2="24" y2="0"><stop offset="0%" stop-color="#f09433"/><stop offset="50%" stop-color="#dc2743"/><stop offset="100%" stop-color="#bc1888"/></linearGradient></defs><rect x="2" y="2" width="20" height="20" rx="5" stroke="#fff" stroke-width="1.5"/><circle cx="12" cy="12" r="4.5" stroke="#fff" stroke-width="1.5"/><circle cx="17.5" cy="6.5" r="1" fill="#fff"/></svg>';
     document.getElementById('cplTitle').textContent='Nouvelle playlist Instagram';
+  } else if(type==='fb'){
+    icon.style.background='#0a1a3a';
+    icon.innerHTML='<svg width="20" height="20" viewBox="0 0 24 24"><rect width="24" height="24" rx="6" fill="#1877F2"/><path fill="#fff" d="M15.12 12.78h-2.1v7.22h-3V12.78H8.5V10.1h1.52V8.38C10.02 6.4 11.1 5 13.38 5c.97 0 2 .1 2 .1v2.2h-1.13c-.84 0-1.13.52-1.13 1.08V10.1h2.23l-.23 2.68z"/></svg>';
+    document.getElementById('cplTitle').textContent='Nouvelle playlist Facebook';
   } else {
     icon.style.background='#3a3000';
     icon.innerHTML='<svg width="20" height="20" viewBox="0 0 48 48"><rect width="48" height="48" rx="9" fill="#FFFC00"/><path fill="#000" d="M24 7c-5.3 0-9.5 4.1-9.5 9.2v1.4c-1 .3-2.2.6-3 .6h-.5c-.11-.02-.2.07-.17.18.28.7 1.46 1.37 2.24 1.65.07.02.13.09.14.17.38 1.76 1.08 3.23 2.1 4.35-1.33.75-2.66 1.55-2.66 2.92 0 .98.84 1.73 2.57 2.18.17.05.3.18.31.35.21.98.58 1.91 1.06 2.47-.47.2-.9.4-.9.7 0 .54.83 1.03 2.33 1.03h1.25c.82.76 1.94 1.22 3.3 1.22s2.48-.46 3.3-1.22h1.25c1.5 0 2.33-.49 2.33-1.03 0-.3-.43-.5-.9-.7.48-.56.85-1.49 1.06-2.47.01-.17.14-.3.31-.35 1.73-.45 2.57-1.2 2.57-2.18 0-1.37-1.33-2.17-2.66-2.92 1.02-1.12 1.72-2.59 2.1-4.35.01-.08.07-.15.14-.17.78-.28 1.96-.95 2.24-1.65.03-.11-.06-.2-.17-.18h-.05c-.78 0-1.9-.27-3-.6v-1.4C33.5 11.1 29.3 7 24 7z"/></svg>';
@@ -4934,7 +7048,8 @@ async function cplSaveOnly(){
   // Sauvegarder sans programmer
   const name=document.getElementById('cplName').value.trim();
   if(!name)return;
-  const api=_cplType==='tg'?'/api/tg/plannings':'/api/snap/plannings';
+  const _plApi={tg:'/api/tg/plannings',snap:'/api/snap/plannings',ig:'/api/ig/plannings',fb:'/api/fb/plannings'};
+  const api=_plApi[_cplType]||'/api/snap/plannings';
   const photos=(_cplSchedule.length?_cplSchedule:_cplPhotos).map(p=>({filename:p.filename,url:p.url,dt:p.dt||''}));
   const r=await fetch(api,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name,photos})});
   if(r.ok){toast(`Playlist "${name}" sauvegardée`,'ok');closeCreatePlaylist();loadPlaylists();}
@@ -4946,23 +7061,27 @@ async function cplConfirm(){
   const name=document.getElementById('cplName').value.trim();
   if(!name)return;
   // 1. Sauvegarder la playlist
-  const api=_cplType==='tg'?'/api/tg/plannings':'/api/snap/plannings';
+  const _plApi2={tg:'/api/tg/plannings',snap:'/api/snap/plannings',ig:'/api/ig/plannings',fb:'/api/fb/plannings'};
+  const api=_plApi2[_cplType]||'/api/snap/plannings';
   const r=await fetch(api,{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({name,photos:_cplSchedule.map(p=>({filename:p.filename,url:p.url,dt:p.dt||''}))} )});
   if(!r.ok){toast('Erreur sauvegarde','err');return;}
-  // 2. Programmer directement dans Telegram/Snap
+  // 2. Charger dans l'onglet correspondant
   if(_cplType==='tg'){
-    // Charger dans l'onglet Telegram et programmer
     photos=_cplSchedule.map(p=>({filename:p.filename,url:p.url,dt:p.dt}));
-    renderPhotos();
-    closeCreatePlaylist();
-    navigateTo('schedule');
+    renderPhotos();closeCreatePlaylist();navigateTo('schedule');
     toast(`✅ Planning chargé ! Sélectionne tes comptes et clique Programmer`,'ok');
+  } else if(_cplType==='ig'){
+    igPhotos=_cplSchedule.map(p=>({filename:p.filename,url:`/uploads/${p.filename}`,dt:p.dt||''}));
+    renderIgPhotos();closeCreatePlaylist();navigateTo('instagram');
+    toast(`✅ Planning Instagram chargé ! Sélectionne tes comptes`,'ok');
+  } else if(_cplType==='fb'){
+    fbPhotos=_cplSchedule.map(p=>({filename:p.filename,url:`/uploads/${p.filename}`,dt:p.dt||''}));
+    renderFbPhotos();closeCreatePlaylist();navigateTo('facebook');
+    toast(`✅ Planning Facebook chargé ! Sélectionne tes comptes`,'ok');
   } else {
     snapPhotos=_cplSchedule.map(p=>({filename:p.filename,url:p.url,dt:p.dt||''}));
-    renderSnapPhotos();
-    closeCreatePlaylist();
-    navigateTo('snapchat');
+    renderSnapPhotos();closeCreatePlaylist();navigateTo('snapchat');
     toast(`✅ Planning Snapchat chargé ! Sélectionne tes comptes`,'ok');
   }
   loadPlaylists();
@@ -4976,8 +7095,10 @@ function openMediaDetail(pl,type){
   const badge=document.getElementById('mdBadge');
   if(type==='tg'){badge.textContent=pl._legacy?'Telegram (ancienne)':'Telegram';badge.style.background='#1a3a5c';badge.style.color='#2AABEE';}
   else if(type==='ig'){badge.textContent='Instagram';badge.style.background='#2a0a2a';badge.style.color='#c084fc';}
+  else if(type==='fb'){badge.textContent='Facebook';badge.style.background='#0a1a3a';badge.style.color='#60a5fa';}
   else{badge.textContent='Snapchat';badge.style.background='#3a3000';badge.style.color='#f5c518';}
-  document.getElementById('mdBtnLoad').textContent=type==='tg'?'📱 Charger dans Telegram':type==='ig'?'📸 Charger dans Instagram':'👻 Charger dans Snapchat';
+  const _loadLabels={tg:'📱 Charger dans Telegram',ig:'📸 Charger dans Instagram',fb:'👍 Charger dans Facebook',snap:'👻 Charger dans Snapchat'};
+  document.getElementById('mdBtnLoad').textContent=_loadLabels[type]||_loadLabels.snap;
   renderMdGrid();
   document.getElementById('mediaListView').style.display='none';
   document.getElementById('mediaDetailView').style.display='';
@@ -4988,10 +7109,43 @@ document.getElementById('mdBtnBack').addEventListener('click',()=>{
   document.getElementById('mediaListView').style.display='';
 });
 
+document.getElementById('mdTitle').addEventListener('click',()=>{
+  if(!mdCurrentPl) return;
+  const titleEl=document.getElementById('mdTitle');
+  const currentName=mdCurrentPl.name;
+  const inp=document.createElement('input');
+  inp.value=currentName;
+  inp.style.cssText='background:#1a1a1a;border:1px solid #444;color:#fff;border-radius:5px;padding:3px 8px;font-size:.88rem;font-weight:700;width:220px;outline:none';
+  titleEl.innerHTML='';
+  titleEl.appendChild(inp);
+  inp.focus();inp.select();
+  const save=async()=>{
+    const newName=inp.value.trim();
+    if(!newName||newName===currentName){
+      titleEl.innerHTML=currentName+'<span style="font-size:.7rem;opacity:.4;font-weight:400">✏️</span>';
+      return;
+    }
+    const apiMap={tg:'/api/tg/plannings',snap:'/api/snap/plannings',ig:'/api/ig/plannings',fb:'/api/fb/plannings'};
+    const base=apiMap[mdCurrentType]||'/api/tg/plannings';
+    const r=await fetch(`${base}/${mdCurrentPl.id}`,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:newName})});
+    if(r.ok){
+      mdCurrentPl.name=newName;
+      titleEl.innerHTML=newName+'<span style="font-size:.7rem;opacity:.4;font-weight:400">✏️</span>';
+      loadPlaylists();
+      toast('✅ Playlist renommée','ok');
+    } else {
+      titleEl.innerHTML=currentName+'<span style="font-size:.7rem;opacity:.4;font-weight:400">✏️</span>';
+      toast('Erreur renommage','err');
+    }
+  };
+  inp.addEventListener('keydown',e=>{if(e.key==='Enter')save();if(e.key==='Escape'){titleEl.innerHTML=currentName+'<span style="font-size:.7rem;opacity:.4;font-weight:400">✏️</span>';}});
+  inp.addEventListener('blur',save);
+});
+
 document.getElementById('mdBtnDelete').addEventListener('click',async()=>{
   if(!confirm('Supprimer ce planning définitivement ?'))return;
-  const api=mdCurrentPl._legacy?`/api/playlists`
-    :(mdCurrentType==='tg'?'/api/tg/plannings':mdCurrentType==='ig'?'/api/ig/plannings':'/api/snap/plannings');
+  const _apiMap={tg:'/api/tg/plannings',ig:'/api/ig/plannings',fb:'/api/fb/plannings',snap:'/api/snap/plannings'};
+  const api=mdCurrentPl._legacy?`/api/playlists`:(_apiMap[mdCurrentType]||'/api/snap/plannings');
   await fetch(`${api}/${mdCurrentPl.id}`,{method:'DELETE'});
   toast('Planning supprimé');
   document.getElementById('mediaDetailView').style.display='none';
@@ -5001,7 +7155,8 @@ document.getElementById('mdBtnDelete').addEventListener('click',async()=>{
 
 document.getElementById('mdBtnSave').addEventListener('click',async()=>{
   // Sauvegarde toujours dans le nouveau format TG (migration automatique des anciennes)
-  const api=mdCurrentType==='tg'?'/api/tg/plannings':mdCurrentType==='ig'?'/api/ig/plannings':'/api/snap/plannings';
+  const _apiMap2={tg:'/api/tg/plannings',ig:'/api/ig/plannings',fb:'/api/fb/plannings',snap:'/api/snap/plannings'};
+  const api=_apiMap2[mdCurrentType]||'/api/snap/plannings';
   // Si ancienne playlist, supprimer l'originale en même temps
   if(mdCurrentPl._legacy) await fetch(`/api/playlists/${mdCurrentPl.id}`,{method:'DELETE'});
   else await fetch(`${api}/${mdCurrentPl.id}`,{method:'DELETE'});
@@ -5024,6 +7179,10 @@ document.getElementById('mdBtnLoad').addEventListener('click',()=>{
     igPhotos=mdPhotos.map(p=>({filename:p.filename,url:`/uploads/${p.filename}`,dt:p.dt||''}));
     renderIgPhotos();navigateTo('instagram');
     toast('Planning chargé dans Instagram','ok');
+  } else if(mdCurrentType==='fb'){
+    fbPhotos=mdPhotos.map(p=>({filename:p.filename,url:`/uploads/${p.filename}`,dt:p.dt||''}));
+    renderFbPhotos();navigateTo('facebook');
+    toast('Planning chargé dans Facebook','ok');
   } else {
     snapPhotos=mdPhotos.map(p=>({filename:p.filename,url:p.url,dt:p.dt||''}));
     renderSnapPhotos();navigateTo('snapchat');
@@ -5236,18 +7395,55 @@ function _mdOnEnd(){
 function switchSnapTab(tab){
   document.querySelectorAll('.snap-tab').forEach(t=>t.classList.toggle('active',t.dataset.snap===tab));
   document.querySelectorAll('.snap-subview').forEach(v=>v.classList.toggle('active',v.id==='snap'+(tab==='stories'?'Stories':'Spotlight')));
-  if(tab==='spotlight'){renderSplAccChecks();loadSplPool();loadSplList();}
+  const isSpotlight = tab==='spotlight';
+  // Panneau droit : basculer entre Stories et Spotlights
+  const slist=document.getElementById('slist');
+  const splRpList=document.getElementById('splRpList');
+  const rpSchedTabs=document.getElementById('rpSchedTabs');
+  const rpSplTabs=document.getElementById('rpSplTabs');
+  const rpTitle=document.getElementById('rpTitle');
+  const btnSnapDeleteAll=document.getElementById('btnSnapDeleteAll');
+  const btnSelMode=document.getElementById('btnSelMode');
+  const btnCloneRP=document.getElementById('btnCloneRP');
+  const btnSplRpRefresh=document.getElementById('btnSplRpRefresh');
+  if(isSpotlight){
+    slist.style.display='none';
+    splRpList.style.display='';
+    rpSchedTabs.style.display='none';
+    rpSplTabs.style.display='grid';
+    rpTitle.textContent='🎬 Spotlights';
+    btnSnapDeleteAll.style.display='none';
+    btnSelMode.style.display='none';
+    btnCloneRP.style.display='none';
+    btnSplRpRefresh.style.display='';
+    renderSplAccChecks();loadSplPool();loadSplList();
+  } else {
+    slist.style.display='';
+    splRpList.style.display='none';
+    rpSchedTabs.style.display='grid';
+    rpSplTabs.style.display='none';
+    rpTitle.textContent='👻 Snapchat';
+    btnSnapDeleteAll.style.display='';
+    btnSelMode.style.display='';
+    btnCloneRP.style.display='';
+    btnSplRpRefresh.style.display='none';
+    loadSnapScheduled();
+  }
 }
 
 // ── Spotlight ──────────────────────────────────────────────────────────────
 let splVideos=[];
 function renderSplAccChecks(){
   const el=document.getElementById('splAccChecks');
-  if(!el||el.querySelector('label'))return;
+  if(!el)return;
+  if(!snapAccounts.length){el.innerHTML='<div class="no-acc-warn">Aucun compte Snap configuré</div>';return;}
+  // Mémorise les IDs déjà cochés avant de re-rendre
+  const prevChecked=new Set([...el.querySelectorAll('input:checked')].map(i=>i.dataset.id));
   el.innerHTML=snapAccounts.map(a=>`
-    <label class="acc-check sel"><input type="checkbox" data-id="${a.id}" checked>
-    <div class="acc-check-dot" style="background:#f5c518"></div>
-    <span class="acc-check-name">${a.username}</span></label>`).join('');
+    <label class="acc-check${(prevChecked.size===0||prevChecked.has(a.id))?' sel':''}">
+      <input type="checkbox" data-id="${a.id}" ${(prevChecked.size===0||prevChecked.has(a.id))?'checked':''}>
+      <div class="acc-check-dot" style="background:#f5c518"></div>
+      <span class="acc-check-name">${a.username}</span></label>`).join('');
   el.querySelectorAll('.acc-check').forEach(l=>{const cb=l.querySelector('input');cb.addEventListener('change',()=>{l.classList.toggle('sel',cb.checked);updateSplBtn();});});
   updateSplBtn();
 }
@@ -5264,22 +7460,121 @@ function updateSplBtn(){
 document.getElementById('splCount').addEventListener('input',updateSplBtn);
 
 // ── Spotlight dossiers locaux ────────────────────────────────────────────────
-const _VIDEO_EXTS_SPL = new Set(['.mp4','.mov','.avi','.m4v','.3gp','.webm']);
+const _VIDEO_EXTS_SPL = new Set(['.mp4','.mov','.moov','.avi','.m4v','.3gp','.webm','.mkv']);
 let _splSrcDir = null;
 let _splDstDir = null;
-let _splAllHandles = []; // tous les FileSystemFileHandle du dossier source
+let _splAllHandles = [];
+
+// ── IndexedDB : persistance des dossiers Spotlight par profil ────────────────
+const _splDB = (()=>{
+  return new Promise((res,rej)=>{
+    const req = indexedDB.open('splFolders',1);
+    req.onupgradeneeded = e => e.target.result.createObjectStore('dirs');
+    req.onsuccess = e => res(e.target.result);
+    req.onerror   = ()=> rej();
+  });
+})();
+
+async function _splSaveHandle(key, handle){
+  try{
+    const db = await _splDB;
+    const tx = db.transaction('dirs','readwrite');
+    tx.objectStore('dirs').put(handle, key);
+  }catch(_){}
+}
+
+async function _splLoadHandle(key){
+  try{
+    const db = await _splDB;
+    return await new Promise((res,rej)=>{
+      const tx = db.transaction('dirs','readonly');
+      const req = tx.objectStore('dirs').get(key);
+      req.onsuccess = ()=> res(req.result||null);
+      req.onerror   = ()=> res(null);
+    });
+  }catch(_){ return null; }
+}
+
+async function _splRestoreFolders(){
+  const pid = _activeProfileId||'default';
+  const [srcH, dstH] = await Promise.all([
+    _splLoadHandle('src_'+pid), _splLoadHandle('dst_'+pid)
+  ]);
+  if(srcH){
+    // Vérifier/demander la permission silencieusement
+    try{
+      const perm = await srcH.queryPermission({mode:'readwrite'});
+      if(perm==='granted'||perm==='prompt'){
+        _splSrcDir = srcH;
+        document.getElementById('splPickSrc').textContent='📥 '+srcH.name;
+        document.getElementById('splPickDst').disabled=false;
+      }
+    }catch(_){}
+  }
+  if(dstH){
+    try{
+      const perm = await dstH.queryPermission({mode:'readwrite'});
+      if(perm==='granted'||perm==='prompt'){
+        _splDstDir = dstH;
+        document.getElementById('splPickDst').textContent='📤 '+dstH.name;
+      }
+    }catch(_){}
+  }
+  if(_splSrcDir) await _splScanDir();
+}
 
 async function _splScanDir(){
   _splAllHandles = [];
   const st = document.getElementById('splFolderStatus');
-  if(!_splSrcDir){st.textContent='';return;}
-  for await(const [name,h] of _splSrcDir.entries()){
-    const ext = name.slice(name.lastIndexOf('.')).toLowerCase();
-    if(h.kind==='file' && _VIDEO_EXTS_SPL.has(ext)) _splAllHandles.push(h);
+  const dbg = document.getElementById('splDebugInfo');
+  if(!_splSrcDir){st.textContent='';if(dbg)dbg.style.display='none';return;}
+  // Demander la permission si nécessaire (ne pas bloquer si refusée — la lecture peut quand même fonctionner)
+  try{
+    const perm = await _splSrcDir.requestPermission({mode:'readwrite'});
+    if(perm!=='granted'){
+      st.textContent='⚠️ Permission refusée — essai de lecture en lecture seule…';
+      st.style.color='#f5c518';
+    }
+  }catch(_){}
+  // Scan récursif (3 niveaux)
+  let _allFound = [], _skippedExts = {};
+  async function _scanDir(dir, depth){
+    try{
+      for await(const [name,h] of dir.entries()){
+        if(h.kind==='file'){
+          const dotIdx = name.lastIndexOf('.');
+          const ext = dotIdx>=0 ? name.slice(dotIdx).toLowerCase() : '';
+          if(_VIDEO_EXTS_SPL.has(ext)){
+            _splAllHandles.push(h);
+            _allFound.push(name);
+          } else {
+            _skippedExts[ext||'(sans ext)'] = (_skippedExts[ext||'(sans ext)']||0)+1;
+          }
+        } else if(h.kind==='directory' && depth < 3){
+          try{ await _scanDir(h, depth+1); }catch(_){}
+        }
+      }
+    }catch(e){ if(dbg){dbg.style.display='';dbg.textContent='Erreur scan: '+e.message;} }
   }
+  await _scanDir(_splSrcDir, 1);
   const dstName = _splDstDir ? ' · 📤 dest: '+_splDstDir.name : ' · ⚠️ choisir dossier dest.';
-  st.textContent = `📥 ${_splAllHandles.length} vidéo(s) disponible(s) dans "${_splSrcDir.name}"${dstName}`;
+  st.textContent = `📥 ${_splAllHandles.length} vidéo(s) dans "${_splSrcDir.name}"${dstName}`;
   st.style.color = _splAllHandles.length>0 ? '#6fcf6f' : '#e23744';
+  // Debug: si 0 vidéos trouvées, montrer ce qui a été trouvé
+  if(dbg){
+    const skippedList = Object.entries(_skippedExts).map(([k,v])=>`${k}(${v})`).join(', ');
+    const totalOther = Object.values(_skippedExts).reduce((a,b)=>a+b,0);
+    if(_splAllHandles.length===0 && totalOther>0){
+      dbg.style.display='';
+      dbg.textContent=`⚠️ Aucune vidéo reconnue. Fichiers trouvés : ${skippedList}`;
+    } else if(_splAllHandles.length>0){
+      dbg.style.display='';
+      dbg.textContent=`✓ Vidéos: ${_allFound.slice(0,3).join(', ')}${_allFound.length>3?` +${_allFound.length-3} autres`:''}`;
+    } else {
+      dbg.style.display='';
+      dbg.textContent='⚠️ Dossier vide ou aucun fichier détecté.';
+    }
+  }
   updateSplBtn();
 }
 
@@ -5288,7 +7583,29 @@ document.getElementById('splPickSrc').addEventListener('click',async()=>{
     _splSrcDir = await window.showDirectoryPicker({mode:'readwrite',startIn:'downloads'});
     document.getElementById('splPickSrc').textContent='📥 '+_splSrcDir.name;
     document.getElementById('splPickDst').disabled=false;
+    await _splSaveHandle('src_'+(_activeProfileId||'default'), _splSrcDir);
     await _splScanDir();
+  }catch(e){if(e.name!=='AbortError')toast('Erreur: '+e.message,'err');}
+});
+
+// Sélection de fichiers individuels (alternative si le dossier pose problème)
+document.getElementById('splPickFiles').addEventListener('click',async()=>{
+  try{
+    const files = await window.showOpenFilePicker({
+      multiple: true,
+      types:[{description:'Vidéos',accept:{'video/*':['.mp4','.mov','.moov','.avi','.m4v','.3gp','.webm','.mkv']}}]
+    });
+    if(!files||!files.length) return;
+    _splAllHandles = files;
+    _splSrcDir = null; // pas de dossier source, fichiers directs
+    const st = document.getElementById('splFolderStatus');
+    const dbg = document.getElementById('splDebugInfo');
+    st.textContent = `📥 ${files.length} vidéo(s) sélectionnée(s) manuellement`;
+    st.style.color = '#6fcf6f';
+    if(dbg){dbg.style.display='';dbg.textContent=files.slice(0,3).map(f=>f.name).join(', ')+(files.length>3?` +${files.length-3} autres`:'');}
+    document.getElementById('splPickDst').disabled=false;
+    document.getElementById('splPickSrc').textContent='📁 Choisir dossier source';
+    updateSplBtn();
   }catch(e){if(e.name!=='AbortError')toast('Erreur: '+e.message,'err');}
 });
 
@@ -5296,6 +7613,7 @@ document.getElementById('splPickDst').addEventListener('click',async()=>{
   try{
     _splDstDir = await window.showDirectoryPicker({mode:'readwrite',startIn:'downloads'});
     document.getElementById('splPickDst').textContent='📤 '+_splDstDir.name;
+    await _splSaveHandle('dst_'+(_activeProfileId||'default'), _splDstDir);
     await _splScanDir();
   }catch(e){if(e.name!=='AbortError')toast('Erreur: '+e.message,'err');}
 });
@@ -5345,17 +7663,12 @@ document.getElementById('splBtnSchedule').addEventListener('click',async()=>{
   const btn=document.getElementById('splBtnSchedule');
   btn.disabled=true;
 
-  // Dossiers locaux configurés → upload aléatoire N vidéos puis déplacer vers dest
-  if(_splSrcDir && _splDstDir){
-    if(_splAllHandles.length===0){
-      toast('Aucune vidéo dans le dossier source','err');
-      updateSplBtn();btn.innerHTML='&#x1F3AC; Programmer les Spotlight';return;
-    }
+  // Fichiers disponibles localement (dossier OU sélection manuelle)
+  if(_splAllHandles.length > 0){
     if(_splAllHandles.length < total){
       toast(`Seulement ${_splAllHandles.length} vidéo(s) disponible(s), ${total} demandée(s)`,'err');
       updateSplBtn();btn.innerHTML='&#x1F3AC; Programmer les Spotlight';return;
     }
-    // Sélection aléatoire de N vidéos
     const shuffled=[..._splAllHandles].sort(()=>Math.random()-0.5);
     const picked=shuffled.slice(0,total);
     btn.innerHTML='&#x23F3; Lecture des vidéos...';
@@ -5371,27 +7684,37 @@ document.getElementById('splBtnSchedule').addEventListener('click',async()=>{
         body:JSON.stringify({account_ids:accIds,total_videos:total})});
       if(!rs.ok)throw new Error((await rs.json()).detail||'Erreur programmation');
       const ds=await rs.json();
-      // Déplacer les vidéos utilisées vers dossier destination
-      btn.innerHTML='&#x23F3; Déplacement vers DEJA POSTEES...';
-      let moved=0;
-      for(const h of picked){
-        try{
-          const f=await h.getFile();
-          const buf=await f.arrayBuffer();
-          const dstFh=await _splDstDir.getFileHandle(h.name,{create:true});
-          const wr=await dstFh.createWritable();await wr.write(buf);await wr.close();
-          await _splSrcDir.removeEntry(h.name);
-          moved++;
-        }catch(e){console.warn('Move failed:',h.name,e);}
+      // Déplacer vers dossier dest si disponible
+      if(_splSrcDir && _splDstDir){
+        btn.innerHTML='&#x23F3; Déplacement vers DEJA POSTEES...';
+        let moved=0;
+        for(const h of picked){
+          try{
+            const f=await h.getFile();
+            const buf=await f.arrayBuffer();
+            const dstFh=await _splDstDir.getFileHandle(h.name,{create:true});
+            const wr=await dstFh.createWritable();await wr.write(buf);await wr.close();
+            await _splSrcDir.removeEntry(h.name);
+            moved++;
+          }catch(e){console.warn('Move failed:',h.name,e);}
+        }
+        toast(`&#x2705; ${ds.count} Spotlight programmé(s) · ${moved} vidéo(s) déplacée(s) vers "${_splDstDir.name}"`,'ok');
+        await _splScanDir();
+      } else {
+        // Sélection manuelle : retirer les fichiers uploadés de la liste locale
+        const pickedNames=new Set(picked.map(h=>h.name));
+        _splAllHandles=_splAllHandles.filter(h=>!pickedNames.has(h.name));
+        const st=document.getElementById('splFolderStatus');
+        if(st) st.textContent=`📥 ${_splAllHandles.length} vidéo(s) restante(s)`;
+        toast(`&#x2705; ${ds.count} Spotlight programmé(s) · ${picked.length} vidéo(s) envoyée(s)`,'ok');
       }
-      toast(`&#x2705; ${ds.count} Spotlight programmé(s) · ${moved} vidéo(s) déplacée(s) vers "${_splDstDir.name}"`,'ok');
-      await _splScanDir();loadSplPool();loadSplList();
+      loadSplPool();loadSplList();
     }catch(e){toast(`Erreur: ${e.message}`,'err');}
     finally{updateSplBtn();btn.innerHTML='&#x1F3AC; Programmer les Spotlight';}
     return;
   }
 
-  // Pas de dossiers locaux → pool VPS existant
+  // Aucun fichier local → pool VPS existant
   btn.innerHTML='&#x23F3; Envoi en cours...';
   try{
     const r=await fetch('/api/snap/spotlight',{method:'POST',headers:{'Content-Type':'application/json'},
@@ -5404,34 +7727,74 @@ document.getElementById('splBtnSchedule').addEventListener('click',async()=>{
   finally{updateSplBtn();btn.innerHTML='&#x1F3AC; Programmer les Spotlight';}
 });
 
+let _splFilter='all';
+function _setSplFilter(f){
+  _splFilter=f;
+  document.querySelectorAll('[data-splf]').forEach(b=>b.classList.toggle('sched-tab-act',b.dataset.splf===f));
+  _renderSplListFromCache();
+}
+
+function _splStatusInfo(s){
+  const now=new Date();
+  const dt=new Date(s.scheduled_at);
+  if(s.status==='error') return {cls:'be',lbl:'Erreur'};
+  if(s.status==='done')  return {cls:'bd',lbl:'Envoyé'};
+  // scheduled ou pending : différencier futur / passé
+  if(dt>now) return {cls:'bp',lbl:'Programmé'};
+  return {cls:'bp',lbl:'En attente'};
+}
+
+let _splListCache=[];
+function _renderSplListFromCache(){
+  const _splSp={pending:0,scheduled:0,posting:0,error:1,done:2};
+  let list=_splListCache;
+  if(_splFilter==='pending') list=list.filter(s=>s.status!=='done'&&s.status!=='error');
+  else if(_splFilter==='done') list=list.filter(s=>s.status==='done'||s.status==='error');
+  const html = list.length===0
+    ? `<div class="empty"><div class="empty-ico">&#x1F3AC;</div>Aucun Spotlight${_splFilter!=='all'?' dans cette catégorie':' programmé'}</div>`
+    : list.slice().sort((a,b)=>{const pa=_splSp[a.status]??1,pb=_splSp[b.status]??1;if(pa!==pb)return pa-pb;return a.scheduled_at.localeCompare(b.scheduled_at);}).map(s=>{
+        const si=_splStatusInfo(s);
+        const thumb=s.thumb_url
+          ? `<img src="${s.thumb_url}" style="width:52px;height:68px;border-radius:8px;object-fit:cover;flex-shrink:0" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'">`
+          + `<div style="width:52px;height:68px;border-radius:8px;background:#1a1a1a;display:none;align-items:center;justify-content:center;font-size:22px;flex-shrink:0">&#x1F3AC;</div>`
+          : `<div style="width:52px;height:68px;border-radius:8px;background:#1a1a1a;display:flex;align-items:center;justify-content:center;font-size:22px;flex-shrink:0">&#x1F3AC;</div>`;
+        return `<div class="sitem">
+          <div style="display:flex;position:relative;flex-shrink:0">${thumb}</div>
+          <div class="sinfo">
+            <div class="sdate">&#x1F4C5; ${fmt(s.scheduled_at)}</div>
+            <div class="saccs" style="color:#f5c518">@${s.username}</div>
+            <div style="font-size:.62rem;color:var(--t3);margin-top:1px">&#x1F3AF; Spotlight</div>
+          </div>
+          <div class="sright">
+            <span class="badge ${si.cls}">${si.lbl}</span>
+            <button class="sdel2" data-id="${s.id}">&#x2715;</button>
+          </div>
+        </div>`;
+      }).join('');
+  [document.getElementById('splList'), document.getElementById('splRpList')].forEach(el=>{
+    if(!el)return;
+    el.innerHTML=html;
+    el.querySelectorAll('.sdel2').forEach(b=>b.addEventListener('click',async()=>{
+      if(!confirm('Supprimer ?'))return;
+      await fetch(`/api/snap/spotlight/${b.dataset.id}`,{method:'DELETE'});toast('Supprimé');loadSplList();
+    }));
+  });
+}
+
 async function loadSplList(){
   const r=await fetch('/api/snap/spotlight');const list=await r.json();
-  const el=document.getElementById('splList');
+  _splListCache=list;
   document.getElementById('splMTotal').textContent=list.length;
   document.getElementById('splMDone').textContent=list.filter(s=>s.status==='done').length;
   document.getElementById('splMErr').textContent=list.filter(s=>s.status==='error').length;
-  if(!list.length){el.innerHTML='<div class="empty"><div class="empty-ico">&#x1F3AC;</div>Aucun Spotlight programmé</div>';return;}
-  const bmap={pending:'bp',done:'bd',error:'be'};
-  const _splSp={pending:0,posting:0,error:1,done:2};
-  el.innerHTML=list.slice().sort((a,b)=>{const pa=_splSp[a.status]??1,pb=_splSp[b.status]??1;if(pa!==pb)return pa-pb;return a.scheduled_at.localeCompare(b.scheduled_at);}).map(s=>`
-    <div class="sitem">
-      <div style="width:52px;height:68px;border-radius:8px;background:#1a1a1a;display:flex;align-items:center;justify-content:center;font-size:22px;flex-shrink:0">&#x1F3AC;</div>
-      <div class="sinfo">
-        <div class="sdate">&#x1F4C5; ${fmt(s.scheduled_at)}</div>
-        <div class="saccs" style="color:#f5c518">@${s.username}</div>
-        <div style="font-size:.62rem;color:var(--t3);margin-top:1px">&#x1F3AF; Spotlight &nbsp;·&nbsp; ${s.filename}</div>
-      </div>
-      <div class="sright">
-        <span class="badge ${bmap[s.status]||'bp'}">${s.status==='done'?'Envoyé':s.status==='error'?'Erreur':'Attente'}</span>
-        <button class="sdel2" data-id="${s.id}">&#x2715;</button>
-      </div>
-    </div>`).join('');
-  el.querySelectorAll('.sdel2').forEach(b=>b.addEventListener('click',async()=>{
-    if(!confirm('Supprimer ?'))return;
-    await fetch(`/api/snap/spotlight/${b.dataset.id}`,{method:'DELETE'});toast('Supprimé');loadSplList();
-  }));
+  _renderSplListFromCache();
 }
 document.getElementById('splBtnRefresh').addEventListener('click',loadSplList);
+document.getElementById('btnSplRpRefresh').addEventListener('click',loadSplList);
+document.getElementById('btnRpRefresh').addEventListener('click',()=>{
+  if(currentPage==='instagram')loadIgScheduled();
+  else if(currentPage==='facebook')loadFbScheduled();
+});
 
 // ── Stats ──────────────────────────────────────────────────────────────────
 
@@ -5567,7 +7930,12 @@ function lcDrawChart(canvasEl, tooltipEl, seriesData, labels, panOffset){
     canvasEl.addEventListener('mousedown',lcDragStart);
     canvasEl.addEventListener('mousemove',e=>{lcHover(canvasEl,tooltipEl,e);lcDragMove(canvasEl,tooltipEl,e);});
     canvasEl.addEventListener('mouseup',lcDragEnd);
-    canvasEl.addEventListener('mouseleave',()=>{if(tooltipEl)tooltipEl.style.opacity='0';lcDragEnd();});
+    canvasEl.addEventListener('mouseleave',()=>{
+      if(tooltipEl)tooltipEl.style.opacity='0';
+      lcDragEnd();
+      const d=canvasEl._lcData;
+      if(d)lcDrawChart(canvasEl,null,d.fullSeries,d.fullLabels,canvasEl._panOffset);
+    });
   }
 }
 
@@ -5618,8 +7986,7 @@ function lcHover(canvas,tip,e){
   const x=pl.left+(labels.length===1?cW/2:(ci/(labels.length-1))*cW);
   lcDrawChart(canvas,null,fullSeries,fullLabels,canvas._panOffset);
   const ctx=canvas.getContext('2d');
-  const dpr=window.devicePixelRatio||1;
-  ctx.scale(dpr,dpr);
+  // lcDrawChart already applied ctx.scale(dpr,dpr) — do NOT scale again
   ctx.strokeStyle='rgba(255,255,255,.3)';ctx.lineWidth=1;ctx.setLineDash([5,4]);
   ctx.beginPath();ctx.moveTo(x,pl.top);ctx.lineTo(x,pl.top+cH);ctx.stroke();
   ctx.setLineDash([]);
@@ -5722,6 +8089,7 @@ function buildTgChartData(viewsList){
     const total=(s.accounts||[]).reduce((sum,a)=>sum+(a.views||0),0);
     byDay[day]=(byDay[day]||0)+total;
   });
+  const _tk=new Date().toISOString().slice(0,10);if(!(_tk in byDay))byDay[_tk]=0;
   const labels=Object.keys(byDay).sort();
   const series=labels.length?[{name:'Vues totales',values:labels.map(d=>byDay[d]||0)}]:[];
   return{labels,series};
@@ -5736,6 +8104,7 @@ function buildSnapChartData(snapList){
     const count=Object.values(s.results||{}).filter(r=>r.status==='done').length||1;
     byDay[day]=(byDay[day]||0)+count;
   });
+  const _tk=new Date().toISOString().slice(0,10);if(!(_tk in byDay))byDay[_tk]=0;
   const labels=Object.keys(byDay).sort();
   const series=labels.length?[{name:'Posts envoyés',values:labels.map(d=>byDay[d]||0)}]:[];
   return{labels,series};
@@ -5790,10 +8159,22 @@ async function loadStats(){
       // Chart par jour
       setTimeout(()=>{
         const byDay={};
+        // Pré-remplir tous les jours de la plage avec 0 (évite les trous)
+        if(_statsDateRange!=='all'){
+          const rng=getDateRange(_statsDateRange);
+          if(rng){
+            for(let d=new Date(rng.from);d<rng.to;d=new Date(d.getTime()+86400000)){
+              byDay[d.toISOString().slice(0,10)]=0;
+            }
+          }
+        }
         histFiltered.forEach(s=>{
           const day=(s.scheduled_at||'').slice(0,10); if(!day)return;
           s.accounts.forEach(a=>{ byDay[day]=(byDay[day]||0)+(a.views||0); });
         });
+        // Toujours inclure aujourd'hui (même sans données)
+        const _todayKey=new Date().toISOString().slice(0,10);
+        if(!(_todayKey in byDay)) byDay[_todayKey]=0;
         const labels=Object.keys(byDay).sort();
         const series=labels.length?[{name:'Vues totales',values:labels.map(d=>byDay[d]||0)}]:[];
         const canvas=document.getElementById('lcTgCanvas');
@@ -5852,7 +8233,22 @@ async function loadStats(){
             const totalR=rows.reduce((s,x)=>s+(x.reactions||0),0);
             const pubAt=first.date?new Date(first.date).toLocaleTimeString('fr-FR',{hour:'2-digit',minute:'2-digit'}):'—';
             const expAt=first.expire?new Date(first.expire).toLocaleTimeString('fr-FR',{hour:'2-digit',minute:'2-digit'}):'—';
+            // Trouver la photo via story_id dans _tgScheduled
+            let thumbUrl='';
+            if(first.story_id&&_tgScheduled){
+              for(const sch of _tgScheduled){
+                const res=sch.results||{};
+                for(const r of Object.values(res)){
+                  if(r.story_id===first.story_id&&sch.filename){
+                    thumbUrl=`/uploads/${sch.filename}`;break;
+                  }
+                }
+                if(thumbUrl)break;
+              }
+            }
             liveHtml+=`<div class="live-story-row">
+              ${thumbUrl?`<img src="${thumbUrl}" style="width:38px;height:38px;border-radius:6px;object-fit:cover;flex-shrink:0;margin-right:8px" onerror="this.style.display='none'">`:
+                `<div style="width:38px;height:38px;border-radius:6px;background:#1a1a1a;flex-shrink:0;margin-right:8px;display:flex;align-items:center;justify-content:center;font-size:.9rem">📷</div>`}
               <div style="flex:1;min-width:0">
                 <div style="font-size:.72rem;color:var(--t2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${rows.map(r=>r.acc_name).join(' · ')}</div>
                 <div style="font-size:.63rem;color:var(--t3)">publiée ${pubAt} · expire ${expAt}</div>
@@ -5978,7 +8374,7 @@ function _renderSnapLocalStats(el, snapFiltered, fallback){
   function getThumbUrl(s){
     // Utiliser cloudinary_url pour générer une miniature (premier frame)
     if(s.cloudinary_url){
-      return s.cloudinary_url.replace('/video/upload/','/video/upload/so_0,w_120,h_200,c_fill,f_jpg/').replace(/\.mp4$/,'.jpg');
+      return s.cloudinary_url.replace('/video/upload/','/video/upload/so_0,w_120,h_200,c_fill,f_jpg/').replace(/\.(mp4|mov|avi|mkv|m4v|webm)$/i,'.jpg');
     }
     if(s.filename) return '/uploads/'+s.filename;
     return null;
@@ -6257,7 +8653,9 @@ async function loadSnapAccounts(){
   el.innerHTML=snapAccounts.map(a=>`
     <label class="acc-check sel">
       <input type="checkbox" data-id="${a.id}" checked>
-      <div class="acc-check-dot" style="background:#f5c518"></div>
+      <img src="/api/social/avatar/snap/${encodeURIComponent(a.username)}"
+           style="width:22px;height:22px;border-radius:50%;object-fit:cover;flex-shrink:0"
+           onerror="this.style.display='none'">
       <span class="acc-check-name">${a.username}</span>
     </label>`).join('');
   el.querySelectorAll('.acc-check').forEach(l=>{
@@ -6265,6 +8663,8 @@ async function loadSnapAccounts(){
     cb.addEventListener('change',()=>{l.classList.toggle('sel',cb.checked);updateSnapBtn();});
   });
   updateSnapBtn();
+  // Mettre à jour les checkboxes Spotlight aussi (même liste de comptes)
+  renderSplAccChecks();
 }
 function getSnapSelIds(){return [...document.querySelectorAll('#snapAccChecks input:checked')].map(i=>i.dataset.id);}
 function updateSnapBtn(){document.getElementById('snapBtnSchedule').disabled=!(snapPhotos.length>0&&getSnapSelIds().length>0);}
@@ -6403,7 +8803,12 @@ async function loadSnapScheduled(){
   if(!list.length){el.innerHTML='<div class="empty"><div class="empty-ico">&#x1F47B;</div>Aucun post Snapchat programme</div>';return;}
   const bmap={pending:'bp En attente',done:'bd Envoye',error:'be Erreur',partial:'bpar Partiel'};
   const _ssp={pending:0,posting:0,partial:1,error:1,done:2};
-  el.innerHTML=list.slice().sort((a,b)=>{const pa=_ssp[a.status]??1,pb=_ssp[b.status]??1;if(pa!==pb)return pa-pb;return a.scheduled_at.localeCompare(b.scheduled_at);}).map(s=>{
+  const _snapSorted=list.slice().sort((a,b)=>{const pa=_ssp[a.status]??1,pb=_ssp[b.status]??1;if(pa!==pb)return pa-pb;return a.scheduled_at.localeCompare(b.scheduled_at);});
+  const _snapToShow=_schedFilter==='done'
+    ?_snapSorted.filter(s=>s.status==='done').reverse().slice(0,100)
+    :_snapSorted.filter(s=>s.status!=='done');
+  if(!_snapToShow.length){el.innerHTML=`<div class="empty"><div class="empty-ico">&#x1F47B;</div>${_schedFilter==='done'?'Aucun post publié':'Aucun post en attente'}</div>`;return;}
+  el.innerHTML=_snapToShow.map(s=>{
     const[bc,bl]=(bmap[s.status]||'bp ?').split(' ');
     const accsHtml=(()=>{
       const res=s.results||{};
@@ -6450,7 +8855,9 @@ async function loadIgAccounts(){
   el.innerHTML=igAccounts.map(a=>`
     <label class="acc-check sel">
       <input type="checkbox" data-id="${a.id}" checked>
-      <div class="acc-check-dot" style="background:var(--green)"></div>
+      <img src="/api/social/avatar/ig/${encodeURIComponent(a.username)}?uid=${encodeURIComponent(a.id)}"
+           style="width:22px;height:22px;border-radius:50%;object-fit:cover;flex-shrink:0"
+           onerror="this.style.display='none'">
       <span class="acc-check-name">@${a.username}</span>
     </label>`).join('');
   el.querySelectorAll('input[type=checkbox]').forEach(cb=>cb.addEventListener('change',updateIgBtn));
@@ -6466,7 +8873,7 @@ function updateIgBtn(){
 
 async function loadIgScheduled(){
   const list=await fetch('/api/instagram/scheduled').then(r=>r.json()).catch(()=>[]);
-  const el=document.getElementById('igSlist');
+  const el=document.getElementById('igRpList');
   const pending=list.filter(s=>s.status==='pending').length;
   const done=list.filter(s=>s.status==='done').length;
   const err=list.filter(s=>s.status==='error'||s.status==='partial').length;
@@ -6475,7 +8882,12 @@ async function loadIgScheduled(){
   document.getElementById('igMErr').textContent=err||'—';
   if(!list.length){el.innerHTML='<div class="empty"><div class="empty-ico">📸</div>Aucun post programmé</div>';return;}
   const _igSp={pending:0,posting:0,partial:1,error:1,done:2};
-  el.innerHTML=list.slice().sort((a,b)=>{const pa=_igSp[a.status]??1,pb=_igSp[b.status]??1;if(pa!==pb)return pa-pb;return a.scheduled_at.localeCompare(b.scheduled_at);}).map(s=>{
+  const _igSorted=list.slice().sort((a,b)=>{const pa=_igSp[a.status]??1,pb=_igSp[b.status]??1;if(pa!==pb)return pa-pb;return a.scheduled_at.localeCompare(b.scheduled_at);});
+  const _igToShow=_schedFilter==='done'
+    ?_igSorted.filter(s=>s.status==='done').reverse().slice(0,100)
+    :_igSorted.filter(s=>s.status!=='done');
+  if(!_igToShow.length){el.innerHTML=`<div class="empty"><div class="empty-ico">📸</div>${_schedFilter==='done'?'Aucun post publié':'Aucun post en attente'}</div>`;return;}
+  el.innerHTML=_igToShow.map(s=>{
     const accNames=(s.account_ids||[]).map(id=>{const a=igAccounts.find(x=>x.id===id);return a?'@'+a.username:id;}).join(', ');
     const statusColor={pending:'var(--yellow)',done:'var(--green)',error:'var(--red)',partial:'orange',posting:'var(--purple)'}[s.status]||'var(--t3)';
     return `<div class="sitem">
@@ -6541,10 +8953,27 @@ document.querySelectorAll('input[name=igDateMode]').forEach(r=>{
   });
 });
 
+// Mode date Facebook
+document.querySelectorAll('input[name=fbDateMode]').forEach(r=>{
+  r.addEventListener('change',()=>{
+    document.getElementById('fbDateInput').style.display=r.value==='manual'?'':'none';
+  });
+});
+
 function _igGetStartDt(offset=0){
   const mode=document.querySelector('input[name=igDateMode]:checked')?.value||'auto';
   if(mode==='manual'){
     const v=document.getElementById('igDateInput').value;
+    if(v){const d=new Date(v);d.setMinutes(d.getMinutes()+offset);return _localDtStr(d);}
+  }
+  const now=new Date();now.setMinutes(now.getMinutes()+5+offset);
+  return _localDtStr(now);
+}
+
+function _fbGetStartDt(offset=0){
+  const mode=document.querySelector('input[name=fbDateMode]:checked')?.value||'auto';
+  if(mode==='manual'){
+    const v=document.getElementById('fbDateInput').value;
     if(v){const d=new Date(v);d.setMinutes(d.getMinutes()+offset);return _localDtStr(d);}
   }
   const now=new Date();now.setMinutes(now.getMinutes()+5+offset);
@@ -6613,6 +9042,152 @@ function positionPopup(e){
   popup.style.left=x+'px';popup.style.top=y+'px';
 }
 
+// ── Facebook ──────────────────────────────────────────────────────────────
+let fbPhotos=[],fbAccounts=[];
+
+async function loadFbAccounts(){
+  fbAccounts=await fetch('/api/facebook/accounts').then(r=>r.json()).catch(()=>[]);
+  document.getElementById('fbMAccounts').textContent=fbAccounts.length||'—';
+  const el=document.getElementById('fbAccChecks');
+  if(!fbAccounts.length){el.innerHTML='<div class="no-acc-warn">Aucun compte Facebook — configure-les dans Réglages → profil → facebook_accounts</div>';return;}
+  el.innerHTML=fbAccounts.map(a=>`
+    <label class="acc-check sel">
+      <input type="checkbox" data-id="${a.id}" checked>
+      <img src="/api/social/avatar/fb/${encodeURIComponent(a.username)}?uid=${encodeURIComponent(a.id)}"
+           style="width:22px;height:22px;border-radius:50%;object-fit:cover;flex-shrink:0"
+           onerror="this.style.display='none'">
+      <span class="acc-check-name">${a.username}</span>
+    </label>`).join('');
+  el.querySelectorAll('input[type=checkbox]').forEach(cb=>cb.addEventListener('change',updateFbBtn));
+  updateFbBtn();
+}
+function getFbAccIds(){return[...document.querySelectorAll('#fbAccChecks input:checked')].map(x=>x.dataset.id);}
+function updateFbBtn(){
+  const ok=fbPhotos.length>0&&getFbAccIds().length>0;
+  document.getElementById('fbBtnSchedule').disabled=!ok;
+  document.getElementById('fbBtnSavePl').disabled=!fbPhotos.length;
+}
+function renderFbPhotos(){
+  const list=document.getElementById('fbPlist');
+  const noP=document.getElementById('fbNoP');
+  const savePl=document.getElementById('fbBtnSavePl');
+  list.innerHTML='';
+  noP.style.display=fbPhotos.length?'none':'block';
+  if(savePl)savePl.disabled=!fbPhotos.length;
+  updateFbBtn();
+  if(!fbPhotos.length)return;
+  list.style.cssText='display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:10px;margin-top:10px';
+  fbPhotos.forEach((p,i)=>{
+    const card=document.createElement('div');
+    card.style.cssText='background:#111;border:1px solid #1a3a6e;border-radius:10px;overflow:hidden;position:relative';
+    const media=p.isVideo
+      ?`<div style="height:213px;background:#000;display:flex;align-items:center;justify-content:center;font-size:36px">&#x1F3AC;</div>`
+      :`<img src="${p.url}" style="width:100%;height:213px;object-fit:cover;display:block">`;
+    card.innerHTML=`
+      ${media}
+      <div style="padding:7px 8px">
+        <div style="font-size:.65rem;color:#666;word-break:break-all">${p.filename}</div>
+      </div>
+      <button data-idx="${i}" style="position:absolute;top:5px;right:5px;background:rgba(0,0,0,.6);border:none;color:#fff;border-radius:50%;width:22px;height:22px;font-size:12px;cursor:pointer;display:flex;align-items:center;justify-content:center">&#x2715;</button>`;
+    card.querySelector('button').addEventListener('click',e=>{e.stopPropagation();fbPhotos.splice(i,1);renderFbPhotos();});
+    list.appendChild(card);
+  });
+}
+async function loadFbScheduled(){
+  const list=await fetch('/api/facebook/scheduled').then(r=>r.json()).catch(()=>[]);
+  const el=document.getElementById('fbRpList');
+  const pending=list.filter(s=>s.status==='pending').length;
+  const done=list.filter(s=>s.status==='done').length;
+  const err=list.filter(s=>s.status==='error'||s.status==='partial').length;
+  document.getElementById('fbMPending').textContent=pending||'—';
+  document.getElementById('fbMDone').textContent=done||'—';
+  document.getElementById('fbMErr').textContent=err||'—';
+  if(!list.length){el.innerHTML='<div class="empty"><div class="empty-ico">&#x1F4D8;</div>Aucun post programmé</div>';return;}
+  const _fbSp={pending:0,posting:0,partial:1,error:1,done:2};
+  const sorted=list.slice().sort((a,b)=>{const pa=_fbSp[a.status]??1,pb=_fbSp[b.status]??1;if(pa!==pb)return pa-pb;return a.scheduled_at.localeCompare(b.scheduled_at);});
+  const toShow=_schedFilter==='done'
+    ?sorted.filter(s=>s.status==='done').reverse().slice(0,100)
+    :sorted.filter(s=>s.status!=='done');
+  if(!toShow.length){el.innerHTML=`<div class="empty"><div class="empty-ico">&#x1F4D8;</div>${_schedFilter==='done'?'Aucun post publié':'Aucun post en attente'}</div>`;return;}
+  const bmap={pending:'bp En attente',posting:'bs Envoi…',done:'bd Publié',error:'be Erreur',partial:'bpar Partiel'};
+  el.innerHTML=toShow.map(s=>{
+    const[bc,bl]=(bmap[s.status]||'bp ?').split(' ');
+    const accNames=(s.account_ids||[]).map(id=>{const a=fbAccounts.find(x=>x.id===id);return a?a.username:id;}).join(', ');
+    const statusColor={pending:'var(--yellow)',done:'var(--green)',error:'var(--red)',partial:'orange',posting:'var(--purple)'}[s.status]||'var(--t3)';
+    return `<div class="sitem">
+      <img src="/uploads/${s.filename}" class="sthumb" onerror="this.style.opacity='.2'" style="width:64px;height:84px;object-fit:cover;border-radius:9px;flex-shrink:0">
+      <div class="sinfo">
+        <div style="font-size:.82rem;font-weight:700">${fmt(s.scheduled_at)}</div>
+        <div style="font-size:.7rem;color:var(--t3);margin-top:2px">${accNames}</div>
+        ${s.caption?`<div style="font-size:.68rem;color:var(--t3);font-style:italic;margin-top:2px">"${s.caption.slice(0,40)}…"</div>`:''}
+        <div style="font-size:.68rem;margin-top:4px"><span style="color:${statusColor};font-weight:700">${s.status}</span></div>
+      </div>
+      ${s.status==='pending'?`<button class="btn btn-xs btn-danger" onclick="deleteFbScheduled('${s.id}')" style="flex-shrink:0;align-self:center">✕</button>`:''}
+    </div>`;
+  }).join('');
+}
+async function deleteFbScheduled(id){
+  if(!confirm('Supprimer ce post programmé ?'))return;
+  await fetch(`/api/facebook/scheduled/${id}`,{method:'DELETE'});
+  loadFbScheduled();
+}
+
+// Upload zone Facebook
+document.getElementById('fbFi').addEventListener('change',async function(){
+  for(const f of this.files){
+    const fd=new FormData();fd.append('file',f);
+    const r=await fetch('/api/upload',{method:'POST',body:fd}).catch(()=>null);
+    if(r&&r.ok){const d=await r.json();fbPhotos.push({filename:d.filename,url:`/uploads/${d.filename}`,isVideo:/\.(mp4|mov|avi)$/i.test(d.filename)});}
+  }
+  renderFbPhotos();this.value='';
+});
+document.getElementById('fbUz').addEventListener('click',()=>document.getElementById('fbFi').click());
+document.getElementById('fbUz').addEventListener('dragover',e=>{e.preventDefault();document.getElementById('fbUz').style.borderColor='#1877F2';});
+document.getElementById('fbUz').addEventListener('dragleave',()=>document.getElementById('fbUz').style.borderColor='');
+document.getElementById('fbUz').addEventListener('drop',async e=>{
+  e.preventDefault();document.getElementById('fbUz').style.borderColor='';
+  for(const f of e.dataTransfer.files){
+    const fd=new FormData();fd.append('file',f);
+    const r=await fetch('/api/upload',{method:'POST',body:fd}).catch(()=>null);
+    if(r&&r.ok){const d=await r.json();fbPhotos.push({filename:d.filename,url:`/uploads/${d.filename}`,isVideo:/\.(mp4|mov|avi)$/i.test(d.filename)});}
+  }
+  renderFbPhotos();
+});
+
+document.getElementById('fbBtnClear').addEventListener('click',()=>{fbPhotos=[];renderFbPhotos();toast('Vidé');});
+
+document.getElementById('fbBtnSavePl').addEventListener('click',async()=>{
+  if(!fbPhotos.length)return;
+  const name=prompt('Nom de la playlist Facebook :');
+  if(!name)return;
+  const r=await fetch('/api/fb/plannings',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({name,photos:fbPhotos.map(p=>({filename:p.filename,url:p.url,dt:p.dt||''}))})});
+  if(r.ok){toast('Playlist sauvegardée dans Médias','ok');loadPlaylists();}
+  else toast('Erreur sauvegarde','err');
+});
+
+document.getElementById('fbBtnSchedule').addEventListener('click',async()=>{
+  const accIds=getFbAccIds();
+  if(!fbPhotos.length||!accIds.length)return;
+  const caption=document.getElementById('fbCaption').value.trim();
+  const btn=document.getElementById('fbBtnSchedule');
+  btn.disabled=true;btn.textContent='⏳ Envoi…';
+  let ok=0,err=0,offset=0;
+  for(const p of fbPhotos){
+    const dt=p.dt||_fbGetStartDt(offset);
+    offset+=accIds.length;
+    const r=await fetch('/api/facebook/schedule',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({filename:p.filename,scheduled_at:dt,account_ids:accIds,caption})}).then(r=>r.json()).catch(()=>({ok:false}));
+    if(r.ok)ok++;else err++;
+  }
+  toast(ok?`✅ ${ok} post${ok>1?'s':''} programmé${ok>1?'s':''}`:err+' erreur(s)',ok?'ok':'err');
+  fbPhotos=[];renderFbPhotos();loadFbScheduled();
+  btn.disabled=false;btn.textContent='📘 Programmer';
+});
+
+// Datetime par défaut
+document.getElementById('fbDateInput').value=defDt();
+
 // ── Init ───────────────────────────────────────────────────────────────────
 loadProfiles();
 loadAccounts();loadScheduled();loadPlaylists();refreshStatus();document.getElementById('rightPanel').style.display='';
@@ -6620,6 +9195,7 @@ setInterval(()=>{
   if(currentPage==='schedule')loadScheduled();
   else if(currentPage==='snapchat')loadSnapScheduled();
   else if(currentPage==='instagram')loadIgScheduled();
+  else if(currentPage==='facebook')loadFbScheduled();
   refreshStatus();
 },15000);
 setInterval(loadAccounts,60000);
