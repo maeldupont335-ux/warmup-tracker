@@ -39,7 +39,7 @@ interface Stats {
   commonGreetings: string[];
 }
 
-type Tab = "profiles" | "import" | "preview" | "paid";
+type Tab = "profiles" | "import" | "manual" | "preview" | "paid";
 
 export default function TrainingPage() {
   const multiFileRef = useRef<HTMLInputElement>(null);
@@ -62,6 +62,14 @@ export default function TrainingPage() {
   const [stats, setStats] = useState<Stats | null>(null);
   const [availableNames, setAvailableNames] = useState<string[]>([]);
   const [suggestedName, setSuggestedName] = useState("");
+
+  // Exemples manuels
+  const [manualExamples, setManualExamples] = useState<{ fanMessage: string; yourReply: string }[]>([]);
+  const [newFanMsg, setNewFanMsg] = useState("");
+  const [newReply, setNewReply] = useState("");
+  const [manualProfileName, setManualProfileName] = useState("");
+  const [manualSaving, setManualSaving] = useState(false);
+  const [manualSuccess, setManualSuccess] = useState(false);
 
   // Paid media
   const [paidChatId, setPaidChatId] = useState("");
@@ -246,9 +254,45 @@ export default function TrainingPage() {
     finally { setPaidLoading(false); }
   };
 
+  const addManualExample = () => {
+    if (!newFanMsg.trim() || !newReply.trim()) return;
+    setManualExamples(ex => [...ex, { fanMessage: newFanMsg.trim(), yourReply: newReply.trim() }]);
+    setNewFanMsg("");
+    setNewReply("");
+  };
+
+  const saveManualProfile = async () => {
+    if (manualExamples.length === 0 || !selectedCreatorId) return;
+    setManualSaving(true);
+    const profile = {
+      realExamples: manualExamples,
+      commonEmojis: [],
+      commonPhrases: [],
+      commonGreetings: [],
+      avgMessageLength: Math.round(manualExamples.reduce((s, e) => s + e.yourReply.length, 0) / manualExamples.length),
+      usesAbbreviations: false,
+      totalMessagesAnalyzed: manualExamples.length,
+      yourName: "moi",
+    };
+    const name = manualProfileName.trim() || "Exemples manuels";
+    await fetch("/api/training", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ preAnalyzed: profile, creatorId: selectedCreatorId, profileName: name }),
+    });
+    await loadIndex(selectedCreatorId);
+    setManualSaving(false);
+    setManualSuccess(true);
+    setManualExamples([]);
+    setManualProfileName("");
+    setTab("profiles");
+    setTimeout(() => setManualSuccess(false), 3000);
+  };
+
   const tabs = [
     { key: "profiles" as Tab, label: "Mes styles IA", icon: Brain },
-    { key: "import" as Tab, label: "Importer", icon: Upload },
+    { key: "manual" as Tab, label: "Exemples manuels", icon: Plus },
+    { key: "import" as Tab, label: "Importer Telegram", icon: Upload },
     { key: "preview" as Tab, label: "Aperçu actif", icon: Eye },
     { key: "paid" as Tab, label: "Média payant ⭐", icon: Star },
   ];
@@ -375,6 +419,116 @@ export default function TrainingPage() {
                 Ajouter un nouveau style
               </button>
             </>
+          )}
+        </div>
+      )}
+
+      {/* ─── TAB EXEMPLES MANUELS ─── */}
+      {tab === "manual" && (
+        <div className="max-w-2xl space-y-5">
+          {manualSuccess && (
+            <div className="rounded-xl p-4 text-sm font-semibold" style={{ background: "rgba(16,185,129,0.1)", border: "1px solid rgba(16,185,129,0.3)", color: "#10b981" }}>
+              ✓ Profil sauvegardé et activé — le bot utilise maintenant tes exemples
+            </div>
+          )}
+
+          <div className="rounded-2xl border p-5" style={{ background: "#111118", borderColor: "#1e1e2e" }}>
+            <h2 className="font-bold mb-1 flex items-center gap-2" style={{ color: "#e4e4f0" }}>
+              <Plus size={16} style={{ color: "#a855f7" }} />
+              Ajouter un exemple de conversation
+            </h2>
+            <p className="text-sm mb-4" style={{ color: "#6b7280" }}>
+              Saisis des échanges réels entre toi et un fan. Le bot reproduira exactement ce style.
+            </p>
+            <div className="space-y-3">
+              <div>
+                <label className="text-xs font-semibold mb-1 block" style={{ color: "#9ca3af" }}>Message du fan</label>
+                <input
+                  value={newFanMsg}
+                  onChange={e => setNewFanMsg(e.target.value)}
+                  placeholder="Ex: t'es belle aujourd'hui 😍"
+                  className="w-full px-4 py-3 rounded-xl text-sm"
+                  style={{ background: "#0d0d1a", border: "1px solid #2e2e4e", color: "#e4e4f0", outline: "none" }}
+                  onKeyDown={e => e.key === "Enter" && document.getElementById("reply-input")?.focus()}
+                />
+              </div>
+              <div>
+                <label className="text-xs font-semibold mb-1 block" style={{ color: "#9ca3af" }}>Ta réponse</label>
+                <input
+                  id="reply-input"
+                  value={newReply}
+                  onChange={e => setNewReply(e.target.value)}
+                  placeholder="Ex: haha merci toi t'es trop mignon 🥰"
+                  className="w-full px-4 py-3 rounded-xl text-sm"
+                  style={{ background: "#0d0d1a", border: "1px solid #2e2e4e", color: "#e4e4f0", outline: "none" }}
+                  onKeyDown={e => e.key === "Enter" && addManualExample()}
+                />
+              </div>
+              <button
+                onClick={addManualExample}
+                disabled={!newFanMsg.trim() || !newReply.trim()}
+                className="px-5 py-2.5 rounded-xl text-sm font-bold transition-all"
+                style={{
+                  background: newFanMsg.trim() && newReply.trim() ? "linear-gradient(135deg,#a855f7,#7c3aed)" : "#1e1e2e",
+                  color: newFanMsg.trim() && newReply.trim() ? "#fff" : "#4b5563",
+                  cursor: newFanMsg.trim() && newReply.trim() ? "pointer" : "not-allowed",
+                }}>
+                + Ajouter cet exemple
+              </button>
+            </div>
+          </div>
+
+          {manualExamples.length > 0 && (
+            <div className="rounded-2xl border p-5 space-y-3" style={{ background: "#111118", borderColor: "#1e1e2e" }}>
+              <div className="flex items-center justify-between mb-2">
+                <span className="font-bold text-sm" style={{ color: "#e4e4f0" }}>{manualExamples.length} exemple(s) ajouté(s)</span>
+                <button onClick={() => setManualExamples([])} className="text-xs" style={{ color: "#ef4444" }}>Tout supprimer</button>
+              </div>
+              {manualExamples.map((ex, i) => (
+                <div key={i} className="rounded-xl p-3" style={{ background: "#0d0d1a", border: "1px solid #1e1e2e" }}>
+                  <div className="flex justify-between items-start gap-2">
+                    <div className="flex-1 space-y-1">
+                      <div className="text-xs font-semibold" style={{ color: "#6b7280" }}>Fan :</div>
+                      <div className="text-sm" style={{ color: "#9ca3af" }}>{ex.fanMessage}</div>
+                      <div className="text-xs font-semibold mt-2" style={{ color: "#a855f7" }}>Toi :</div>
+                      <div className="text-sm" style={{ color: "#e4e4f0" }}>{ex.yourReply}</div>
+                    </div>
+                    <button onClick={() => setManualExamples(ex2 => ex2.filter((_, j) => j !== i))}
+                      className="p-1.5 rounded-lg hover:bg-red-500/10 transition-all flex-shrink-0"
+                      style={{ color: "#4b5563" }}>
+                      <Trash2 size={13} />
+                    </button>
+                  </div>
+                </div>
+              ))}
+
+              <div className="pt-2 border-t" style={{ borderColor: "#1e1e2e" }}>
+                <label className="text-xs font-semibold mb-2 block" style={{ color: "#9ca3af" }}>Nom du profil (optionnel)</label>
+                <div className="flex gap-3">
+                  <input
+                    value={manualProfileName}
+                    onChange={e => setManualProfileName(e.target.value)}
+                    placeholder="Ex: Mon style naturel"
+                    className="flex-1 px-4 py-2.5 rounded-xl text-sm"
+                    style={{ background: "#0d0d1a", border: "1px solid #2e2e4e", color: "#e4e4f0", outline: "none" }}
+                  />
+                  <button
+                    onClick={saveManualProfile}
+                    disabled={manualSaving}
+                    className="px-5 py-2.5 rounded-xl text-sm font-bold flex items-center gap-2"
+                    style={{ background: "linear-gradient(135deg,#a855f7,#7c3aed)", color: "#fff", cursor: manualSaving ? "not-allowed" : "pointer" }}>
+                    <Send size={13} />
+                    {manualSaving ? "Sauvegarde…" : "Sauvegarder & Activer"}
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {manualExamples.length === 0 && (
+            <div className="rounded-2xl border p-6 text-center" style={{ background: "rgba(168,85,247,0.03)", borderColor: "rgba(168,85,247,0.15)", borderStyle: "dashed" }}>
+              <p className="text-sm" style={{ color: "#6b7280" }}>Ajoute au moins un exemple pour créer un profil</p>
+            </div>
           )}
         </div>
       )}
