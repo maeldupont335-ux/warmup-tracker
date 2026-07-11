@@ -5,7 +5,7 @@ import {
   loadUserBilling, saveUserBilling, addTransaction,
   purchaseLicense, getPlatformStats,
   purchaseCreatorLicense, setCreatorAutoRenew, autoRenewExpiredLicenses,
-  buyTelegramLicenses,
+  buyTelegramLicenses, suspendCreatorLicense, reactivateCreatorLicense,
 } from "@/lib/billing-store";
 import fs from "fs";
 import path from "path";
@@ -96,6 +96,22 @@ export async function POST(req: NextRequest) {
     // Auto-renew les licences expirées d'abord
     autoRenewExpiredLicenses(user.id);
     const result = purchaseCreatorLicense(user.id, creatorId, creatorName ?? creatorId);
+    return NextResponse.json(result);
+  }
+
+  // Suspendre une licence (bot pausé, jours restants conservés)
+  if (body.action === "suspend-license") {
+    const { creatorId } = body;
+    if (!creatorId) return NextResponse.json({ error: "creatorId requis" }, { status: 400 });
+    const result = suspendCreatorLicense(user.id, creatorId);
+    return NextResponse.json(result);
+  }
+
+  // Réactiver une licence suspendue
+  if (body.action === "reactivate-license") {
+    const { creatorId } = body;
+    if (!creatorId) return NextResponse.json({ error: "creatorId requis" }, { status: 400 });
+    const result = reactivateCreatorLicense(user.id, creatorId);
     return NextResponse.json(result);
   }
 
