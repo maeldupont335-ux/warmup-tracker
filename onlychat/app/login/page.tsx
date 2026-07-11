@@ -27,11 +27,16 @@ export default function LoginPage() {
       <div className="w-full max-w-md">
         <div className="text-center mb-8">
           <Link href="/" className="inline-flex items-center gap-2 mb-6">
-            <div className="w-9 h-9 rounded-xl flex items-center justify-center"
-              style={{ background: "linear-gradient(135deg,#a855f7,#7c3aed)" }}>
-              <MessageCircle size={18} className="text-white" />
-            </div>
-            <span className="font-bold text-xl">PulsChat<span style={{ color: "#a855f7" }}> AI</span></span>
+            <svg width="40" height="40" viewBox="0 0 88 88" style={{ flexShrink: 0 }}>
+              <path d="M8,44 C8,32 18,22 30,26 C24,32 22,38 24,44 C22,50 24,56 30,62 C18,66 8,56 8,44 Z" fill="#f59e0b" opacity="0.6"/>
+              <path d="M80,44 C80,32 70,22 58,26 C64,32 66,38 64,44 C66,50 64,56 58,62 C70,66 80,56 80,44 Z" fill="#f59e0b" opacity="0.6"/>
+              <circle cx="44" cy="44" r="22" fill="#0a0a0f" stroke="#f59e0b" strokeWidth="2.5"/>
+              <text x="33" y="56" fontSize="30" fill="#f59e0b" fontFamily="monospace" fontWeight="900">$</text>
+            </svg>
+            <span style={{ fontSize: "20px", fontWeight: 800, letterSpacing: "-0.5px", color: "#fff" }}>
+              Puls<span style={{ color: "#f59e0b" }}>Chat</span>
+              <span style={{ background: "#f59e0b", color: "#0a0a0f", fontSize: "8px", fontWeight: 900, padding: "2px 5px", borderRadius: "4px", marginLeft: "5px", verticalAlign: "middle", position: "relative", top: "-1px" }}>AI</span>
+            </span>
           </Link>
           <h1 className="text-2xl font-black text-white mb-2">Bon retour 👋</h1>
           <p className="text-sm" style={{ color: "#6b7280" }}>Connecte-toi à ton espace</p>

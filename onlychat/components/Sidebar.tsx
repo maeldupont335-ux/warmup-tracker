@@ -41,11 +41,17 @@ export default function Sidebar() {
       {/* Logo */}
       <div className="px-6 py-5 border-b" style={{ borderColor: "#1e1e2e" }}>
         <Link href="/" className="flex items-center gap-2">
-          <div className="w-8 h-8 rounded-lg flex items-center justify-center"
-            style={{ background: "linear-gradient(135deg,#a855f7,#7c3aed)" }}>
-            <MessageCircle size={16} className="text-white" />
-          </div>
-          <span className="font-bold">PulsChat<span style={{ color: "#a855f7" }}> AI</span></span>
+          {/* Logo dollar ailé */}
+          <svg width="36" height="36" viewBox="0 0 88 88" style={{ flexShrink: 0 }}>
+            <path d="M8,44 C8,32 18,22 30,26 C24,32 22,38 24,44 C22,50 24,56 30,62 C18,66 8,56 8,44 Z" fill="#f59e0b" opacity="0.6"/>
+            <path d="M80,44 C80,32 70,22 58,26 C64,32 66,38 64,44 C66,50 64,56 58,62 C70,66 80,56 80,44 Z" fill="#f59e0b" opacity="0.6"/>
+            <circle cx="44" cy="44" r="22" fill="#0d0d14" stroke="#f59e0b" strokeWidth="2.5"/>
+            <text x="33" y="56" fontSize="30" fill="#f59e0b" fontFamily="monospace" fontWeight="900">$</text>
+          </svg>
+          <span style={{ fontSize: "18px", fontWeight: 800, letterSpacing: "-0.5px", color: "#fff" }}>
+            Puls<span style={{ color: "#f59e0b" }}>Chat</span>
+            <span style={{ background: "#f59e0b", color: "#0d0d14", fontSize: "8px", fontWeight: 900, padding: "2px 5px", borderRadius: "4px", marginLeft: "5px", verticalAlign: "middle", position: "relative", top: "-1px" }}>AI</span>
+          </span>
         </Link>
       </div>
 
