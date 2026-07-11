@@ -12,6 +12,7 @@ import type { Script, ScriptStep } from "@/lib/scripts-store";
 import type { Fan } from "@/app/api/creators/[id]/fans/route";
 import { getDataDir } from "@/lib/data-dir";
 import { recordStarsSale, isCreatorLicenseActive, autoRenewExpiredLicenses } from "@/lib/billing-store";
+import { loadBotDocsConfig } from "@/lib/bot-docs-store";
 
 /* ─── Cherche le creator dans tous les fichiers users ─── */
 function findCreator(creatorId: string): { creator: Creator; userId: string } | null {
@@ -185,13 +186,6 @@ function messagesNeeded(speed: string): number {
   return rand(4, 7);
 }
 
-/* ─── Mots-clés de réduction ─── */
-const DISCOUNT_KEYWORDS = [
-  "réduction", "discount", "moins cher", "trop cher", "c'est cher",
-  "j'ai pas l'argent", "jai pas l'argent", "j'ai pas d'argent", "jai pas d'argent",
-  "pas les moyens", "j'ai pas les sous", "je peux pas payer", "jpeux pas",
-  "promo", "offre", "remise", "prix", "cher",
-];
 
 /* ─── Moteur de script ─── */
 async function runScriptEngine(
@@ -368,6 +362,7 @@ async function handleUpdate(creatorId: string, update: Record<string, unknown>) 
     const scripts = loadScripts(creator.id);
     const activeScripts = scripts.filter(s => s.active);
     const styleProfile = loadCreatorStyleProfile(creator.id);
+    const botConfig = loadBotDocsConfig(userId);
 
     /* ── Paiement Stars confirmé ── */
     const successfulPayment = successfulPaymentDirect ?? (msg as Record<string, unknown>)?.successful_payment as Record<string, unknown> | undefined;
@@ -400,11 +395,10 @@ async function handleUpdate(creatorId: string, update: Record<string, unknown>) 
       const step = script?.steps[fan.activeScript.stepIndex];
       const elapsed = Date.now() - new Date(fan.activeScript.mediaSentAt).getTime();
       const TEN_MIN = 10 * 60 * 1000;
-      const fanWantsDiscount = DISCOUNT_KEYWORDS.some(kw => userText.toLowerCase().includes(kw));
+      const fanWantsDiscount = botConfig.discountKeywords.some(kw => userText.toLowerCase().includes(kw));
 
       // Détection paiement confirmé par le fan en texte (fallback si successful_payment manqué)
-      const PAID_KEYWORDS = ["j'ai payé", "j'ai payer", "jai payé", "jai payer", "j ai payé", "j ai payer", "jpayé", "jpayer", "i paid", "already paid", "j'ai acheté", "jai acheté"];
-      const fanClaimsPayment = PAID_KEYWORDS.some(kw => userText.toLowerCase().includes(kw));
+      const fanClaimsPayment = botConfig.paidKeywords.some(kw => userText.toLowerCase().includes(kw));
       if (fanClaimsPayment && fan.activeScript) {
         console.log(`[Bot] Fan ${fanId} a confirmé le paiement par message texte — avance le script`);
         fan.activeScript.waitingForPayment = false;
@@ -429,12 +423,8 @@ async function handleUpdate(creatorId: string, update: Record<string, unknown>) 
           && (fanWantsDiscount || elapsed >= TEN_MIN)) {
           fan.activeScript.discountOffered = true;
           // Générer un message de proposition de prix réduit
-          const discountPrompt = buildCreatorPrompt(settings, styleProfile) + `
-Tu as envoyé un contenu exclusif payant au fan. ${fanWantsDiscount ? "Il semble hésiter sur le prix." : "Il n'a pas encore cliqué pour débloquer."}
-
-Propose-lui une offre spéciale — dis-lui juste que tu lui fais un prix spécial, sans parler de chiffres exacts si possible. Le bouton de paiement est directement sur le message dans Telegram, donc NE mentionne PAS de "plateforme", "lien externe", "accès", ou "validation" — le paiement se fait en un clic sur le message.
-Sois naturelle, un peu coquine, comme si tu faisais une exception juste pour lui.
-1-2 messages courts maximum, séparés par |||`;
+          const discountPrompt = buildCreatorPrompt(settings, styleProfile) + "\n" +
+            botConfig.discountPrompt.replace("{reason}", fanWantsDiscount ? "Il semble hésiter sur le prix." : "Il n'a pas encore cliqué pour débloquer.");
 
           const discountMsg = await chatWithAI(discountPrompt, userText, []);
           const bubbles = (discountMsg.includes("|||") ? discountMsg.split("|||") : discountMsg.split("\n"))
@@ -476,13 +466,9 @@ Sois naturelle, un peu coquine, comme si tu faisais une exception juste pour lui
         // skipFollowupIfPaid DÉCOCHÉ + 10 min passées → push vente puis stop
         if (!step.skipFollowupIfPaid && elapsed >= TEN_MIN && fan.activeScript && !fan.activeScript.salePushSent) {
           fan.activeScript.salePushSent = true;
-          const salePushPrompt = buildCreatorPrompt(settings, styleProfile) + `
-Tu as envoyé un contenu payant il y a un moment. Le fan peut encore le débloquer directement dans le chat Telegram (il voit le bouton de paiement en étoiles sur le message).
-
-Fais une DERNIÈRE relance naturelle et séduisante — pas de mention de "plateforme", "lien", "accès" ou "validation". Le paiement se fait directement sur le message que tu lui as envoyé dans le chat.
-Sois légère, coquine, donne envie. 1-2 messages courts max séparés par |||
-Style inspiré de tes exemples :
-${styleProfile?.realExamples?.slice(0, 3).map(e => `Fan: "${e.fanMessage}"\nToi: "${e.yourReply}"`).join("\n---\n") ?? ""}`;
+          const examplesSection = styleProfile?.realExamples?.slice(0, 3).map((e: { fanMessage: string; yourReply: string }) => `Fan: "${e.fanMessage}"\nToi: "${e.yourReply}"`).join("\n---\n") ?? "";
+          const salePushPrompt = buildCreatorPrompt(settings, styleProfile) + "\n" +
+            botConfig.salePushPrompt + (examplesSection ? `\nStyle inspiré de tes exemples :\n${examplesSection}` : "");
 
           const pushMsg = await chatWithAI(salePushPrompt, userText, []);
           const bubbles = (pushMsg.includes("|||") ? pushMsg.split("|||") : pushMsg.split("\n"))
@@ -521,8 +507,7 @@ ${styleProfile?.realExamples?.slice(0, 3).map(e => `Fan: "${e.fanMessage}"\nToi:
     }
 
     /* ── Mots déclencheurs sexuels → court-circuite le cooldown ── */
-    const SEXY_KEYWORDS = ["nude", "t'es sexy", "tes sexy", "fesse", "chatte", "t'es bonne", "tes bonne", "photo de toi", "montre toi", "nue", "seins", "cul"];
-    const fanSaidSexy = SEXY_KEYWORDS.some(kw => userText.toLowerCase().includes(kw));
+    const fanSaidSexy = botConfig.sexyKeywords.some(kw => userText.toLowerCase().includes(kw));
 
     const firstMsgAt = new Date(fan.firstMessageAt ?? fan.lastInteraction);
     const cooldownDays = settings.sexualizationCooldownDays ?? 2;
@@ -567,10 +552,7 @@ ${styleProfile?.realExamples?.slice(0, 3).map(e => `Fan: "${e.fanMessage}"\nToi:
           if (wuIdx >= 0) fansWu[wuIdx] = fan;
           saveFans(creator.id, fansWu);
 
-          const warmupPrompt = buildCreatorPrompt(settings, styleProfile) + `
-Le fan vient de te parler. Tu vas bientôt lui envoyer du contenu exclusif.
-Envoie 2-3 messages courts et naturels pour créer de l'anticipation sans mentionner de photo/vidéo explicitement.
-Sois mystérieuse, taquine, donne envie. Format: sépare chaque message par |||`;
+          const warmupPrompt = buildCreatorPrompt(settings, styleProfile) + "\n" + botConfig.warmupPrompt;
 
           const delayMs = settings.responseDelayMinutes > 0
             ? settings.responseDelayMinutes * 60 * 1000
@@ -658,39 +640,26 @@ Sois mystérieuse, taquine, donne envie. Format: sépare chaque message par |||`
         if (nextStep) {
           const needed = messagesNeeded(nextStep.messagesBetweenSteps ?? "normal");
           const remaining = Math.max(0, needed - fan.activeScript.messagesSinceStep);
-          interStepContext = `
-
-TU ES EN TRAIN DE PRÉPARER LE TERRAIN (encore ~${remaining} messages avant d'envoyer du contenu exclusif) :
-${nextStep.preMediaTeaser ? `Indice sur le prochain contenu : "${nextStep.preMediaTeaser}"` : "Prépare le fan à recevoir quelque chose de spécial."}
-${nextStep.message ? `Prochain message du script : "${nextStep.message.slice(0, 60)}..."` : ""}
-- Crée l'envie naturellement, sans spoiler
-- Réponds au fan ET glisse une phrase qui crée l'anticipation
-- NE DIS PAS "j'ai une vidéo" ou "je t'envoie une photo", reste mystérieuse`;
+          const teaser = nextStep.preMediaTeaser
+            ? `Indice sur le prochain contenu : "${nextStep.preMediaTeaser}"${nextStep.message ? `\nProchain message du script : "${nextStep.message.slice(0, 60)}..."` : ""}`
+            : `Prépare le fan à recevoir quelque chose de spécial.${nextStep.message ? `\nProchain message du script : "${nextStep.message.slice(0, 60)}..."` : ""}`;
+          interStepContext = "\n\n" + botConfig.interStepContext
+            .replace("{remaining}", String(remaining))
+            .replace("{teaser}", teaser);
       }
     }
 
       if (fan.activeScript?.waitingForPayment) {
-        // Fan n'a pas encore payé — INTERDICTION absolue de parler de paiement
-        interStepContext = `\n\nRÈGLE ABSOLUE — NE JAMAIS ENFREINDRE : Tu continues à chatter normalement avec ce fan sur n'importe quel autre sujet (sa journée, ses activités, toi, la météo, etc.). INTERDIT FORMELLEMENT de mentionner : paiement, plateforme, lien, accès, validation, contenu, stars, argent, achat, offre, ou quoi que ce soit lié au contenu exclusif. Le système de paiement Telegram fonctionne automatiquement, tu n'as RIEN à gérer. Sois juste naturelle et spontanée.`;
+        interStepContext = "\n\n" + botConfig.waitingPaymentContext;
       }
 
-      const systemPrompt = buildCreatorPrompt(settings, styleProfile) + fanProfileSection + trainingSection + interStepContext + `
+      const noRepeatHints = [
+        (alreadyAsked.includes("ça va") || alreadyAsked.includes("tu vas")) ? "- NE DEMANDE PLUS comment il va, tu l'as déjà fait" : "",
+        alreadyAsked.includes("tu fais quoi") ? "- NE DEMANDE PLUS ce qu'il fait" : "",
+      ].filter(Boolean).join("\n");
 
-RÈGLES DE RÉPONSE — OBLIGATOIRES :
-- Réponds en 1, 2 ou 3 messages MAXIMUM, séparés par "|||"
-- Chaque message = UNE seule phrase courte (comme un SMS), jamais un pavé
-- INTERDIT d'écrire plus de 15 mots dans un seul message
-- Si le fan pose plusieurs questions, réponds à chacune en UN message court
-- Réponds EN PRIORITÉ aux questions du fan, puis termine par une phrase qui donne envie de continuer
-- Tu ne répètes JAMAIS une phrase déjà envoyée
-${alreadyAsked.includes("ça va") || alreadyAsked.includes("tu vas") ? "- NE DEMANDE PLUS comment il va, tu l'as déjà fait" : ""}
-${alreadyAsked.includes("tu fais quoi") ? "- NE DEMANDE PLUS ce qu'il fait" : ""}
-
-Format STRICT : texte|||texte|||texte (1 à 3 bulles, jamais plus)
-Exemples corrects :
-"Haha t'es direct toi 😏|||j'aime bien ça|||c'est quoi ton vrai prénom ?"
-"Oui je suis là 😊|||tu fais quoi en ce moment ?"
-"Pauline 😘"`;
+      const systemPrompt = buildCreatorPrompt(settings, styleProfile) + fanProfileSection + trainingSection + interStepContext + "\n\n" +
+        botConfig.responseRules + (noRepeatHints ? "\n" + noRepeatHints : "");
 
       const delayMs = settings.responseDelayMinutes > 0
         ? settings.responseDelayMinutes * 60 * 1000
