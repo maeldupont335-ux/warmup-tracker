@@ -13,6 +13,7 @@ import type { Fan } from "@/app/api/creators/[id]/fans/route";
 import { getDataDir } from "@/lib/data-dir";
 import { recordStarsSale, isCreatorLicenseActive, autoRenewExpiredLicenses } from "@/lib/billing-store";
 import { loadBotDocsConfig } from "@/lib/bot-docs-store";
+import type { BotTiming } from "@/lib/bot-docs-store";
 
 /* ─── Cherche le creator dans tous les fichiers users ─── */
 function findCreator(creatorId: string): { creator: Creator; userId: string } | null {
@@ -179,11 +180,11 @@ async function sendScriptStep(
 }
 
 /* ─── Nombre de messages requis entre étapes ─── */
-function messagesNeeded(speed: string): number {
+function messagesNeeded(speed: string, t?: BotTiming): number {
   const rand = (min: number, max: number) => min + Math.floor(Math.random() * (max - min + 1));
-  if (speed === "fast")   return rand(1, 3);
-  if (speed === "slow")   return rand(8, 13);
-  return rand(4, 7);
+  if (speed === "fast")  return rand(t?.fastMin ?? 1,   t?.fastMax ?? 3);
+  if (speed === "slow")  return rand(t?.slowMin ?? 8,   t?.slowMax ?? 13);
+  return rand(t?.normalMin ?? 4, t?.normalMax ?? 7);
 }
 
 
@@ -206,7 +207,7 @@ async function runScriptEngine(
     return fan;
   }
 
-  const needed = messagesNeeded(step.messagesBetweenSteps ?? "normal");
+  const needed = messagesNeeded(step.messagesBetweenSteps ?? "normal", undefined);
 
   if (active.messagesSinceStep < needed) {
     return fan;
@@ -394,7 +395,7 @@ async function handleUpdate(creatorId: string, update: Record<string, unknown>) 
       const script = scripts.find(s => s.id === fan.activeScript?.scriptId);
       const step = script?.steps[fan.activeScript.stepIndex];
       const elapsed = Date.now() - new Date(fan.activeScript.mediaSentAt).getTime();
-      const TEN_MIN = 10 * 60 * 1000;
+      const TEN_MIN = (botConfig.timings?.paymentTimeoutMin ?? 10) * 60 * 1000;
       const fanWantsDiscount = botConfig.discountKeywords.some(kw => userText.toLowerCase().includes(kw));
 
       // Détection paiement confirmé par le fan en texte (fallback si successful_payment manqué)
@@ -556,7 +557,7 @@ async function handleUpdate(creatorId: string, update: Record<string, unknown>) 
 
           const delayMs = settings.responseDelayMinutes > 0
             ? settings.responseDelayMinutes * 60 * 1000
-            : (15 + Math.floor(Math.random() * 20)) * 1000;
+            : ((botConfig.timings?.warmupDelayMin ?? 15) + Math.floor(Math.random() * ((botConfig.timings?.warmupDelayMax ?? 35) - (botConfig.timings?.warmupDelayMin ?? 15)))) * 1000;
           const typingWu = setInterval(() => sendTyping(creator.botToken, chatId, bizId), 4500);
           await sendTyping(creator.botToken, chatId, bizId);
           await new Promise(r => setTimeout(r, delayMs));
@@ -594,11 +595,26 @@ async function handleUpdate(creatorId: string, update: Record<string, unknown>) 
       if (script) {
         const stepIdx = activeScriptRef.stepIndex;
         const step = script.steps[stepIdx];
-        const needed = messagesNeeded(step?.messagesBetweenSteps ?? "normal");
+        const needed = messagesNeeded(step?.messagesBetweenSteps ?? "normal", botConfig.timings);
 
         if (activeScriptRef.messagesSinceStep >= needed) {
           fan = await runScriptEngine(fan, script, creator.botToken, chatId, appBase, bizId, userId, fanId);
           scriptHandled = true;
+        }
+      }
+    }
+
+    /* ── Avancement de phase ── */
+    {
+      const phases = botConfig.phases ?? [];
+      const phaseIdx = fan.currentPhaseIndex ?? 0;
+      const currentPhase = phases[phaseIdx];
+      if (currentPhase && currentPhase.advanceAfterMessages > 0) {
+        fan.messagesInPhase = (fan.messagesInPhase ?? 0) + 1;
+        if (fan.messagesInPhase >= currentPhase.advanceAfterMessages && phaseIdx + 1 < phases.length) {
+          fan.currentPhaseIndex = phaseIdx + 1;
+          fan.messagesInPhase = 0;
+          console.log(`[Bot] Fan ${fanId} → Phase ${fan.currentPhaseIndex + 1} (${phases[fan.currentPhaseIndex]?.name})`);
         }
       }
     }
@@ -638,7 +654,7 @@ async function handleUpdate(creatorId: string, update: Record<string, unknown>) 
         const activeScriptData = scripts.find(s => s.id === fan.activeScript?.scriptId);
         const nextStep = activeScriptData?.steps[fan.activeScript.stepIndex];
         if (nextStep) {
-          const needed = messagesNeeded(nextStep.messagesBetweenSteps ?? "normal");
+          const needed = messagesNeeded(nextStep.messagesBetweenSteps ?? "normal", botConfig.timings);
           const remaining = Math.max(0, needed - fan.activeScript.messagesSinceStep);
           const teaser = nextStep.preMediaTeaser
             ? `Indice sur le prochain contenu : "${nextStep.preMediaTeaser}"${nextStep.message ? `\nProchain message du script : "${nextStep.message.slice(0, 60)}..."` : ""}`
@@ -658,13 +674,21 @@ async function handleUpdate(creatorId: string, update: Record<string, unknown>) 
         alreadyAsked.includes("tu fais quoi") ? "- NE DEMANDE PLUS ce qu'il fait" : "",
       ].filter(Boolean).join("\n");
 
-      const systemPrompt = buildCreatorPrompt(settings, styleProfile) + fanProfileSection + trainingSection + interStepContext + "\n\n" +
+      // Prompt de phase active
+      const phases = botConfig.phases ?? [];
+      const activePhase = phases[fan.currentPhaseIndex ?? 0];
+      const phaseSection = activePhase?.prompt
+        ? `\n\nPHASE ACTUELLE — ${activePhase.name} :\n${activePhase.prompt}\n`
+        : "";
+
+      const systemPrompt = buildCreatorPrompt(settings, styleProfile) + fanProfileSection + phaseSection + trainingSection + interStepContext + "\n\n" +
         botConfig.responseRules + (noRepeatHints ? "\n" + noRepeatHints : "");
 
+      const t = botConfig.timings;
       const delayMs = settings.responseDelayMinutes > 0
         ? settings.responseDelayMinutes * 60 * 1000
-        : (20 + Math.floor(Math.random() * 40)) * 1000;
-      const TYPING_BEFORE_SEND = 8000;
+        : ((t?.responseDelayMin ?? 20) + Math.floor(Math.random() * ((t?.responseDelayMax ?? 60) - (t?.responseDelayMin ?? 20)))) * 1000;
+      const TYPING_BEFORE_SEND = t?.typingBeforeSendMs ?? 8000;
       const waitMs = Math.max(0, delayMs - TYPING_BEFORE_SEND);
       await new Promise(r => setTimeout(r, waitMs));
       const typingInterval = setInterval(() => sendTyping(creator.botToken, chatId, bizId), 4500);
@@ -679,7 +703,9 @@ async function handleUpdate(creatorId: string, update: Record<string, unknown>) 
 
       for (let i = 0; i < bubbles.length; i++) {
         if (i > 0) {
-          const gap = (4000 + Math.random() * 8000);
+          const bMin = (botConfig.timings?.interBubbleMin ?? 4) * 1000;
+          const bMax = (botConfig.timings?.interBubbleMax ?? 9) * 1000;
+          const gap = bMin + Math.random() * (bMax - bMin);
           await sendTyping(creator.botToken, chatId, bizId);
           await new Promise(r => setTimeout(r, gap));
         }

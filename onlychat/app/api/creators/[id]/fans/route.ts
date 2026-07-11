@@ -34,6 +34,8 @@ export interface Fan {
   warmupSent: boolean;       // warm-up envoyé avant le premier script
   fanProfile: string;        // résumé du profil du fan (prénom, âge, ville, job...)
   lastScriptEndedAt: string | null; // quand le dernier script s'est terminé/expiré
+  currentPhaseIndex: number;        // phase actuelle du fan (0-based)
+  messagesInPhase: number;          // messages reçus depuis le début de la phase courante
 }
 
 function filePath(creatorId: string) {
@@ -54,6 +56,8 @@ export function loadFans(creatorId: string): Fan[] {
       warmupSent: false,
       fanProfile: "",
       lastScriptEndedAt: null as string | null,
+      currentPhaseIndex: 0,
+      messagesInPhase: 0,
       ...fan,
     }));
   } catch { return []; }
@@ -91,6 +95,8 @@ export function upsertFan(creatorId: string, telegramId: string, patch: Partial<
     warmupSent: false,
     fanProfile: "",
     lastScriptEndedAt: null,
+    currentPhaseIndex: 0,
+    messagesInPhase: 0,
     ...patch,
   };
   fans.unshift(fan);

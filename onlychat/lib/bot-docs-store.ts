@@ -2,6 +2,31 @@ import fs from "fs";
 import path from "path";
 import { getDataDir } from "./data-dir";
 
+export interface BotTiming {
+  paymentTimeoutMin: number;    // minutes avant réduction/relance (défaut 10)
+  fastMin: number;              // messages min vitesse rapide
+  fastMax: number;
+  normalMin: number;
+  normalMax: number;
+  slowMin: number;
+  slowMax: number;
+  responseDelayMin: number;     // secondes délai min réponse IA
+  responseDelayMax: number;
+  typingBeforeSendMs: number;   // ms d'indicateur de frappe avant envoi
+  warmupDelayMin: number;       // secondes délai min warmup
+  warmupDelayMax: number;
+  interBubbleMin: number;       // secondes entre chaque bulle
+  interBubbleMax: number;
+}
+
+export interface BotPhase {
+  id: string;
+  name: string;           // "Phase 1 — Nouveau client"
+  icon: string;           // emoji
+  prompt: string;         // contexte injecté dans l'IA pendant cette phase
+  advanceAfterMessages: number; // 0 = jamais avancer automatiquement
+}
+
 export interface BotDocsConfig {
   warmupPrompt: string;
   interStepContext: string;
@@ -12,7 +37,51 @@ export interface BotDocsConfig {
   sexyKeywords: string[];
   discountKeywords: string[];
   paidKeywords: string[];
+  timings: BotTiming;
+  phases: BotPhase[];
 }
+
+export const DEFAULT_TIMINGS: BotTiming = {
+  paymentTimeoutMin: 10,
+  fastMin: 1, fastMax: 3,
+  normalMin: 4, normalMax: 7,
+  slowMin: 8, slowMax: 13,
+  responseDelayMin: 20, responseDelayMax: 60,
+  typingBeforeSendMs: 8000,
+  warmupDelayMin: 15, warmupDelayMax: 35,
+  interBubbleMin: 4, interBubbleMax: 9,
+};
+
+export const DEFAULT_PHASES: BotPhase[] = [
+  {
+    id: "phase1",
+    name: "Phase 1 — Nouveau client",
+    icon: "👋",
+    prompt: `C'est la toute première conversation avec ce fan. Accueille-le chaleureusement, présente-toi brièvement et crée une connexion naturelle. Pose-lui une question simple sur lui (son prénom, sa journée). Sois naturelle et souriante.`,
+    advanceAfterMessages: 5,
+  },
+  {
+    id: "phase2",
+    name: "Phase 2 — Présentation",
+    icon: "💬",
+    prompt: `Tu connais déjà un peu ce fan. Approfondis la relation : parle de toi, de ce que tu fais, de ton quotidien. Montre-toi intéressante et mystérieuse. Continue à apprendre à le connaître. Crée de la complicité.`,
+    advanceAfterMessages: 10,
+  },
+  {
+    id: "phase3",
+    name: "Phase 3 — Fidélisation",
+    icon: "🔥",
+    prompt: `Le fan te connaît bien maintenant. Renforce la relation : rappelle-toi de détails qu'il t'a partagés, sois plus intime et complice. Commence à créer une tension légère et intrigante sans trop en dévoiler.`,
+    advanceAfterMessages: 20,
+  },
+  {
+    id: "phase4",
+    name: "Phase 4 — Lancement script",
+    icon: "🎬",
+    prompt: `Le fan est fidèle et engagé. Le moment est venu de l'amener vers du contenu exclusif. Crée l'envie naturellement, sois mystérieuse et taquine. Le système de script se déclenchera automatiquement au bon moment.`,
+    advanceAfterMessages: 0,
+  },
+];
 
 export const DEFAULT_CONFIG: BotDocsConfig = {
   warmupPrompt: `Le fan vient de te parler. Tu vas bientôt lui envoyer du contenu exclusif.
@@ -53,10 +122,10 @@ Exemples corrects :
 "Pauline 😘"`,
 
   sexyKeywords: ["nude", "t'es sexy", "tes sexy", "fesse", "chatte", "t'es bonne", "tes bonne", "photo de toi", "montre toi", "nue", "seins", "cul"],
-
   discountKeywords: ["réduction", "discount", "moins cher", "trop cher", "c'est cher", "j'ai pas l'argent", "jai pas l'argent", "j'ai pas d'argent", "jai pas d'argent", "pas les moyens", "j'ai pas les sous", "je peux pas payer", "jpeux pas", "promo", "offre", "remise", "prix", "cher"],
-
   paidKeywords: ["j'ai payé", "j'ai payer", "jai payé", "jai payer", "j ai payé", "j ai payer", "jpayé", "jpayer", "i paid", "already paid", "j'ai acheté", "jai acheté"],
+  timings: DEFAULT_TIMINGS,
+  phases: DEFAULT_PHASES,
 };
 
 function configDir() {
@@ -74,7 +143,12 @@ export function loadBotDocsConfig(userId: string): BotDocsConfig {
     const f = configFile(userId);
     if (fs.existsSync(f)) {
       const data = JSON.parse(fs.readFileSync(f, "utf-8"));
-      return { ...DEFAULT_CONFIG, ...data };
+      return {
+        ...DEFAULT_CONFIG,
+        ...data,
+        timings: { ...DEFAULT_TIMINGS, ...(data.timings ?? {}) },
+        phases: data.phases ?? DEFAULT_PHASES,
+      };
     }
   } catch { /* ignore */ }
   return { ...DEFAULT_CONFIG };

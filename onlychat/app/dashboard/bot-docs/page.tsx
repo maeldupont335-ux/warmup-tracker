@@ -37,6 +37,14 @@ interface FlowStep {
   timingNote: string;
 }
 
+interface BotPhase {
+  id: string;
+  name: string;
+  icon: string;
+  prompt: string;
+  advanceAfterMessages: number;
+}
+
 interface BotDocsConfig {
   warmupPrompt: string;
   interStepContext: string;
@@ -49,9 +57,17 @@ interface BotDocsConfig {
   paidKeywords: string[];
   timings: BotTiming;
   flowSteps: FlowStep[];
+  phases: BotPhase[];
 }
 
 /* ── Défauts ── */
+const DEFAULT_PHASES: BotPhase[] = [
+  { id: "phase1", name: "Phase 1 — Nouveau client", icon: "👋", prompt: "C'est la toute première conversation avec ce fan. Accueille-le chaleureusement, présente-toi brièvement et crée une connexion naturelle. Pose-lui une question simple sur lui (son prénom, sa journée).", advanceAfterMessages: 5 },
+  { id: "phase2", name: "Phase 2 — Présentation", icon: "💬", prompt: "Tu connais déjà un peu ce fan. Approfondis la relation : parle de toi, de ce que tu fais, de ton quotidien. Montre-toi intéressante et mystérieuse. Continue à apprendre à le connaître.", advanceAfterMessages: 10 },
+  { id: "phase3", name: "Phase 3 — Fidélisation", icon: "🔥", prompt: "Le fan te connaît bien maintenant. Renforce la relation, rappelle-toi de détails qu'il t'a partagés, sois plus intime et complice. Commence à créer une tension légère et intrigante.", advanceAfterMessages: 20 },
+  { id: "phase4", name: "Phase 4 — Lancement script", icon: "🎬", prompt: "Le fan est fidèle et engagé. Le moment est venu de l'amener vers du contenu exclusif. Crée l'envie naturellement, sois mystérieuse et taquine.", advanceAfterMessages: 0 },
+];
+
 const DEFAULT_TIMINGS: BotTiming = {
   paymentTimeoutMin: 10,
   fastMin: 1, fastMax: 3,
@@ -83,6 +99,7 @@ const COLORS = ["#10b981", "#f59e0b", "#e11d48", "#7c3aed", "#6366f1", "#4b5563"
 
 const NAV = [
   { id: "flow", label: "🗺 Flux du bot" },
+  { id: "phases", label: "🔄 Phases" },
   { id: "timings", label: "⏱ Timings" },
   { id: "prompts", label: "🤖 Prompts IA" },
   { id: "keywords", label: "🔑 Mots-clés" },
@@ -280,6 +297,7 @@ function BotDocsPageInner() {
           ...raw,
           timings: { ...DEFAULT_TIMINGS, ...(raw.timings ?? {}) },
           flowSteps: raw.flowSteps ?? DEFAULT_FLOW_STEPS,
+          phases: raw.phases ?? DEFAULT_PHASES,
         });
       })
       .catch(() => {});
@@ -310,6 +328,10 @@ function BotDocsPageInner() {
       return { ...c, flowSteps: steps };
     });
   };
+
+  const updatePhase = (i: number, p: BotPhase) => setConfig(c => { if (!c) return c; const phases = [...c.phases]; phases[i] = p; return { ...c, phases }; });
+  const deletePhase = (i: number) => setConfig(c => { if (!c) return c; const phases = [...c.phases]; phases.splice(i, 1); return { ...c, phases }; });
+  const addPhase = () => setConfig(c => { if (!c) return c; const n = c.phases.length + 1; return { ...c, phases: [...c.phases, { id: "p" + Date.now(), name: `Phase ${n} — Nouvelle phase`, icon: "⚡", prompt: "", advanceAfterMessages: 10 }] }; });
 
   const reorderSteps = (steps: FlowStep[]) => {
     setConfig(c => c ? { ...c, flowSteps: steps } : c);
@@ -406,6 +428,67 @@ function BotDocsPageInner() {
             onAdd={addStep}
             onReset={resetFlow}
           />
+        </section>
+
+        {/* ── PHASES ── */}
+        <section id="sec-phases" style={{ scrollMarginTop: 80, marginBottom: 52 }}>
+          <SectionTitle>Phases de la relation</SectionTitle>
+          <p style={{ color: "#6b7280", fontSize: 13, marginBottom: 20, marginTop: -10 }}>
+            Chaque fan passe automatiquement d'une phase à l'autre. Le prompt de chaque phase est injecté dans l'IA pour adapter le comportement du bot.
+          </p>
+          {editMode && (
+            <button onClick={addPhase} style={{ padding: "8px 16px", borderRadius: 8, border: "1px solid #7c3aed55", background: "rgba(124,58,237,0.12)", color: "#a78bfa", fontSize: 13, fontWeight: 600, cursor: "pointer", fontFamily: "inherit", marginBottom: 16 }}>
+              + Ajouter une phase
+            </button>
+          )}
+          <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+            {config.phases.map((phase, i) => (
+              <div key={phase.id} style={{ background: "#111119", border: "1px solid #7c3aed33", borderRadius: 14, padding: "20px 24px", position: "relative" }}>
+                {/* Numéro de phase */}
+                <div style={{ position: "absolute", top: -12, left: 20, background: "#7c3aed", color: "#fff", fontSize: 11, fontWeight: 800, padding: "2px 12px", borderRadius: 20, letterSpacing: "0.05em" }}>
+                  {phase.icon} PHASE {i + 1}
+                </div>
+                <div style={{ display: "flex", gap: 12, alignItems: "center", marginBottom: 12, marginTop: 4 }}>
+                  {editMode ? (
+                    <>
+                      <input value={phase.icon} onChange={e => updatePhase(i, { ...phase, icon: e.target.value })} style={{ width: 44, padding: "4px 6px", background: "#0d0d18", border: "1px solid #2e2e4e", borderRadius: 7, color: "#e4e4f0", fontSize: 18, textAlign: "center", outline: "none" }} />
+                      <input value={phase.name} onChange={e => updatePhase(i, { ...phase, name: e.target.value })} style={{ flex: 1, padding: "7px 12px", background: "#0d0d18", border: "1px solid #2e2e4e", borderRadius: 8, color: "#e4e4f0", fontSize: 14, fontWeight: 700, outline: "none" }} />
+                      <button onClick={() => deletePhase(i)} style={{ padding: "5px 12px", background: "#3f0000", border: "1px solid #e11d4844", borderRadius: 6, color: "#ef4444", cursor: "pointer", fontSize: 12, fontWeight: 600 }}>✕</button>
+                    </>
+                  ) : (
+                    <div style={{ fontWeight: 700, fontSize: 15, color: "#e4e4f0" }}>{phase.name}</div>
+                  )}
+                </div>
+
+                {/* Prompt */}
+                <div style={{ marginBottom: 12 }}>
+                  <div style={{ fontSize: 11, fontWeight: 700, color: "#6b7280", marginBottom: 6, textTransform: "uppercase" as const, letterSpacing: "0.06em" }}>Prompt IA pendant cette phase</div>
+                  {editMode
+                    ? <textarea value={phase.prompt} onChange={e => updatePhase(i, { ...phase, prompt: e.target.value })} rows={4} style={{ width: "100%", padding: "10px 14px", background: "#0d0d18", border: "1px solid #7c3aed55", borderRadius: 8, color: "#c9c9e8", fontSize: 13, lineHeight: 1.65, fontFamily: "ui-monospace,Menlo,monospace", resize: "vertical", outline: "none", boxSizing: "border-box" }} />
+                    : <p style={{ margin: 0, padding: "10px 14px", background: "#0d0d18", border: "1px solid #1e1e2e", borderRadius: 8, color: "#9ca3af", fontSize: 13, lineHeight: 1.65, fontFamily: "ui-monospace,Menlo,monospace", whiteSpace: "pre-wrap" }}>{phase.prompt || <em style={{ color: "#4b5563" }}>Aucun prompt configuré</em>}</p>
+                  }
+                </div>
+
+                {/* Avancement */}
+                <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                  <span style={{ fontSize: 12, color: "#6b7280" }}>Passer à la phase suivante après</span>
+                  {editMode
+                    ? <input type="number" value={phase.advanceAfterMessages} min={0} max={500} onChange={e => updatePhase(i, { ...phase, advanceAfterMessages: Number(e.target.value) })} style={{ width: 64, padding: "5px 10px", background: "#0d0d18", border: "1px solid #7c3aed55", borderRadius: 7, color: "#a78bfa", fontSize: 14, fontWeight: 700, outline: "none", fontFamily: "ui-monospace,Menlo,monospace" }} />
+                    : <span style={{ color: "#a78bfa", fontWeight: 800, fontSize: 16, fontFamily: "ui-monospace,Menlo,monospace" }}>{phase.advanceAfterMessages}</span>
+                  }
+                  <span style={{ fontSize: 12, color: "#6b7280" }}>messages du fan {phase.advanceAfterMessages === 0 ? <strong style={{ color: "#f59e0b" }}>(phase finale — pas d'avancement auto)</strong> : ""}</span>
+                </div>
+
+                {/* Flèche vers suivante */}
+                {i < config.phases.length - 1 && !editMode && (
+                  <div style={{ position: "absolute", bottom: -20, left: "50%", transform: "translateX(-50%)", display: "flex", flexDirection: "column", alignItems: "center", zIndex: 1 }}>
+                    <div style={{ width: 1, height: 12, background: "#7c3aed55" }} />
+                    <div style={{ width: 0, height: 0, borderLeft: "5px solid transparent", borderRight: "5px solid transparent", borderTop: "6px solid #7c3aed55" }} />
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
         </section>
 
         {/* ── TIMINGS ── */}
