@@ -677,15 +677,21 @@ async function handleUpdate(creatorId: string, update: Record<string, unknown>) 
         interStepContext = "\n\n" + botConfig.waitingPaymentContext;
       }
 
+      const hasHistory = history.length > 0;
+      const alreadyIntroduced = alreadyAsked.length > 10; // le bot a déjà parlé
+
       const noRepeatHints = [
+        hasHistory ? "- Tu as DÉJÀ une conversation avec ce fan : ne te présente JAMAIS à nouveau, ne répète pas ton prénom, reprends directement la conversation là où elle s'est arrêtée" : "",
         (alreadyAsked.includes("ça va") || alreadyAsked.includes("tu vas")) ? "- NE DEMANDE PLUS comment il va, tu l'as déjà fait" : "",
         alreadyAsked.includes("tu fais quoi") ? "- NE DEMANDE PLUS ce qu'il fait" : "",
+        alreadyAsked.includes("comment tu t'appelles") || alreadyAsked.includes("c'est quoi ton prénom") ? "- NE DEMANDE PLUS son prénom, tu l'as déjà demandé" : "",
       ].filter(Boolean).join("\n");
 
-      // Prompt de phase active
+      // Prompt de phase active — skip l'intro Phase 1 si on a déjà un historique
       const phases = botConfig.phases ?? [];
-      const activePhase = phases[fan.currentPhaseIndex ?? 0];
-      const phaseSection = activePhase?.prompt
+      const phaseIdx = fan.currentPhaseIndex ?? 0;
+      const activePhase = phases[phaseIdx];
+      const phaseSection = (activePhase?.prompt && !(phaseIdx === 0 && alreadyIntroduced))
         ? `\n\nPHASE ACTUELLE — ${activePhase.name} :\n${activePhase.prompt}\n`
         : "";
 
@@ -738,7 +744,9 @@ async function handleUpdate(creatorId: string, update: Record<string, unknown>) 
 interface PendingMsg { text: string; update: Record<string, unknown>; receivedAt: number; }
 const fanQueues = new Map<string, PendingMsg[]>();
 const fanTimers = new Map<string, ReturnType<typeof setTimeout>>();
+const lastBotReplyAt = new Map<string, number>(); // cooldown anti-double-réponse
 const DEBOUNCE_MS = 5000;
+const REPLY_COOLDOWN_MS = 60_000; // 60s entre deux réponses IA au même fan
 
 function enqueueFanMessage(creatorId: string, fanId: string, text: string, update: Record<string, unknown>) {
   const key = `${creatorId}_${fanId}`;
@@ -748,6 +756,14 @@ function enqueueFanMessage(creatorId: string, fanId: string, text: string, updat
 
   const existing = fanTimers.get(key);
   if (existing) clearTimeout(existing);
+
+  // Si le bot a répondu il y a moins de REPLY_COOLDOWN_MS, on allonge le debounce
+  // pour grouper les messages du fan qui arrivent peu après une réponse
+  const lastReply = lastBotReplyAt.get(key) ?? 0;
+  const sinceLastReply = Date.now() - lastReply;
+  const effectiveDebounce = sinceLastReply < REPLY_COOLDOWN_MS
+    ? Math.min(REPLY_COOLDOWN_MS - sinceLastReply + DEBOUNCE_MS, 90_000)
+    : DEBOUNCE_MS;
 
   const timer = setTimeout(async () => {
     fanTimers.delete(key);
@@ -765,8 +781,9 @@ function enqueueFanMessage(creatorId: string, fanId: string, text: string, updat
       else mergedUpdate.message = msgCopy;
     }
 
+    lastBotReplyAt.set(key, Date.now());
     await handleUpdate(creatorId, mergedUpdate).catch(err => console.error("[Bot background error]", err));
-  }, DEBOUNCE_MS);
+  }, effectiveDebounce);
 
   fanTimers.set(key, timer);
 }
