@@ -109,7 +109,7 @@ export function purchaseLicense(userId: string): { ok: boolean; error?: string }
   billing.licenseExpiry = expiry.toISOString();
   billing.transactions.unshift({
     id: Date.now().toString(), type: "license",
-    amount: -LICENSE_PRICE_USD, description: "Licence mensuelle OnlyChat AI",
+    amount: -LICENSE_PRICE_USD, description: "Licence mensuelle PulsChat AI",
     createdAt: new Date().toISOString(),
   });
   saveUserBilling(billing);

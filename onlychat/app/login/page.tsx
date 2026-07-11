@@ -31,7 +31,7 @@ export default function LoginPage() {
               style={{ background: "linear-gradient(135deg,#a855f7,#7c3aed)" }}>
               <MessageCircle size={18} className="text-white" />
             </div>
-            <span className="font-bold text-xl">OnlyChat<span style={{ color: "#a855f7" }}> AI</span></span>
+            <span className="font-bold text-xl">PulsChat<span style={{ color: "#a855f7" }}> AI</span></span>
           </Link>
           <h1 className="text-2xl font-black text-white mb-2">Bon retour 👋</h1>
           <p className="text-sm" style={{ color: "#6b7280" }}>Connecte-toi à ton espace</p>

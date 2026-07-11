@@ -45,7 +45,7 @@ export default function Sidebar() {
             style={{ background: "linear-gradient(135deg,#a855f7,#7c3aed)" }}>
             <MessageCircle size={16} className="text-white" />
           </div>
-          <span className="font-bold">OnlyChat<span style={{ color: "#a855f7" }}> AI</span></span>
+          <span className="font-bold">PulsChat<span style={{ color: "#a855f7" }}> AI</span></span>
         </Link>
       </div>
 

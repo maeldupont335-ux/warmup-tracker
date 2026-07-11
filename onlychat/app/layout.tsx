@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "OnlyChat AI — Automatise tes revenus",
+  title: "PulsChat AI — Automatise tes revenus",
   description: "IA ultra-humaine qui gère tes chats 24/7, vend du PPV et booste tes revenus.",
 };
 

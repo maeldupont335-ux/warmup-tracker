@@ -16,7 +16,7 @@ export default function LandingPage() {
             style={{ background: "linear-gradient(135deg,#a855f7,#7c3aed)" }}>
             <MessageCircle size={16} className="text-white" />
           </div>
-          <span className="font-bold text-lg">OnlyChat<span style={{ color: "#a855f7" }}> AI</span></span>
+          <span className="font-bold text-lg">PulsChat<span style={{ color: "#a855f7" }}> AI</span></span>
         </div>
         <div className="hidden md:flex items-center gap-8 text-sm" style={{ color: "#9ca3af" }}>
           <a href="#features" className="hover:text-white transition-colors">Fonctionnalités</a>
@@ -52,7 +52,7 @@ export default function LandingPage() {
             </span>
           </h1>
           <p className="text-xl mb-10 max-w-2xl mx-auto leading-relaxed" style={{ color: "#9ca3af" }}>
-            OnlyChat AI répond à tes fans, vend ton PPV automatiquement et multiplie tes revenus — pendant que tu dors.
+            PulsChat AI répond à tes fans, vend ton PPV automatiquement et multiplie tes revenus — pendant que tu dors.
           </p>
           <div className="flex flex-col sm:flex-row items-center justify-center gap-4">
             <Link href="/register"
@@ -225,9 +225,9 @@ export default function LandingPage() {
             <div className="w-6 h-6 rounded flex items-center justify-center" style={{ background: "linear-gradient(135deg,#a855f7,#7c3aed)" }}>
               <MessageCircle size={12} className="text-white" />
             </div>
-            <span className="font-bold text-sm">OnlyChat AI</span>
+            <span className="font-bold text-sm">PulsChat AI</span>
           </div>
-          <div className="text-xs" style={{ color: "#4b5563" }}>© 2025 OnlyChat AI. Tous droits réservés.</div>
+          <div className="text-xs" style={{ color: "#4b5563" }}>© 2025 PulsChat AI. Tous droits réservés.</div>
           <div className="flex gap-6 text-xs" style={{ color: "#4b5563" }}>
             <a href="#" className="hover:text-white transition-colors">Confidentialité</a>
             <a href="#" className="hover:text-white transition-colors">CGU</a>

@@ -377,7 +377,7 @@ function BotDocsPageInner() {
       {/* Sidebar */}
       <nav style={{ width: 200, flexShrink: 0, position: "sticky", top: 0, height: "100vh", padding: "24px 0", borderRight: "1px solid #1a1a2a", background: "#0d0d1a", overflowY: "auto" }}>
         <div style={{ padding: "0 16px 16px", borderBottom: "1px solid #1a1a2a", marginBottom: 12 }}>
-          <div style={{ fontSize: 10, fontWeight: 700, color: "#e11d48", letterSpacing: "0.1em", textTransform: "uppercase", marginBottom: 2 }}>OnlyChat AI</div>
+          <div style={{ fontSize: 10, fontWeight: 700, color: "#e11d48", letterSpacing: "0.1em", textTransform: "uppercase", marginBottom: 2 }}>PulsChat AI</div>
           <div style={{ fontSize: 13, fontWeight: 700, color: "#e4e4f0" }}>Config & Flux</div>
         </div>
         {NAV.map(n => (
