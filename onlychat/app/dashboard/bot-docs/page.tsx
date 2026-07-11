@@ -1,5 +1,5 @@
 "use client";
-import React, { useState, useEffect, Component } from "react";
+import React, { useState, useEffect, useRef, Component } from "react";
 
 /* ── Error Boundary ── */
 class ErrorBoundary extends Component<{ children: React.ReactNode }, { error: string | null }> {
@@ -150,55 +150,115 @@ function NumInput({ label, unit, value, editMode, onChange, min = 0, max = 9999 
   );
 }
 
-/* ── Flow Step Card ── */
-function FlowStepCard({ step, index, editMode, total, onChange, onDelete, onMoveUp, onMoveDown }: {
-  step: FlowStep; index: number; editMode: boolean; total: number;
-  onChange: (s: FlowStep) => void; onDelete: () => void; onMoveUp: () => void; onMoveDown: () => void;
+/* ── Drag & Drop Flow List ── */
+function FlowList({ steps, editMode, onReorder, onUpdate, onDelete, onAdd, onReset }: {
+  steps: FlowStep[]; editMode: boolean;
+  onReorder: (steps: FlowStep[]) => void;
+  onUpdate: (i: number, s: FlowStep) => void;
+  onDelete: (i: number) => void;
+  onAdd: () => void;
+  onReset: () => void;
 }) {
-  const [open, setOpen] = useState(false);
+  const dragIdx = useRef<number | null>(null);
+  const [overIdx, setOverIdx] = useState<number | null>(null);
+  const [openIdx, setOpenIdx] = useState<number | null>(null);
 
-  if (editMode) {
-    return (
-      <div style={{ background: "#111119", border: `1px solid ${step.color}55`, borderRadius: 12, padding: "16px 20px", position: "relative" }}>
-        <div style={{ display: "flex", gap: 10, alignItems: "flex-start", marginBottom: 12 }}>
-          {/* Numéro */}
-          <div style={{ width: 26, height: 26, borderRadius: "50%", background: step.color + "22", border: `1px solid ${step.color}44`, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 11, fontWeight: 700, color: step.color, flexShrink: 0 }}>{index + 1}</div>
-          {/* Emoji */}
-          <input value={step.icon} onChange={e => onChange({ ...step, icon: e.target.value })} style={{ width: 48, padding: "4px 8px", background: "#0d0d18", border: "1px solid #2e2e4e", borderRadius: 7, color: "#e4e4f0", fontSize: 18, textAlign: "center", outline: "none" }} />
-          {/* Label */}
-          <input value={step.label} onChange={e => onChange({ ...step, label: e.target.value })} placeholder="Titre de l'étape" style={{ flex: 1, padding: "6px 10px", background: "#0d0d18", border: "1px solid #2e2e4e", borderRadius: 7, color: "#e4e4f0", fontSize: 14, fontWeight: 700, outline: "none" }} />
-          {/* Couleur */}
-          <select value={step.color} onChange={e => onChange({ ...step, color: e.target.value })} style={{ padding: "6px 8px", background: "#0d0d18", border: "1px solid #2e2e4e", borderRadius: 7, color: step.color, fontSize: 12, outline: "none", cursor: "pointer" }}>
-            {COLORS.map(c => <option key={c} value={c} style={{ color: c }}>{c}</option>)}
-          </select>
-        </div>
-        {/* Description */}
-        <input value={step.description} onChange={e => onChange({ ...step, description: e.target.value })} placeholder="Description de ce que fait cette étape" style={{ width: "100%", padding: "7px 12px", background: "#0d0d18", border: "1px solid #2e2e4e", borderRadius: 7, color: "#c9c9e8", fontSize: 13, outline: "none", boxSizing: "border-box", marginBottom: 8 }} />
-        {/* Timing note */}
-        <input value={step.timingNote} onChange={e => onChange({ ...step, timingNote: e.target.value })} placeholder="Note de timing (ex: délai {warmupDelayMin}-{warmupDelayMax}s)" style={{ width: "100%", padding: "7px 12px", background: "#0d0d18", border: "1px solid #2e2e4e", borderRadius: 7, color: "#6b7280", fontSize: 12, outline: "none", boxSizing: "border-box" }} />
-        {/* Actions */}
-        <div style={{ display: "flex", gap: 8, marginTop: 12, justifyContent: "flex-end" }}>
-          <button onClick={onMoveUp} disabled={index === 0} title="Monter" style={{ padding: "4px 10px", background: "transparent", border: "1px solid #2e2e4e", borderRadius: 6, color: index === 0 ? "#2e2e4e" : "#6b7280", cursor: index === 0 ? "not-allowed" : "pointer", fontSize: 14 }}>↑</button>
-          <button onClick={onMoveDown} disabled={index === total - 1} title="Descendre" style={{ padding: "4px 10px", background: "transparent", border: "1px solid #2e2e4e", borderRadius: 6, color: index === total - 1 ? "#2e2e4e" : "#6b7280", cursor: index === total - 1 ? "not-allowed" : "pointer", fontSize: 14 }}>↓</button>
-          <button onClick={onDelete} title="Supprimer" style={{ padding: "4px 12px", background: "#3f0000", border: "1px solid #e11d4844", borderRadius: 6, color: "#ef4444", cursor: "pointer", fontSize: 12, fontWeight: 600 }}>✕ Supprimer</button>
-        </div>
-      </div>
-    );
-  }
+  const handleDragStart = (i: number) => { dragIdx.current = i; };
+  const handleDragOver = (e: React.DragEvent, i: number) => {
+    e.preventDefault();
+    setOverIdx(i);
+  };
+  const handleDrop = (e: React.DragEvent, i: number) => {
+    e.preventDefault();
+    if (dragIdx.current === null || dragIdx.current === i) { setOverIdx(null); return; }
+    const arr = [...steps];
+    const [moved] = arr.splice(dragIdx.current, 1);
+    arr.splice(i, 0, moved);
+    onReorder(arr);
+    dragIdx.current = null;
+    setOverIdx(null);
+  };
+  const handleDragEnd = () => { dragIdx.current = null; setOverIdx(null); };
 
-  // Mode lecture : carte cliquable
   return (
-    <div onClick={() => setOpen(o => !o)} style={{ background: "#111119", border: `1px solid ${step.color}44`, borderRadius: 10, padding: "12px 18px", cursor: "pointer", transition: "border-color 0.12s", userSelect: "none" }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-        <div style={{ width: 24, height: 24, borderRadius: "50%", background: step.color + "22", border: `1px solid ${step.color}44`, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 10, fontWeight: 700, color: step.color, flexShrink: 0 }}>{index + 1}</div>
-        <span style={{ fontSize: 18 }}>{step.icon}</span>
-        <div style={{ flex: 1 }}>
-          <div style={{ fontWeight: 700, fontSize: 13, color: step.color }}>{step.label}</div>
-          {open && <div style={{ color: "#9ca3af", fontSize: 12, marginTop: 4 }}>{step.description}</div>}
+    <div style={{ display: "flex", flexDirection: "column", gap: 0 }}>
+      {editMode && (
+        <div style={{ display: "flex", gap: 10, marginBottom: 14 }}>
+          <button onClick={onAdd} style={{ padding: "8px 16px", borderRadius: 8, border: "1px solid #7c3aed55", background: "rgba(124,58,237,0.12)", color: "#a78bfa", fontSize: 13, fontWeight: 600, cursor: "pointer", fontFamily: "inherit" }}>+ Ajouter une étape</button>
+          <button onClick={onReset} style={{ padding: "8px 14px", borderRadius: 8, border: "1px solid #2e2e4e", background: "transparent", color: "#6b7280", fontSize: 12, cursor: "pointer", fontFamily: "inherit" }}>↺ Réinitialiser</button>
         </div>
-        {step.timingNote && <span style={{ fontSize: 10, color: "#4b5563", background: "#0d0d18", border: "1px solid #1e1e2e", borderRadius: 5, padding: "2px 7px" }}>{step.timingNote}</span>}
-        <span style={{ color: "#4b5563", fontSize: 12 }}>{open ? "▲" : "▼"}</span>
-      </div>
+      )}
+
+      {steps.map((step, i) => (
+        <React.Fragment key={step.id}>
+          {/* Zone de dépôt au-dessus */}
+          {editMode && overIdx === i && dragIdx.current !== null && dragIdx.current !== i && (
+            <div style={{ height: 4, background: "#7c3aed", borderRadius: 4, margin: "2px 0", transition: "all 0.1s" }} />
+          )}
+
+          <div
+            draggable={editMode}
+            onDragStart={() => handleDragStart(i)}
+            onDragOver={e => handleDragOver(e, i)}
+            onDrop={e => handleDrop(e, i)}
+            onDragEnd={handleDragEnd}
+            style={{
+              opacity: editMode && dragIdx.current === i ? 0.4 : 1,
+              transition: "opacity 0.15s",
+            }}
+          >
+            {editMode ? (
+              <div style={{ background: "#111119", border: `1px solid ${step.color}55`, borderRadius: 12, padding: "14px 18px", cursor: "grab" }}>
+                <div style={{ display: "flex", gap: 10, alignItems: "center", marginBottom: 10 }}>
+                  {/* Poignée drag */}
+                  <div title="Glisser pour déplacer" style={{ cursor: "grab", color: "#4b5563", fontSize: 16, lineHeight: 1, userSelect: "none", flexShrink: 0 }}>⠿</div>
+                  {/* Numéro */}
+                  <div style={{ width: 22, height: 22, borderRadius: "50%", background: step.color + "22", border: `1px solid ${step.color}44`, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 10, fontWeight: 700, color: step.color, flexShrink: 0 }}>{i + 1}</div>
+                  {/* Emoji */}
+                  <input value={step.icon} onChange={e => onUpdate(i, { ...step, icon: e.target.value })} onClick={e => e.stopPropagation()} style={{ width: 44, padding: "3px 6px", background: "#0d0d18", border: "1px solid #2e2e4e", borderRadius: 7, color: "#e4e4f0", fontSize: 18, textAlign: "center", outline: "none" }} />
+                  {/* Label */}
+                  <input value={step.label} onChange={e => onUpdate(i, { ...step, label: e.target.value })} onClick={e => e.stopPropagation()} placeholder="Titre" style={{ flex: 1, padding: "6px 10px", background: "#0d0d18", border: "1px solid #2e2e4e", borderRadius: 7, color: "#e4e4f0", fontSize: 14, fontWeight: 700, outline: "none" }} />
+                  {/* Couleur */}
+                  <select value={step.color} onChange={e => onUpdate(i, { ...step, color: e.target.value })} style={{ padding: "5px 8px", background: "#0d0d18", border: "1px solid #2e2e4e", borderRadius: 7, color: step.color, fontSize: 12, outline: "none", cursor: "pointer" }}>
+                    {COLORS.map(c => <option key={c} value={c} style={{ color: c }}>{c}</option>)}
+                  </select>
+                  {/* Supprimer */}
+                  <button onClick={e => { e.stopPropagation(); onDelete(i); }} style={{ padding: "4px 10px", background: "#3f0000", border: "1px solid #e11d4844", borderRadius: 6, color: "#ef4444", cursor: "pointer", fontSize: 12, fontWeight: 600, flexShrink: 0 }}>✕</button>
+                </div>
+                <input value={step.description} onChange={e => onUpdate(i, { ...step, description: e.target.value })} placeholder="Description" onClick={e => e.stopPropagation()} style={{ width: "100%", padding: "6px 12px", background: "#0d0d18", border: "1px solid #2e2e4e", borderRadius: 7, color: "#c9c9e8", fontSize: 13, outline: "none", boxSizing: "border-box", marginBottom: 6 }} />
+                <input value={step.timingNote} onChange={e => onUpdate(i, { ...step, timingNote: e.target.value })} placeholder="Note de timing (ex: {warmupDelayMin}-{warmupDelayMax}s)" onClick={e => e.stopPropagation()} style={{ width: "100%", padding: "6px 12px", background: "#0d0d18", border: "1px solid #2e2e4e", borderRadius: 7, color: "#6b7280", fontSize: 12, outline: "none", boxSizing: "border-box" }} />
+              </div>
+            ) : (
+              <div onClick={() => setOpenIdx(openIdx === i ? null : i)} style={{ background: "#111119", border: `1px solid ${step.color}44`, borderRadius: 10, padding: "12px 18px", cursor: "pointer", userSelect: "none" }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                  <div style={{ width: 24, height: 24, borderRadius: "50%", background: step.color + "22", border: `1px solid ${step.color}44`, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 10, fontWeight: 700, color: step.color, flexShrink: 0 }}>{i + 1}</div>
+                  <span style={{ fontSize: 18 }}>{step.icon}</span>
+                  <div style={{ flex: 1 }}>
+                    <div style={{ fontWeight: 700, fontSize: 13, color: step.color }}>{step.label}</div>
+                    {openIdx === i && <div style={{ color: "#9ca3af", fontSize: 12, marginTop: 4 }}>{step.description}</div>}
+                  </div>
+                  {step.timingNote && <span style={{ fontSize: 10, color: "#4b5563", background: "#0d0d18", border: "1px solid #1e1e2e", borderRadius: 5, padding: "2px 7px" }}>{step.timingNote}</span>}
+                  <span style={{ color: "#4b5563", fontSize: 12 }}>{openIdx === i ? "▲" : "▼"}</span>
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Flèche entre étapes */}
+          {i < steps.length - 1 && (
+            <div style={{ display: "flex", flexDirection: "column", alignItems: "center", padding: "2px 0" }}>
+              <div style={{ width: 1, height: 14, background: "#2e2e4e" }} />
+              <div style={{ width: 0, height: 0, borderLeft: "5px solid transparent", borderRight: "5px solid transparent", borderTop: "6px solid #2e2e4e" }} />
+            </div>
+          )}
+        </React.Fragment>
+      ))}
+
+      {editMode && (
+        <button onClick={onAdd} style={{ width: "100%", marginTop: 14, padding: "10px", borderRadius: 8, border: "1px dashed #2e2e4e", background: "transparent", color: "#4b5563", fontSize: 13, cursor: "pointer", fontFamily: "inherit" }}>
+          + Ajouter une étape en bas
+        </button>
+      )}
     </div>
   );
 }
@@ -251,15 +311,8 @@ function BotDocsPageInner() {
     });
   };
 
-  const moveStep = (index: number, dir: -1 | 1) => {
-    setConfig(c => {
-      if (!c) return c;
-      const steps = [...c.flowSteps];
-      const target = index + dir;
-      if (target < 0 || target >= steps.length) return c;
-      [steps[index], steps[target]] = [steps[target], steps[index]];
-      return { ...c, flowSteps: steps };
-    });
+  const reorderSteps = (steps: FlowStep[]) => {
+    setConfig(c => c ? { ...c, flowSteps: steps } : c);
   };
 
   const addStep = () => {
@@ -343,46 +396,16 @@ function BotDocsPageInner() {
         {/* ── FLUX ── */}
         <section id="sec-flow" style={{ scrollMarginTop: 80, marginBottom: 52 }}>
           <SectionTitle>Flux du bot — étapes</SectionTitle>
-
-          {editMode && (
-            <div style={{ display: "flex", gap: 10, marginBottom: 16 }}>
-              <button onClick={addStep} style={{ padding: "8px 16px", borderRadius: 8, border: "1px solid #7c3aed55", background: "rgba(124,58,237,0.12)", color: "#a78bfa", fontSize: 13, fontWeight: 600, cursor: "pointer", fontFamily: "inherit" }}>
-                + Ajouter une étape
-              </button>
-              <button onClick={resetFlow} style={{ padding: "8px 14px", borderRadius: 8, border: "1px solid #2e2e4e", background: "transparent", color: "#6b7280", fontSize: 12, cursor: "pointer", fontFamily: "inherit" }}>
-                ↺ Réinitialiser le flux
-              </button>
-            </div>
-          )}
-
-          <div style={{ display: "flex", flexDirection: "column", gap: 0 }}>
-            {config.flowSteps.map((step, i) => (
-              <React.Fragment key={step.id}>
-                <FlowStepCard
-                  step={step}
-                  index={i}
-                  editMode={editMode}
-                  total={config.flowSteps.length}
-                  onChange={s => updateStep(i, s)}
-                  onDelete={() => deleteStep(i)}
-                  onMoveUp={() => moveStep(i, -1)}
-                  onMoveDown={() => moveStep(i, 1)}
-                />
-                {i < config.flowSteps.length - 1 && (
-                  <div style={{ display: "flex", flexDirection: "column", alignItems: "center", padding: "2px 0" }}>
-                    <div style={{ width: 1, height: 16, background: "#2e2e4e" }} />
-                    <div style={{ width: 0, height: 0, borderLeft: "5px solid transparent", borderRight: "5px solid transparent", borderTop: "6px solid #2e2e4e" }} />
-                  </div>
-                )}
-              </React.Fragment>
-            ))}
-          </div>
-
-          {editMode && (
-            <button onClick={addStep} style={{ width: "100%", marginTop: 16, padding: "10px", borderRadius: 8, border: "1px dashed #2e2e4e", background: "transparent", color: "#4b5563", fontSize: 13, cursor: "pointer", fontFamily: "inherit" }}>
-              + Ajouter une étape en bas
-            </button>
-          )}
+          {editMode && <p style={{ color: "#6b7280", fontSize: 12, marginBottom: 14, marginTop: -10 }}>⠿ Glisse les cartes pour les réordonner · Clique sur ✕ pour supprimer</p>}
+          <FlowList
+            steps={config.flowSteps}
+            editMode={editMode}
+            onReorder={reorderSteps}
+            onUpdate={updateStep}
+            onDelete={deleteStep}
+            onAdd={addStep}
+            onReset={resetFlow}
+          />
         </section>
 
         {/* ── TIMINGS ── */}
