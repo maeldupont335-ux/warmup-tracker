@@ -54,7 +54,7 @@ export default function LoginPage() {
             <div>
               <label className="block text-sm font-medium mb-2 text-white">Email</label>
               <input
-                type="email" required value={email} onChange={e => setEmail(e.target.value)}
+                type="email" name="email" autoComplete="email" required value={email} onChange={e => setEmail(e.target.value)}
                 placeholder="toi@example.com"
                 className="w-full px-4 py-3 rounded-xl text-sm outline-none transition-all"
                 style={{ background: "#0a0a0f", border: "1px solid #1e1e2e", color: "#fff" }}
@@ -66,7 +66,7 @@ export default function LoginPage() {
               <label className="block text-sm font-medium mb-2 text-white">Mot de passe</label>
               <div className="relative">
                 <input
-                  type={showPwd ? "text" : "password"} required value={password} onChange={e => setPassword(e.target.value)}
+                  type={showPwd ? "text" : "password"} name="password" autoComplete="current-password" required value={password} onChange={e => setPassword(e.target.value)}
                   placeholder="••••••••"
                   className="w-full px-4 py-3 rounded-xl text-sm outline-none transition-all pr-11"
                   style={{ background: "#0a0a0f", border: "1px solid #1e1e2e", color: "#fff" }}
