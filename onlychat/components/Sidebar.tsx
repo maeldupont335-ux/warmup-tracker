@@ -3,7 +3,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import {
   MessageCircle, LayoutDashboard, Users, BarChart3,
-  Settings, LogOut, Bell, Zap, MessagesSquare, Brain, Bot, CreditCard, ShieldCheck, DollarSign, BookOpen
+  Settings, LogOut, Bell, Zap, MessagesSquare, Brain, Bot, CreditCard, ShieldCheck, DollarSign, BookOpen, Sparkles
 } from "lucide-react";
 import { createClient } from "@/lib/supabase-browser";
 import { useEffect, useState } from "react";
@@ -13,6 +13,7 @@ const nav = [
   { href: "/dashboard/creators", label: "Mes créateurs", icon: Users },
   { href: "/dashboard/conversations", label: "Conversations", icon: MessagesSquare },
   { href: "/dashboard/analytics", label: "Analytics", icon: BarChart3 },
+  { href: "/dashboard/subscription", label: "Mon abonnement", icon: Sparkles },
   { href: "/dashboard/billing", label: "Facturation", icon: CreditCard },
   { href: "/dashboard/bot-docs", label: "Doc du bot", icon: BookOpen },
 ];

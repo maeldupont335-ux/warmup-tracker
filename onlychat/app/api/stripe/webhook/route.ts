@@ -1,9 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
 import Stripe from "stripe";
+import { supabaseAdmin } from "@/lib/supabase";
+import { loadUserBilling, saveUserBilling } from "@/lib/billing-store";
 
-const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!, {
-  apiVersion: "2025-06-30.basil",
-});
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!, {} as any);
 
 export async function POST(req: NextRequest) {
   const body = await req.text();
@@ -21,14 +22,34 @@ export async function POST(req: NextRequest) {
   switch (event.type) {
     case "checkout.session.completed": {
       const session = event.data.object as Stripe.Checkout.Session;
-      console.log(`[Stripe] Nouveau paiement — email: ${session.customer_email}, plan: ${session.metadata?.plan}`);
-      // TODO: activer l'abonnement en base pour session.customer_email
+      const email = session.customer_details?.email || session.customer_email;
+      const planKey = session.metadata?.plan || "";
+      if (email) {
+        const { data } = await supabaseAdmin.auth.admin.listUsers();
+        const user = data?.users?.find(u => u.email === email);
+        if (user) {
+          const billing = loadUserBilling(user.id, email);
+          (billing as Record<string, unknown>).stripePlan = planKey;
+          (billing as Record<string, unknown>).stripeCustomerId = session.customer;
+          (billing as Record<string, unknown>).stripeSubscriptionId = session.subscription;
+          saveUserBilling(billing);
+        }
+      }
       break;
     }
     case "customer.subscription.deleted": {
       const sub = event.data.object as Stripe.Subscription;
-      console.log(`[Stripe] Abonnement annulé — customer: ${sub.customer}`);
-      // TODO: désactiver l'abonnement en base
+      const customerId = sub.customer as string;
+      const { data } = await supabaseAdmin.auth.admin.listUsers();
+      for (const user of data?.users ?? []) {
+        const billing = loadUserBilling(user.id, user.email ?? "");
+        if ((billing as Record<string, unknown>).stripeCustomerId === customerId) {
+          (billing as Record<string, unknown>).stripePlan = null;
+          (billing as Record<string, unknown>).stripeSubscriptionId = null;
+          saveUserBilling(billing);
+          break;
+        }
+      }
       break;
     }
   }

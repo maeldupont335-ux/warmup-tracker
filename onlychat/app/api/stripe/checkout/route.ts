@@ -1,9 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import Stripe from "stripe";
+import { createServerClient } from "@supabase/ssr";
 
-const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!, {
-  apiVersion: "2025-06-30.basil",
-});
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!, {} as any);
 
 const PRICE_IDS: Record<string, string> = {
   pro: process.env.STRIPE_PRICE_PRO!,
@@ -18,6 +18,18 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "Plan invalide" }, { status: 400 });
     }
 
+    // Récupère l'email de l'utilisateur connecté si possible
+    let email: string | undefined;
+    try {
+      const supabase = createServerClient(
+        process.env.NEXT_PUBLIC_SUPABASE_URL!,
+        process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
+        { cookies: { getAll: () => req.cookies.getAll(), setAll: () => {} } }
+      );
+      const { data: { user } } = await supabase.auth.getUser();
+      email = user?.email ?? undefined;
+    } catch { /* non authentifié — pas grave */ }
+
     const baseUrl = process.env.NEXT_PUBLIC_URL || "https://chat-ai-pro.onrender.com";
 
     const session = await stripe.checkout.sessions.create({
@@ -27,6 +39,8 @@ export async function POST(req: NextRequest) {
       success_url: `${baseUrl}/dashboard?checkout=success&plan=${plan}`,
       cancel_url: `${baseUrl}/#pricing`,
       allow_promotion_codes: true,
+      metadata: { plan },
+      customer_email: email || undefined,
     });
 
     return NextResponse.json({ url: session.url });
