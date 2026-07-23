@@ -35,3 +35,19 @@ body {
   background: #2a2a3e;
   border-radius: 3px;
 }
+
+/* ── Landing page animations ── */
+@keyframes lp-pulse { 0%,100%{opacity:1;transform:scale(1)} 50%{opacity:0.7;transform:scale(1.05)} }
+@keyframes lp-bounce { 0%,100%{transform:translateY(0)} 50%{transform:translateY(-5px)} }
+@keyframes lp-slideUp { from{opacity:0;transform:translateY(10px)} to{opacity:1;transform:translateY(0)} }
+@keyframes lp-float { 0%,100%{transform:translateY(0)} 50%{transform:translateY(-12px)} }
+@keyframes lp-shimmer { 0%{background-position:-200% center} 100%{background-position:200% center} }
+@keyframes lp-glow { 0%,100%{box-shadow:0 0 20px rgba(245,158,11,0.3)} 50%{box-shadow:0 0 40px rgba(245,158,11,0.6)} }
+@keyframes lp-spin { to{transform:rotate(360deg)} }
+@keyframes lp-grad-shift { 0%,100%{background-position:0% 50%} 50%{background-position:100% 50%} }
+
+.lp-card-hover { transition: all 0.3s ease; }
+.lp-card-hover:hover { transform: translateY(-4px); border-color: rgba(245,158,11,0.3) !important; box-shadow: 0 20px 60px rgba(245,158,11,0.08); }
+.lp-btn-primary { transition: all 0.3s ease; }
+.lp-btn-primary:hover { transform: scale(1.05); box-shadow: 0 0 40px rgba(245,158,11,0.4); }
+.lp-nav-link:hover { color: #fff !important; }
