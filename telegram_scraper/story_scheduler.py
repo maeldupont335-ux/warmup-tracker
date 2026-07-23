@@ -5,6 +5,7 @@ Run: python telegram_scraper/story_scheduler.py
 
 import asyncio, json, os, sys, uuid, hashlib, time as _time, secrets
 import concurrent.futures
+import stripe as _stripe
 from datetime import datetime, date, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -157,6 +158,16 @@ async def _get_client(acc_id: str, accounts_list: list | None = None):
 # ── App ───────────────────────────────────────────────────────────────────────
 app = FastAPI(title="Story Scheduler")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"], allow_credentials=True)
+
+# ── Stripe ────────────────────────────────────────────────────────────────────
+_stripe.api_key = os.getenv("STRIPE_SECRET_KEY", "")
+STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET_AG", "")
+STRIPE_PRICES = {
+    "starter":  os.getenv("STRIPE_PRICE_STARTER_AG", ""),
+    "pro":      os.getenv("STRIPE_PRICE_PRO_AG", ""),
+    "business": os.getenv("STRIPE_PRICE_BUSINESS_AG", ""),
+}
+BASE_URL = "https://agencymael.duckdns.org"
 
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import Response as StarletteResponse
@@ -2062,6 +2073,44 @@ async def api_update_profile(pid: str, req: dict = Body(...)):
         _reload_for_profile(pid)
     return {**profs[idx], "pin_set": bool(profs[idx].get("pin_hash")), "pin_hash": None}
 
+@app.post("/api/stripe/checkout")
+async def api_stripe_checkout(req: dict = Body(...)):
+    plan = req.get("plan", "")
+    profile_id = req.get("profile_id", "")
+    price_id = STRIPE_PRICES.get(plan, "")
+    if not price_id:
+        raise HTTPException(400, f"Plan invalide ou price_id manquant pour '{plan}'")
+    session = _stripe.checkout.Session.create(
+        mode="subscription",
+        payment_method_types=["card"],
+        line_items=[{"price": price_id, "quantity": 1}],
+        success_url=f"{BASE_URL}/?checkout=success&sid={{CHECKOUT_SESSION_ID}}&pid={profile_id}",
+        cancel_url=f"{BASE_URL}/",
+        metadata={"plan": plan, "profile_id": profile_id},
+    )
+    return {"url": session.url}
+
+@app.get("/api/stripe/verify-session")
+async def api_stripe_verify_session(sid: str, pid: str):
+    try:
+        session = _stripe.checkout.Session.retrieve(sid)
+        if session.status == "complete" and session.payment_status in ("paid", "no_payment_required"):
+            meta = session.metadata or {}
+            plan = meta.get("plan", "")
+            profile_id = meta.get("profile_id", pid)
+            if plan and profile_id:
+                profs = _load_profiles()
+                idx = next((i for i, p in enumerate(profs) if p["id"] == profile_id), None)
+                if idx is not None:
+                    profs[idx]["plan"] = plan
+                    profs[idx]["stripe_customer_id"] = session.customer
+                    profs[idx]["stripe_subscription_id"] = session.subscription
+                    _save_profiles(profs)
+                    return {"ok": True, "plan": plan}
+        return {"ok": False, "error": "Paiement non confirmé"}
+    except Exception as e:
+        raise HTTPException(400, str(e))
+
 def _oneup_fetch_social_accounts(key: str, platform: str) -> dict[str, dict]:
     """Récupère les comptes d'une plateforme via l'API OneUp (listsocialaccounts)."""
     import requests as _req
@@ -3534,37 +3583,117 @@ document.addEventListener('keydown',function(e){
   </aside>
 
   <!-- Subscription modal -->
+  <style>
+    #subModal .sub-box{background:linear-gradient(160deg,#0d0b1a,#080810);border:1px solid #1e1b3a;border-radius:24px;padding:32px 28px;width:580px;max-width:96vw;max-height:90vh;overflow-y:auto;position:relative}
+    #subModal .sub-box::before{content:'';position:absolute;inset:0;border-radius:24px;background:radial-gradient(ellipse 60% 40% at 50% 0%,rgba(124,58,237,.12),transparent 70%);pointer-events:none}
+    .sub-plan-card{border-radius:16px;padding:18px 20px;position:relative;overflow:hidden;transition:.2s}
+    .sub-plan-card.active{box-shadow:0 0 32px rgba(124,58,237,.25)}
+    .sub-pay-btn{width:100%;padding:14px;border-radius:14px;border:none;font-size:.82rem;font-weight:800;cursor:pointer;transition:all .2s;position:relative;overflow:hidden}
+    .sub-pay-btn:hover{transform:translateY(-1px)}
+    .sub-pay-btn:disabled{opacity:.5;cursor:wait;transform:none}
+    @keyframes sub-spinner-rot{to{transform:rotate(360deg)}}
+    @keyframes sub-grad-shift{0%,100%{background-position:0% 50%}50%{background-position:100% 50%}}
+    .sub-spinner{width:13px;height:13px;border-radius:50%;border:2px solid currentColor;border-top-color:transparent;display:inline-block;animation:sub-spinner-rot .7s linear infinite;margin-right:6px;vertical-align:middle}
+  </style>
   <div class="pin-modal" id="subModal" onclick="if(event.target===this)this.classList.remove('open')">
-    <div class="pin-box" onclick="event.stopPropagation()" style="width:540px;max-width:96vw;max-height:90vh;overflow-y:auto;padding:32px 28px">
-      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:24px">
-        <div style="font-size:1.25rem;font-weight:900;letter-spacing:-.02em">💳 Mon abonnement</div>
-        <button onclick="document.getElementById('subModal').classList.remove('open')" style="background:none;border:none;color:var(--t3);cursor:pointer;font-size:1.2rem;padding:4px">✕</button>
+    <div class="sub-box" onclick="event.stopPropagation()">
+      <!-- Header -->
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:28px">
+        <div>
+          <div style="font-size:1.3rem;font-weight:900;letter-spacing:-.03em;color:#fff">Mon abonnement</div>
+          <div style="font-size:.75rem;color:#555;margin-top:3px">Gérer ton forfait</div>
+        </div>
+        <button onclick="document.getElementById('subModal').classList.remove('open')" style="background:rgba(255,255,255,.06);border:1px solid #2a2040;color:#888;cursor:pointer;width:32px;height:32px;border-radius:10px;font-size:1rem;display:flex;align-items:center;justify-content:center;transition:.15s" onmouseover="this.style.background='rgba(255,255,255,.1)'" onmouseout="this.style.background='rgba(255,255,255,.06)'">✕</button>
       </div>
-      <div id="subCurrentPlan" style="background:#0d0d0f;border:1px solid #1c1c22;border-radius:14px;padding:20px;margin-bottom:20px">
-        <div style="font-size:.65rem;font-weight:700;text-transform:uppercase;letter-spacing:.1em;color:#555;margin-bottom:10px">Forfait actuel</div>
-        <div style="display:flex;align-items:center;gap:12px">
-          <div id="subPlanBadge" style="font-size:1.8rem"></div>
-          <div>
-            <div id="subPlanName" style="font-size:1.1rem;font-weight:800;color:var(--t1)">—</div>
-            <div id="subPlanPrice" style="font-size:.82rem;color:var(--t2);margin-top:2px">—</div>
+
+      <!-- Forfait actuel -->
+      <div id="subCurrentPlan" style="margin-bottom:24px">
+        <div style="font-size:.6rem;font-weight:700;text-transform:uppercase;letter-spacing:.12em;color:#444;margin-bottom:10px">Forfait actuel</div>
+        <div class="sub-plan-card" style="background:rgba(255,255,255,.03);border:1px solid #1e1b3a">
+          <div style="display:flex;align-items:center;gap:14px">
+            <div id="subPlanBadge" style="font-size:2rem;width:48px;height:48px;display:flex;align-items:center;justify-content:center;background:rgba(124,58,237,.12);border:1px solid rgba(124,58,237,.2);border-radius:14px"></div>
+            <div>
+              <div id="subPlanName" style="font-size:1.15rem;font-weight:900;color:#fff;letter-spacing:-.02em">—</div>
+              <div id="subPlanPrice" style="font-size:.8rem;color:#555;margin-top:3px">—</div>
+            </div>
+          </div>
+          <div id="subPlanFeats" style="margin-top:14px;display:flex;flex-wrap:wrap;gap:6px"></div>
+        </div>
+      </div>
+
+      <!-- Admin section -->
+      <div id="subAdminSection" style="display:none;margin-bottom:8px">
+        <div style="font-size:.6rem;font-weight:700;text-transform:uppercase;letter-spacing:.12em;color:#444;margin-bottom:12px">Modifier le forfait <span style="color:#7c3aed;background:rgba(124,58,237,.1);padding:2px 7px;border-radius:5px;font-size:.6rem">ADMIN</span></div>
+        <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px">
+          <button onclick="subSetPlan('')" id="subBtnNone" style="padding:12px 6px;border-radius:12px;border:1px solid #222;background:#0d0b1a;color:#555;font-size:.72rem;font-weight:700;cursor:pointer;transition:.15s">🔒<br><span style="font-size:.6rem;font-weight:400">Aucun</span></button>
+          <button onclick="subSetPlan('starter')" id="subBtnStarter" style="padding:12px 6px;border-radius:12px;border:1px solid #2a2040;background:#100e20;color:#a78bfa;font-size:.72rem;font-weight:700;cursor:pointer;transition:.15s">⚡<br><span style="font-size:.6rem;font-weight:400">Starter<br>15€</span></button>
+          <button onclick="subSetPlan('pro')" id="subBtnPro" style="padding:12px 6px;border-radius:12px;border:1px solid #5b4fe8;background:linear-gradient(145deg,#13102e,#0f0c22);color:#a78bfa;font-size:.72rem;font-weight:700;cursor:pointer;box-shadow:0 0 16px rgba(91,79,232,.2);transition:.15s">🚀<br><span style="font-size:.6rem;font-weight:400">Pro<br>39€</span></button>
+          <button onclick="subSetPlan('business')" id="subBtnBusiness" style="padding:12px 6px;border-radius:12px;border:1px solid #1e3a5f;background:#0a1628;color:#60a5fa;font-size:.72rem;font-weight:700;cursor:pointer;transition:.15s">🏢<br><span style="font-size:.6rem;font-weight:400">Business<br>239€</span></button>
+        </div>
+        <div id="subSaveStatus" style="margin-top:10px;font-size:.72rem;min-height:16px;text-align:center"></div>
+      </div>
+
+      <!-- User payment section -->
+      <div id="subUserSection" style="display:none">
+        <div style="font-size:.6rem;font-weight:700;text-transform:uppercase;letter-spacing:.12em;color:#444;margin-bottom:14px">Choisir un forfait</div>
+        <div style="display:flex;flex-direction:column;gap:10px">
+
+          <!-- Starter -->
+          <div style="border-radius:16px;padding:1px;background:linear-gradient(135deg,#2a2040,#1e1b3a)">
+            <div style="border-radius:15px;background:#0d0b1a;padding:16px 18px;display:flex;align-items:center;gap:14px">
+              <div style="width:40px;height:40px;border-radius:12px;background:rgba(167,139,250,.1);border:1px solid rgba(167,139,250,.2);display:flex;align-items:center;justify-content:center;font-size:1.2rem;flex-shrink:0">⚡</div>
+              <div style="flex:1">
+                <div style="font-weight:800;font-size:.9rem;color:#fff">Starter</div>
+                <div style="font-size:.72rem;color:#555;margin-top:1px">10 comptes · Auto-scheduling · Telegram</div>
+              </div>
+              <div style="text-align:right;flex-shrink:0;margin-right:12px">
+                <div style="font-size:1.2rem;font-weight:900;color:#a78bfa">15€</div>
+                <div style="font-size:.62rem;color:#444">/mois</div>
+              </div>
+              <button class="sub-pay-btn" onclick="subPayPlan('starter')" id="subPayStarter" style="width:auto;padding:10px 18px;background:rgba(167,139,250,.12);border:1px solid rgba(167,139,250,.25);color:#a78bfa">S'abonner</button>
+            </div>
+          </div>
+
+          <!-- Pro -->
+          <div style="border-radius:16px;padding:1px;background:linear-gradient(135deg,#7c3aed,#4f46e5,#a78bfa,#4f46e5,#7c3aed);background-size:300%;animation:sub-grad-shift 3s ease infinite" id="subProWrap">
+            <div style="border-radius:15px;background:linear-gradient(145deg,#13102e,#0f0c22);padding:16px 18px;display:flex;align-items:center;gap:14px;position:relative">
+              <div style="position:absolute;top:-10px;left:50%;transform:translateX(-50%);background:linear-gradient(135deg,#7c3aed,#4f46e5);color:#fff;font-size:.6rem;font-weight:900;padding:3px 12px;border-radius:99px;white-space:nowrap;letter-spacing:.05em">✦ POPULAIRE ✦</div>
+              <div style="width:40px;height:40px;border-radius:12px;background:rgba(124,58,237,.2);border:1px solid rgba(124,58,237,.3);display:flex;align-items:center;justify-content:center;font-size:1.2rem;flex-shrink:0">🚀</div>
+              <div style="flex:1">
+                <div style="font-weight:800;font-size:.9rem;color:#fff">Pro</div>
+                <div style="font-size:.72rem;color:#7c6aad;margin-top:1px">25 comptes · Stats · Toutes plateformes</div>
+              </div>
+              <div style="text-align:right;flex-shrink:0;margin-right:12px">
+                <div style="font-size:1.2rem;font-weight:900;background:linear-gradient(135deg,#a78bfa,#7c3aed);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text">39€</div>
+                <div style="font-size:.62rem;color:#444">/mois</div>
+              </div>
+              <button class="sub-pay-btn" onclick="subPayPlan('pro')" id="subPayPro" style="width:auto;padding:10px 18px;background:linear-gradient(135deg,#7c3aed,#4f46e5);color:#fff;box-shadow:0 0 20px rgba(124,58,237,.4)">S'abonner</button>
+            </div>
+          </div>
+
+          <!-- Business -->
+          <div style="border-radius:16px;padding:1px;background:linear-gradient(135deg,#1e3a5f,#0a1628)">
+            <div style="border-radius:15px;background:#080f1e;padding:16px 18px;display:flex;align-items:center;gap:14px">
+              <div style="width:40px;height:40px;border-radius:12px;background:rgba(96,165,250,.08);border:1px solid rgba(96,165,250,.15);display:flex;align-items:center;justify-content:center;font-size:1.2rem;flex-shrink:0">🏢</div>
+              <div style="flex:1">
+                <div style="font-weight:800;font-size:.9rem;color:#fff">Business</div>
+                <div style="font-size:.72rem;color:#555;margin-top:1px">Illimité · Support dédié · SLA 99.9%</div>
+              </div>
+              <div style="text-align:right;flex-shrink:0;margin-right:12px">
+                <div style="font-size:1.2rem;font-weight:900;color:#60a5fa">239€</div>
+                <div style="font-size:.62rem;color:#444">/mois</div>
+              </div>
+              <button class="sub-pay-btn" onclick="subPayPlan('business')" id="subPayBusiness" style="width:auto;padding:10px 18px;background:rgba(96,165,250,.1);border:1px solid rgba(96,165,250,.2);color:#60a5fa">S'abonner</button>
+            </div>
           </div>
         </div>
-        <div id="subPlanFeats" style="margin-top:14px;display:flex;flex-wrap:wrap;gap:6px"></div>
-      </div>
-      <div id="subAdminSection" style="display:none;margin-bottom:20px">
-        <div style="font-size:.65rem;font-weight:700;text-transform:uppercase;letter-spacing:.1em;color:#555;margin-bottom:10px">Modifier le forfait (admin)</div>
-        <div style="display:flex;gap:8px;flex-wrap:wrap">
-          <button onclick="subSetPlan('')" id="subBtnNone" style="flex:1;min-width:100px;padding:10px 8px;border-radius:10px;border:1px solid #333;background:#111;color:#888;font-size:.78rem;font-weight:700;cursor:pointer;transition:.15s">🔒 Aucun</button>
-          <button onclick="subSetPlan('starter')" id="subBtnStarter" style="flex:1;min-width:100px;padding:10px 8px;border-radius:10px;border:1px solid #333;background:#111;color:#a78bfa;font-size:.78rem;font-weight:700;cursor:pointer;transition:.15s">⚡ Starter<br><span style="font-size:.65rem;font-weight:400;color:#666">15€/mois</span></button>
-          <button onclick="subSetPlan('pro')" id="subBtnPro" style="flex:1;min-width:100px;padding:10px 8px;border-radius:10px;border:1px solid #5b4fe8;background:linear-gradient(145deg,#13102e,#0f0c22);color:#a78bfa;font-size:.78rem;font-weight:700;cursor:pointer;transition:.15s">🚀 Pro<br><span style="font-size:.65rem;font-weight:400;color:#888">39€/mois</span></button>
-          <button onclick="subSetPlan('business')" id="subBtnBusiness" style="flex:1;min-width:100px;padding:10px 8px;border-radius:10px;border:1px solid #333;background:#111;color:#60a5fa;font-size:.78rem;font-weight:700;cursor:pointer;transition:.15s">🏢 Business<br><span style="font-size:.65rem;font-weight:400;color:#666">239€/mois</span></button>
+
+        <div id="subPayStatus" style="margin-top:12px;font-size:.75rem;text-align:center;color:#888;min-height:16px"></div>
+        <div style="margin-top:14px;display:flex;align-items:center;justify-content:center;gap:6px;font-size:.68rem;color:#2a2840">
+          <span>🔒</span><span>Paiement 100% sécurisé via Stripe</span><span>·</span><span>Sans engagement</span><span>·</span><span>Annule quand tu veux</span>
         </div>
-        <div id="subSaveStatus" style="margin-top:8px;font-size:.75rem;min-height:18px;text-align:center"></div>
       </div>
-      <div id="subUserSection" style="text-align:center;padding:16px 0">
-        <div style="font-size:.85rem;color:var(--t2);margin-bottom:12px">Pour changer de forfait, contacte l'administrateur.</div>
-        <a href="mailto:admin@only-chat.ai" style="display:inline-block;padding:10px 22px;background:linear-gradient(135deg,#7c3aed,#4f46e5);border-radius:10px;color:#fff;font-size:.85rem;font-weight:700;text-decoration:none">✉️ Contacter l'admin</a>
-      </div>
+
     </div>
   </div>
 
@@ -4990,6 +5119,23 @@ async function subSetPlan(plan){
     st.textContent='✓ Forfait mis à jour';st.style.color='#4ade80';
     _applyPlanRestrictions(plan||null);
   }else{st.textContent='Erreur lors de la sauvegarde';st.style.color='#f87171';}
+}
+
+async function subPayPlan(plan){
+  const st=document.getElementById('subPayStatus');
+  const btns=['subPayStarter','subPayPro','subPayBusiness'].map(id=>document.getElementById(id));
+  btns.forEach(b=>{if(b)b.disabled=true;});
+  st.textContent='Redirection vers Stripe…';st.style.color='#a78bfa';
+  try{
+    const r=await fetch('/api/stripe/checkout',{
+      method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({plan,profile_id:_activeProfileId})
+    });
+    const d=await r.json();
+    if(d.url){window.location.href=d.url;}
+    else{st.textContent='Erreur: '+(d.error||'price_id manquant');st.style.color='#f87171';}
+  }catch(e){st.textContent='Erreur réseau';st.style.color='#f87171';}
+  btns.forEach(b=>{if(b)b.disabled=false;});
 }
 
 // ── Filtre programmé/publié ────────────────────────────────────────────────
@@ -8633,6 +8779,24 @@ async function deleteRevenue(id){
 window.addEventListener('DOMContentLoaded',()=>{
   const d=document.getElementById('revDate');
   if(d)d.value=new Date().toISOString().slice(0,10);
+
+  // ── Stripe success redirect ───────────────────────────────────────────────
+  const params=new URLSearchParams(window.location.search);
+  if(params.get('checkout')==='success'){
+    const sid=params.get('sid');
+    const pid=params.get('pid');
+    if(sid&&pid){
+      fetch(`/api/stripe/verify-session?sid=${encodeURIComponent(sid)}&pid=${encodeURIComponent(pid)}`)
+        .then(r=>r.json()).then(d=>{
+          if(d.ok){
+            const info={starter:{badge:'⚡',name:'Starter'},pro:{badge:'🚀',name:'Pro'},business:{badge:'🏢',name:'Business'}}[d.plan]||{};
+            const msg=`${info.badge||'✅'} Forfait ${info.name||d.plan} activé ! Bienvenue.`;
+            setTimeout(()=>alert(msg),500);
+          }
+          window.history.replaceState({},'','/');
+        }).catch(()=>{window.history.replaceState({},'','/');});
+    }
+  }
 });
 
 // ── Status badge ───────────────────────────────────────────────────────────
